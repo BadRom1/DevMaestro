@@ -31,6 +31,35 @@ def log(**fields):
         os.close(fd)
 
 
+class RateMeter:
+    """Débit sortant du PTY, seconde par seconde (out/rate.jsonl), et copie brute (out/pty-raw.bin) rejouable."""
+
+    def __init__(self):
+        self.rate_fd = os.open(os.path.join(OUT, "rate.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        self.raw_fd = os.open(os.path.join(OUT, "pty-raw.bin"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        self.second, self.bytes, self.reads = int(time.time()), 0, 0
+
+    def add(self, data):
+        now = int(time.time())
+        if now != self.second:
+            self.flush()
+            self.second = now
+        self.bytes += len(data)
+        self.reads += 1
+        write_all(self.raw_fd, data)
+
+    def flush(self):
+        if self.reads:
+            line = json.dumps({"t": self.second, "bytes": self.bytes, "reads": self.reads}) + "\n"
+            os.write(self.rate_fd, line.encode())
+        self.bytes, self.reads = 0, 0
+
+    def close(self):
+        self.flush()
+        os.close(self.rate_fd)
+        os.close(self.raw_fd)
+
+
 def get_winsize():
     return fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8) if os.isatty(1) else None
 
@@ -106,6 +135,7 @@ def main():
         tty.setraw(0)
     stdin_open = True
     fifo_buf = b""
+    meter = RateMeter()
     try:
         while True:
             fds = [master_fd, fifo_fd] + ([0] if stdin_open else [])
@@ -123,6 +153,7 @@ def main():
                 if not data:
                     break
                 write_all(1, data)
+                meter.add(data)
             if 0 in ready:
                 data = os.read(0, 65536)
                 if data:
@@ -145,6 +176,7 @@ def main():
     except Stop:
         pass
     finally:
+        meter.close()
         if saved:
             termios.tcsetattr(0, termios.TCSAFLUSH, saved)
         os.close(fifo_fd)

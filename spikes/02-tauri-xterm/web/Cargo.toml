@@ -1,0 +1,16 @@
+[package]
+name = "bench-web"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Mode web : le même front et les mêmes scénarios dans Google Chrome, servis en HTTP + WebSocket
+# sur 127.0.0.1 (à la place de la webview WebKitGTK et de l'IPC Tauri).
+[dependencies]
+axum = { version = "0.8.9", features = ["ws"] }
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tower-http = { version = "0.7.1", features = ["fs"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
+bench-core = { path = "../core" }

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "tauri-xterm-bench",
+  "version": "0.1.0",
+  "identifier": "fr.orchestrateur.spike.tauri-xterm",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Prototype n° 2 — Tauri + xterm.js",
+        "width": 1400,
+        "height": 900,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/icon.png"]
+  }
+}

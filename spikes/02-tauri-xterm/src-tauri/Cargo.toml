@@ -1,0 +1,17 @@
+[package]
+name = "tauri-xterm-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2.7.3", features = [] }
+bench-core = { path = "../core" }
+
+[dependencies]
+tauri = { version = "2.12.4", features = [] }
+portable-pty = "0.9.0"
+bench-core = { path = "../core" }
+# Même version que celle de Tauri (la 0.19 existe, mais ses types ne seraient pas ceux de `gtk_window()`) :
+# plein écran sur un moniteur donné (`--monitor`).
+gtk = "0.18.2"

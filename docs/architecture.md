@@ -1,7 +1,7 @@
 # Architecture d'Orchestrateur
 
-> Statut : proposition validée le 2026-10-19. Prototype n° 1 concluant ([résultats](spikes/01-pty-hooks.md#résultats)) ; prototypes 2 à 4 à faire (voir § 17).
-> Décisions détaillées : [ADR 0001](adr/0001-demon-orchd.md), [ADR 0002](adr/0002-injection-des-hooks.md), [ADR 0003](adr/0003-permissions-depuis-l-app.md).
+> Statut : proposition validée le 2026-10-19. Prototype n° 1 concluant ([résultats](spikes/01-pty-hooks.md#résultats)) ; prototype n° 2 tranché en faveur d'Electron ([résultats](spikes/02-tauri-xterm.md#résultats)) ; prototypes 3 et 4 à faire (voir § 17).
+> Décisions détaillées : [ADR 0001](adr/0001-demon-orchd.md), [ADR 0002](adr/0002-injection-des-hooks.md), [ADR 0003](adr/0003-permissions-depuis-l-app.md), [ADR 0004](adr/0004-front-electron.md).
 > Maquettes : [`prototype/orchestrateur.html`](../prototype/orchestrateur.html).
 
 ## 1. Objet
@@ -23,13 +23,13 @@ Hors périmètre v1 : sessions SSH (prévues, voir § 4.4), GitLab, suivi mobile
 ## 3. Vue d'ensemble
 
 ```
-┌──────────── app (Tauri) ─────────────┐            ┌──────────────── orchd (démon Rust) ────────────────┐
+┌─────────── app (Electron) ───────────┐            ┌──────────────── orchd (démon Rust) ────────────────┐
 │ UI React + xterm.js                   │  socket    │ Superviseur de sessions                             │
 │  vues projet / statut, diff, fichiers │  Unix      │  ├─ PTY ×N → claude (profil perso | boulot)          │
 │  réglages, thèmes, dictée             │◄──────────►│  ├─ émulateur de terminal sans affichage ×N          │
-│ Rust Tauri : client du démon,         │  RPC +     │  └─ machine à états par session                      │
-│  capture audio, transcription,        │  flux PTY  │ Runners (dev, tests) dans des PTY                    │
-│  notifications, raccourcis globaux    │            │ Git, gh, détection des commandes, SQLite             │
+│ process principal : client du démon,  │  RPC +     │  └─ machine à états par session                      │
+│  notifications, raccourcis ;          │  flux PTY  │ Runners (dev, tests) dans des PTY                    │
+│  orch-voice (Rust) : audio, dictée    │            │ Git, gh, détection des commandes, SQLite             │
 └───────────────────────────────────────┘            └────────────▲───────────────────────────────▲────────┘
                                                                    │ socket local + jeton           │
                                    claude ── hook ──► `orchd hook <événement>`   claude ── statusline ──► `orchd statusline`
@@ -43,7 +43,11 @@ Il possède tout ce qui doit survivre à l'interface : les PTY des sessions et d
 
 ### 4.2 `app`, l'interface
 
-Application Tauri 2 : front React, terminaux xterm.js, côté Rust un client du démon. Elle porte aussi ce qui dépend du poste de travail et pas des sessions : notifications desktop, raccourcis globaux, capture audio et transcription.
+Application **Electron** ([ADR 0004](adr/0004-front-electron.md)) : front React, terminaux xterm.js avec le moteur WebGL, une seule fenêtre. Le processus principal Electron est le client du démon et relaie vers la page par `contextBridge` / `MessagePort` ; la page n'a pas accès à Node. Seule la session affichée est transmise à la page.
+
+L'app porte aussi ce qui dépend du poste de travail et pas des sessions : notifications desktop, raccourcis globaux, et la dictée via `orch-voice`, un petit programme Rust (capture audio, transcription locale) lancé par Electron. Il reste local même quand `orchd` sera distant.
+
+Tauri 2 a été écarté après mesure : sous Linux, il consomme 5 à 6 fois plus de CPU que Chromium à travail égal ([prototype n° 2](spikes/02-tauri-xterm.md)).
 
 ### 4.3 Relais des hooks et de la statusline
 
@@ -61,6 +65,7 @@ Toute commande passe par une notion d'**hôte** (`local` en v1). Plus tard, un `
 | Projet | Un dépôt git (identifié par son dossier commun `git rev-parse --git-common-dir`). Porte : profil par défaut, emplacement des worktrees, dépôt GitHub. |
 | Worktree | Un checkout d'une branche du projet. Emplacement configurable : à côté du dépôt, dans `.worktrees/`, ou dans un dossier géré par l'app. |
 | Session | Un processus `claude` lancé (ou repris) par l'app dans un worktree, avec un `session_id` choisi par l'app. Peut être liée à une issue. |
+| Sous-agent | Un agent lancé par Claude dans une session (outil `Agent`) : description, type, statut, durée, outils utilisés, rapport final. Alimenté par `SubagentStart` / `SubagentStop` et par les champs `agent_id` / `agent_type` des hooks (**à vérifier**, Q12 du prototype n° 1). Affiché en sous-arbre de la session et dans un onglet « Agents ». |
 | Runner | Une commande détectée (dev, test, lint…) lancée dans un worktree, avec son port. |
 | Revue | Commentaires ligne à ligne sur le diff d'une session, envoyés à Claude en un seul message. |
 | Livraison | État de fin de travail : rien, PR ouverte (avec checks CI), mergée. Déclenche la proposition de nettoyage du worktree. |
@@ -134,7 +139,7 @@ Voir [ADR 0003](adr/0003-permissions-depuis-l-app.md). En résumé :
 | Git | CLI `git` (branches, worktrees, diff, rebase, push). |
 | Forge | Interface `Forge`. Adaptateur v1 : CLI `gh` (issues et sous-issues, `pr create`, `pr checks`, merge). Réutilise l'authentification de l'utilisateur, aucun token stocké. GitLab plus tard via `glab`. |
 | Runners | Détection dans `package.json`, `Makefile`, `justfile`, `Cargo.toml`, `go.mod`, `docker-compose`. Exécution en PTY. Un `PORT` attribué par worktree ; les URL `localhost:` sont repérées dans les logs. |
-| Aperçu web | D'abord une iframe sur `localhost` dans la webview (règle CSP `frame-src`) ; webview Tauri séparée seulement si l'iframe ne suffit pas. |
+| Aperçu web | D'abord une iframe sur `localhost` dans la page (règle CSP `frame-src`) ; vue web Electron séparée (`WebContentsView`) seulement si l'iframe ne suffit pas. |
 | Fichiers | Arborescence du worktree, rendu Markdown avec sommaire, mention `@fichier` vers la session. |
 | Notifications | Notification desktop par l'app ; le son reste à peon-ping. |
 
@@ -147,7 +152,7 @@ Interface `QuotaSource`, résultat par profil, chaque fenêtre (5 h, 7 jours) po
 
 ## 12. Dictée vocale
 
-- Côté app (Rust Tauri) : capture `cpal`, détection de parole, transcription locale.
+- Dans `orch-voice`, programme Rust local lancé par Electron : capture `cpal`, détection de parole, transcription locale. Il envoie le texte au processus principal Electron.
 - Modèles : Parakeet TDT 0.6B v3 par défaut (via ONNX), Whisper via `whisper-rs`. La bibliothèque d'inférence Parakeet reste à choisir au prototype n° 4 ; licence compatible obligatoire (pas de reprise de code AGPL).
 - Dictée rapide : push-to-talk ou enregistrement, au choix. Longue dictée : transcription au fil de l'eau, relecture optionnelle, préambule optionnel.
 - Audio conservé seulement si demandé, en Opus/Ogg.
@@ -167,7 +172,7 @@ Interface `QuotaSource`, résultat par profil, chaque fenêtre (5 h, 7 jours) po
 
 - Socket Unix, trames préfixées par leur longueur, avec un octet de type : JSON-RPC 2.0 (requêtes, réponses, notifications d'état) ou octets bruts d'un PTY (identifiant de session + données).
 - L'app s'abonne aux sessions affichées ; le démon pousse les changements d'état à tous les clients.
-- Côté front, le Rust Tauri relaie vers la webview par des canaux IPC Tauri.
+- Côté front, le processus principal Electron relaie vers la page par `MessagePort` (octets du terminal en binaire, par lots d'au moins ~1 Ko ou toutes les ~16 ms).
 
 ## 15. Sécurité
 
@@ -187,9 +192,11 @@ crates/
     src/adapters/          portable_pty, git_cli, gh_cli, sqlite, quota_statusline, quota_usage
     src/daemon/            superviseur, protocole, socket
     src/relay/             `orchd hook` et `orchd statusline`
-  app/                     Tauri 2
-    src/                   client du démon, audio, transcription, raccourcis, notifications
-    ui/                    React + xterm.js
+  voice/                   binaire `orch-voice` : capture audio, transcription locale
+app/                       Electron
+  main/                    processus principal : client du démon, notifications, raccourcis, lancement d'orch-voice
+  preload/                 pont contextBridge vers la page
+  renderer/                React + xterm.js (WebGL)
 docs/                      architecture, ADR, plans des prototypes
 prototype/                 maquettes HTML
 spikes/                    prototypes techniques jetables
@@ -202,7 +209,7 @@ Le domaine ne dépend d'aucun adaptateur. Les tests du domaine rejouent des év�
 | N° | Question | Si la réponse est non |
 |---|---|---|
 | 1 | Les hooks d'un plugin passé par `--plugin-dir` s'ajoutent-ils à ceux de l'utilisateur ? `PermissionRequest` peut-il attendre l'app, et que montre la TUI pendant ce temps ? La statusline se chaîne-t-elle ? `AskUserQuestion` est-il visible ? | Revoir l'ADR 0002 ou 0003 avant toute ligne de code. Plan : [spikes/01](spikes/01-pty-hooks.md). |
-| 2 | Tauri + WebKitGTK + xterm.js tient-il 10 sessions qui affichent en continu ? | Passer le front sur Electron, en gardant React et le démon. |
+| 2 | ✅ Tranché : Tauri + WebKitGTK ne tient pas (CPU 5 à 6 fois celui de Chromium sous Linux, limite GTK3). Front en Electron ([ADR 0004](adr/0004-front-electron.md)). Reste à vérifier : Electron en Wayland natif, CPU à 165 Hz. | — |
 | 3 | Raccourcis globaux avec l'événement « touche relâchée » sous GNOME Wayland (le poste de référence) ? Point de départ : étudier comment Murmure a contourné ce problème (s'inspirer de l'approche, pas du code, qui est sous AGPL). | Push-to-talk seulement quand la fenêtre a le focus ; mode enregistrement en global. |
 | 4 | Parakeet en Rust sur la machine de référence : latence, CPU ou GPU ? | Whisper par défaut. |
 
@@ -216,7 +223,35 @@ Le domaine ne dépend d'aucun adaptateur. Les tests du domaine rejouent des év�
 | v0.4 | Livraison : PR, merge dans main, suivi de la CI |
 | v0.5 | Dictée vocale |
 
-## 19. Questions ouvertes
+## 19. Extensibilité par plugins (à concevoir)
+
+Besoin exprimé le 2026-10-19 : que chacun puisse ajouter ses outils. Premiers cas :
+
+- **Graphify** : graphe de connaissances du code (local, MIT, sorties `graph.json` / `graph.html`). Un onglet « Impact » montrerait les modules touchés par le diff d'une session, et une recherche dans le graphe.
+- **API d'un projet d'équipe** : un connecteur propre à une équipe.
+
+Piste à valider avant la v0.3 (ADR à écrire) :
+
+- **Points d'extension** = ce qui est déjà un port ou une zone d'interface : onglets de session, panneaux latéraux, actions sur une session ou un fichier, badges dans la barre latérale, sources de données (`Forge`, `QuotaSource`…).
+- **Plugin = processus séparé**, dans n'importe quel langage, qui parle JSON-RPC sur stdio avec `orchd`, et déclare ce qu'il apporte dans un manifeste. Son interface s'affiche dans une iframe isolée, avec une petite API (session courante, worktree, diff, envoyer un message à Claude).
+- **Permissions déclarées** dans le manifeste (lecture du diff, écriture dans une session, réseau…) et acceptées par l'utilisateur.
+- **Côté Claude** : un plugin peut aussi fournir un plugin Claude Code (skills, MCP), injecté par `--plugin-dir` comme le nôtre.
+
+**Graphe de code (analyse d'impact)**, étudié le 2026-10-19 :
+
+| | Graphify | CodeGraph | GitNexus |
+|---|---|---|---|
+| Licence | MIT | MIT | **PolyForm Noncommercial** |
+| Stockage | `graph.json` / `graph.html` | SQLite local, réindexation automatique | LadybugDB |
+| Impact | requêtes | `impact`, `affected` | `impact` avec confiance, `detect_changes` depuis un diff git |
+| Visualisation | `graph.html` prêt à afficher | aucune | interface web |
+| Accès pour l'app | lire le JSON | CLI `--json`, bibliothèque npm | CLI, MCP HTTP, serveur HTTP |
+
+Piste retenue : un port `CodeGraphProvider` (entrée : diff d'une session ; sortie : symboles et fichiers touchés avec profondeur d'impact, recherche). **Premier adaptateur : CodeGraph** (MIT, SQLite lisible, appelable depuis Node), télémétrie désactivée et sans son installeur (qui modifie `CLAUDE.md` et les permissions) : son serveur MCP est injecté par notre plugin, session par session. **GitNexus** (licence non commerciale) et **Graphify** restent des plugins optionnels installés par l'utilisateur, jamais embarqués.
+
+Conséquence immédiate : garder les ports du domaine et les zones de l'interface assez génériques pour accueillir des contributions, sans construire le système de plugins avant d'en avoir deux vrais cas.
+
+## 20. Questions ouvertes
 
 - Licence : FSL ou AGPL + CLA (non tranché).
 - Faut-il lancer `orchd` comme service systemd utilisateur dès la v0.1 ?

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Prototype n° 2 — Tauri + xterm.js</title>
+  </head>
+  <body>
+    <header>
+      <span id="status">Démarrage…</span>
+      <span id="toolbar" hidden>
+        <select id="layout">
+          <option value="single">1 terminal (S1–S3)</option>
+          <option value="grid">10 terminaux (S4)</option>
+        </select>
+        <select id="renderer">
+          <option value="dom">DOM</option>
+          <option value="webgl">WebGL</option>
+        </select>
+        <button id="burst">Pic 5 Mo</button>
+        <button id="switch">Session suivante</button>
+        <label><input id="typing" type="checkbox" checked /> frappe simulée</label>
+      </span>
+    </header>
+    <main id="terms"></main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

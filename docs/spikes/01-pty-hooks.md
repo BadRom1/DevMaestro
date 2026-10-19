@@ -20,6 +20,7 @@
 | Q9 | Shift+Tab envoyé dans le PTY change-t-il le mode, et le `permission_mode` du hook suivant le reflète-t-il ? | architecture § 9 |
 | Q10 | Avec `CLAUDE_CONFIG_DIR=~/.claude-work`, tout fonctionne-t-il pareil (et sur quel compte part la session) ? | architecture § 5 |
 | Q11 | Quels événements arrivent, dans quel ordre, pour un tour simple, une permission, une question, une interruption, une fin de session ? | machine à états § 5.1 |
+| Q12 | (ajoutée le 2026-10-19) `SubagentStart` / `SubagentStop` se déclenchent-ils en mode interactif, avec quels champs ? Les hooks d'un sous-agent portent-ils `agent_id` / `agent_type` ? Chaque sous-agent a-t-il son transcript ? | Suivi des sous-agents (architecture § 5) |
 
 ## Outillage
 

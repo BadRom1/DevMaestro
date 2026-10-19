@@ -1,0 +1,11 @@
+html, body { margin: 0; height: 100%; background: #11111b; color: #cdd6f4; font: 13px system-ui, sans-serif; }
+body { display: flex; flex-direction: column; }
+header { display: flex; gap: 16px; align-items: center; padding: 4px 8px; background: #181825; flex-wrap: wrap; }
+#status { font-variant-numeric: tabular-nums; }
+#toolbar { display: inline-flex; gap: 8px; align-items: center; }
+/* Taille fixée par main.ts (boîte identique dans les deux moteurs), centrée. */
+#terms { flex: none; box-sizing: border-box; margin: 4px auto 0; display: grid; gap: 2px; padding: 2px; }
+#terms.single { grid-template: 1fr / 1fr; }
+#terms.grid { grid-template: repeat(2, 1fr) / repeat(5, 1fr); }
+.cell { min-width: 0; min-height: 0; overflow: hidden; background: #1e1e2e; }
+#toolbar[hidden] { display: none; }
