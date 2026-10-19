@@ -44,6 +44,8 @@ pub fn pending_json(p: &Pending) -> Value {
             "kind": "permission",
             "tool_name": p.tool_name,
             "tool_input": p.tool_input,
+            "suggestions": p.suggestions,
+            "always_rules": crate::domain::decision::always_rules(p),
         }),
         Pending::Question(q) => json!({
             "kind": "question",
@@ -66,9 +68,12 @@ pub fn pending_json(p: &Pending) -> Value {
     }
 }
 
-pub fn pending_request_json(r: &PendingRequest) -> Value {
+/// Demande en attente. `answerable` : un relais `PermissionRequest` attend
+/// la décision, l'app peut donc y répondre.
+pub fn pending_request_json(r: &PendingRequest, answerable: bool) -> Value {
     json!({
         "request_id": r.id.0,
+        "answerable": answerable,
         "pending": pending_json(&r.pending),
         "tool_use_id": r.tool_use_id,
         "agent_id": r.agent_id,
@@ -105,6 +110,7 @@ fn resolution_str(how: Resolution) -> &'static str {
         Resolution::Denied => "denied",
         Resolution::Superseded => "superseded",
         Resolution::Cleared => "cleared",
+        Resolution::AnsweredByApp => "answered_by_app",
     }
 }
 

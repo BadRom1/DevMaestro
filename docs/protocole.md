@@ -2,11 +2,21 @@
 
 > Contrat entre le démon `orchd` et ses clients : le front Electron (lot 4), le client de mise au point `orchd ctl` et les relais `orchd hook` / `orchd statusline`.
 > Version du protocole : **1** (renvoyée par `hello`). Code : `crates/core/src/protocol/`, `crates/core/src/daemon/server.rs`.
-> Références : [architecture § 4, § 7, § 9, § 14, § 15](architecture.md), [ADR 0001](adr/0001-demon-orchd.md), [ADR 0002](adr/0002-injection-des-hooks.md).
+> Références : [architecture § 4, § 7, § 9, § 14, § 15](architecture.md), [ADR 0001](adr/0001-demon-orchd.md), [ADR 0002](adr/0002-injection-des-hooks.md), [ADR 0003](adr/0003-permissions-depuis-l-app.md).
 
 ## 1. Transport
 
-- Socket Unix `$XDG_RUNTIME_DIR/devmaestro/orchd.sock` (repli si la variable est absente : `$TMPDIR/devmaestro-<uid>/`, sinon `/tmp/devmaestro-<uid>/`). Le dossier est en `0700`, le socket en `0600`. Aucun port TCP.
+Deux sockets Unix dans `$XDG_RUNTIME_DIR/devmaestro/` (repli si la variable est absente : `$TMPDIR/devmaestro-<uid>/`, sinon `/tmp/devmaestro-<uid>/`). Le dossier est en `0700`, les sockets en `0600`. Aucun port TCP.
+
+| Socket | Qui s'y connecte | Trames acceptées | Contrôle |
+|---|---|---|---|
+| `orchd.sock` (contrôle) | le front, `orchd ctl` | JSON-RPC (`0x01`), entrée de PTY (`0x03`) | contrôle du pair à l'acceptation (§ 10) ; refus = connexion fermée sans réponse |
+| `relay.sock` (relais) | `orchd hook`, `orchd statusline` (lancés par Claude Code) | hook (`0x10`), statusline (`0x11`) | jeton de la session dans chaque trame, et le pair doit être un processus de cette session (§ 10) ; sinon la trame est ignorée (l’expéditeur reçoit quand même l’accusé `0x12`, « sans décision » pour un `PermissionRequest`) |
+
+Sur les **deux** sockets, une trame d'un type **inconnu** est ignorée (compatibilité ascendante) ; une trame d'un type **connu** mais inattendu sur ce socket (par exemple JSON-RPC sur `relay.sock`, hook sur `orchd.sock`, ou une trame que seul le démon envoie : `0x02`, `0x12`, `0x13`) **ferme la connexion**.
+
+Seul le chemin de `relay.sock` est passé aux processus `claude` (`ORCH_SOCKET`).
+
 - Un seul démon par utilisateur : verrou `flock` sur `orchd.lock` dans le même dossier. Un second `orchd daemon` sort aussitôt en erreur (« un autre démon orchd tourne déjà »).
 - Le chemin du socket doit tenir dans `sun_path` (108 octets sous Linux).
 
@@ -22,7 +32,7 @@ Chaque message est une trame :
 
 - `longueur` compte les octets **qui suivent** : l'octet de type plus la charge utile (une trame vide de charge vaut donc `1`).
 - `longueur` vaut au moins 1 et au plus 16 Mio ; au-delà, le démon ferme la connexion.
-- Un type inconnu est ignoré par le destinataire (compatibilité ascendante).
+- Un type inconnu est ignoré par le destinataire (compatibilité ascendante) ; un type connu inattendu sur un socket ferme la connexion (§ 1).
 - Une trame mal formée (longueur nulle ou trop grande, UUID tronqué, chaîne de hook tronquée ou non UTF-8, trame coupée) **ferme la connexion** : le démon ne cherche pas à se resynchroniser au milieu d'un flux.
 
 | Type | Nom | Sens | Charge utile |
@@ -32,7 +42,8 @@ Chaque message est une trame :
 | `0x03` | entrée PTY | client → démon | UUID de session (16 octets) + octets à écrire dans le terminal (touches, collage) |
 | `0x10` | hook | relais → démon | jeton, nom d'événement, JSON brut (voir ci-dessous) |
 | `0x11` | statusline | relais → démon | jeton, JSON brut |
-| `0x12` | accusé | démon → relais | vide |
+| `0x12` | accusé | démon → relais | vide ; après un hook ou une statusline (appliqués ou ignorés) ; pour `PermissionRequest` : relais libéré **sans décision** |
+| `0x13` | décision | démon → relais | JSON de sortie du hook `PermissionRequest`, à écrire tel quel (§ 8) |
 
 Chaînes des trames `0x10` et `0x11` : longueur `u16` gros-boutiste puis octets UTF-8.
 
@@ -64,6 +75,12 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `-32002` | état incompatible (session qui tourne encore, qui ne tourne pas, démon qui s'arrête, file d'entrée pleine) |
 | `-32003` | profil inconnu |
 | `-32004` | lancement impossible (binaire `claude` introuvable, écriture du plugin, PTY) |
+| `-32005` | mode dangereux refusé : `bypassPermissions` ou `dontAsk` sans `allow_dangerous_modes = true` (§ 9) |
+| `-32010` | demande inconnue ou déjà close (répondue dans la TUI, fin de tour, session arrêtée…) |
+| `-32011` | mauvais genre de demande (répondre à une question avec `answerPermission`, ou l'inverse) |
+| `-32012` | aucun relais n'attend la décision : demande sans détails (connue par une notification), délai du relais dépassé, ou relais pas encore rattaché (voir `answerable`) ; répondre dans le terminal |
+| `-32013` | « Toujours » impossible : aucune règle proposée par Claude Code (`always_rules` vide) |
+| `-32014` | `sessions.setMode` impossible : mode courant inconnu ou hors du cycle de Shift+Tab, ou mode visé hors du cycle |
 
 ## 4. Méthodes
 
@@ -74,14 +91,16 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `projects.resolve` | `{path}` | `{path, is_git, root, worktree_root, common_dir, branch, name}` (voir ci-dessous) |
 | `sessions.list` | — | `{sessions: [Session]}`, de la plus récente à la plus ancienne |
 | `sessions.get` | `{id}` | `{session: Session}` |
-| `sessions.launch` | `{cwd, profile?, model?, mode?, prompt?, cols?, rows?}` | `{session: Session}` |
-| `sessions.resume` | `{id}` ou `{claude_session_id, cwd?, profile?}`, plus `{mode?, model?, prompt?, cols?, rows?}` | `{session: Session}` |
+| `sessions.launch` | `{cwd, profile?, model?, mode?, prompt?, cols?, rows?}` | `{session: Session, warnings: [texte]}` |
+| `sessions.resume` | `{id}` ou `{claude_session_id, cwd?, profile?}`, plus `{mode?, model?, prompt?, cols?, rows?}` | `{session: Session, warnings: [texte]}` |
 | `sessions.subscribe` | `{id, history?}` | `{id, snapshot: Écran, history?}` puis le flux (§ 6) |
 | `sessions.unsubscribe` | `{id}` | `{unsubscribed: bool}` |
 | `sessions.resize` | `{id, cols, rows}` | `{cols, rows}` |
 | `sessions.input` | `{id, data}` | `{}` une fois le texte mis en file (texte UTF-8 ; les trames `0x03` sont préférables pour le clavier) |
 | `sessions.stop` | `{id}` | `{stopping: bool, alive: bool}` |
-| `sessions.setMode` | `{id, mode}` | **lot 3** (renvoie `-32601` pour l'instant) |
+| `sessions.setMode` | `{id, mode}` | `{sent}` : nombre de Shift+Tab envoyés (voir ci-dessous) |
+| `sessions.answerPermission` | `{id, request_id, decision: "allow" \| "allow_always" \| "deny", message?}` | `{request_id, resolved: true}` |
+| `sessions.answerQuestion` | `{id, request_id, answers: {"<texte de la question>": "<libellé>" \| ["<libellé>", …]}}` | `{request_id, resolved: true}` |
 | `transcripts.list` | `{profile?, limit?}` (50 par défaut) | `{profile, sessions: [AncienneSession]}` |
 
 Détails :
@@ -95,6 +114,32 @@ Détails :
   - avec `claude_session_id` seul : si une session arrêtée du démon porte ce `claude_session_id`, c'est elle qui est reprise ; sinon (ancienne session trouvée par `transcripts.list`) une nouvelle entrée est créée, `cwd` est alors obligatoire ;
   - les paramètres absents reprennent ceux de la session (profil, mode, modèle, taille).
 - **`sessions.stop`** envoie `SIGHUP` au groupe de processus de `claude`, puis `SIGKILL` au bout de 3 s s'il tourne encore. La réponse arrive tout de suite ; la fin est annoncée par `session.updated` (`alive: false`).
+- **`sessions.launch`, `sessions.resume`, `sessions.setMode`** refusent `bypassPermissions` et `dontAsk` (`-32005`, message en français) sauf si `allow_dangerous_modes = true` (§ 9). À la reprise, le mode retenu est vérifié même s'il n'est pas demandé : une session qui était en `bypassPermissions` n'est reprise ainsi qu'avec le réglage (sinon, passer un autre `mode`).
+- **Mode par défaut rendu explicite** : sans `mode` (et, à la reprise, sans mode connu de la session), le démon lit `permissions.defaultMode` (lecture seule) dans `<cwd>/.claude/settings.local.json`, sinon `<cwd>/.claude/settings.json`, sinon `<dossier du profil>/settings.json`. Mode trouvé et sûr : passé tel quel par `--permission-mode`. Mode dangereux sans `allow_dangerous_modes` : la session est lancée en `--permission-mode manual` et `warnings` contient un message en français (aussi au journal). Rien de trouvé : pas de `--permission-mode`. `warnings` est vide sinon.
+- **`Session.scope`** : unité du scope systemd de la session (`devmaestro-session-<8>-<8>.scope`), ou `null` si elle a été lancée directement (§ 9).
+
+### Répondre depuis l'app (ADR 0003)
+
+La TUI affiche sa propre demande pendant que le relais `PermissionRequest` attend : l'app et le terminal sont **deux canaux concurrents, la première réponse gagne**. Une réponse de l'app ferme le dialogue de la TUI (constaté au prototype n° 1).
+
+- Une demande n'est répondable depuis l'app que si `answerable` vaut `true` dans `session.updated` (un relais attend sa décision). Pour une question, la carte apparaît dès le `PreToolUse` (`answerable: false`) et devient répondable quand le `PermissionRequest` arrive (environ 0,3 s plus tard) ; répondre avant renvoie `-32012`.
+- **`sessions.answerPermission`** :
+  - `allow` → `{"behavior": "allow"}` (sans `updatedInput` : il remplacerait toute l'entrée de l'outil) ;
+  - `allow_always` → `{"behavior": "allow", "updatedPermissions": always_rules}` : les règles reprises des `permission_suggestions` de la demande (voir `always_rules` dans Demande, § 7). C'est Claude Code qui les écrit ; DevMaestro n'écrit jamais dans `~/.claude*` ni dans la configuration du projet. Sans règle : `-32013` « aucune règle proposée par Claude Code pour « Toujours » » ;
+  - `deny` → `{"behavior": "deny", "message": message}` (`message` omis s'il est vide).
+- **`sessions.answerQuestion`** : `allow` avec `updatedInput` = `tool_input` d'origine + `answers`. Chaque question de la demande doit recevoir une réponse : un libellé d'option, un texte libre, ou pour une question `multi_select` une liste de libellés, joints par `", "` (la documentation dit « joints par des virgules » ; séparateur exact **non vérifié** avec le vrai CLI). Clé inconnue, réponse manquante ou vide, liste de plusieurs libellés pour une question simple : `-32602`.
+- Erreurs communes : `-32001` session inconnue, `-32010` demande inconnue ou déjà close, `-32011` mauvais genre, `-32012` pas de relais. En cas d'erreur, rien ne change.
+- **`resolved: true`** veut dire : la décision a été **remise au relais qui attendait** (et la demande close dans le démon). Pas que Claude Code l'a appliquée : si la TUI a répondu au même moment, Claude Code garde la première réponse et ignore l'autre (constaté au prototype n° 1). La session dira ensuite ce qui s'est passé (`PostToolUse`, `Stop`…).
+- Une réponse acceptée clôt aussitôt la demande dans le démon : effet `request_resolved` avec `how: "answered_by_app"`, puis `session.updated` (la session repasse `running`). Le `PostToolUse` qui suit ne trouve plus rien à clore : une seule clôture par demande.
+- La réponse est remise aux relais (plusieurs si Claude Code a relancé le même hook : déduplication). Si la TUI a répondu entre-temps, Claude Code ignore la décision (constaté).
+
+### Changer de mode (`sessions.setMode`)
+
+**Contournement** : Claude Code n'a pas d'API pour changer le mode d'une session en cours. Le démon écrit dans le PTY autant de Shift+Tab (`ESC [ Z`) qu'il en faut pour aller du mode courant connu (dernier `permission_mode` reçu dans un hook) au mode visé, le long du cycle relevé avec **Claude Code 2.1.303** (prototype n° 1, Q9) : `default` (`manual`) → `acceptEdits` → `plan` → `auto` → `default`.
+
+- Réponse immédiate `{sent: n}` (`0` si la session est déjà dans ce mode) ; la **confirmation** vient du `permission_mode` du hook suivant (champ `mode` de `session.updated`).
+- Erreurs : `-32014` si le mode courant est inconnu (aucun hook ne l'a encore porté) ou hors du cycle (`bypassPermissions`, `dontAsk`…), ou si le mode visé est hors du cycle ; `-32002` si la session ne tourne pas ou si une demande attend (Shift+Tab agirait sur le dialogue de la TUI) ; `-32005` pour un mode dangereux sans réglage.
+- Après un `setMode` qui envoie au moins une touche, le démon attend la confirmation : un second `setMode` est refusé (`-32002`) jusqu'au prochain hook qui porte un `permission_mode` (ou 3 s sans hook ; le calcul repart alors du dernier mode confirmé). Un hook qui rapporte un autre mode que celui visé est journalisé. Le cycle peut changer avec la version de Claude Code ou les modes disponibles.
 
 ## 5. Notifications du démon
 
@@ -110,10 +155,13 @@ Pour un client lent, les `session.updated` en attente d'une même session sont *
 
 ```json
 {"type": "notify_waiting", "request_id": 1, "pending": Demande}
-{"type": "request_resolved", "request_id": 1, "how": "answered|failed|denied|superseded|cleared"}
+{"type": "request_resolved", "request_id": 1, "how": "answered|answered_by_app|failed|denied|superseded|cleared"}
 {"type": "clear_waiting"}
 {"type": "possibly_stale", "request_ids": [1, 2]}
+{"type": "dangerous_mode_detected", "mode": "bypassPermissions"}
 ```
+
+`dangerous_mode_detected` : un hook rapporte `bypassPermissions` ou `dontAsk` alors que le démon ne les autorise pas (Shift+Tab dans la TUI, réglage hors de portée du démon…). Le démon ne peut pas l'empêcher : il le signale (une fois par passage dans ce mode) et le journalise.
 
 `notify_waiting` est le signal d'une notification desktop (lot 5). `request_id` est propre à la session.
 
@@ -158,8 +206,8 @@ Règles :
   "status": {"state": "starting|running|waiting|idle|error|stopped",
              "wait": "permission|question",          // si waiting
              "reason": "prompt_input_exit"},         // si stopped
-  "pending": [{"request_id": 1, "pending": Demande, "tool_use_id": "toolu_…",
-               "agent_id": null, "since": "RFC 3339"}],
+  "pending": [{"request_id": 1, "answerable": true, "pending": Demande,
+               "tool_use_id": "toolu_…", "agent_id": null, "since": "RFC 3339"}],
   "possibly_stale": false,
   "metrics": {"model": {"id": "…", "display_name": "…"}, "cost_usd": 0.22,
               "context_used_pct": 3, "context_window_size": 1000000, "total_tokens": 26720,
@@ -168,6 +216,7 @@ Règles :
   "last_activity": "RFC 3339",          // dernier hook reçu
   "created_at": "RFC 3339", "updated_at": "RFC 3339",
   "alive": true, "pid": 1234,           // processus claude en cours
+  "scope": "devmaestro-session-1a2b3c4d-5e6f7a8b.scope" | null,   // scope systemd (§ 9)
   "last_exit": {"code": 0} | {"signal": "Hangup"} | null,
   "size": {"cols": 100, "rows": 30}
 }
@@ -188,12 +237,18 @@ Un processus sorti avec un code non nul ou tué par un signal inattendu, sans `S
 ### Demande
 
 ```json
-{"kind": "permission", "tool_name": "Bash", "tool_input": {…}}
+{"kind": "permission", "tool_name": "Bash", "tool_input": {…},
+ "suggestions": [PermissionUpdate, …],     // permission_suggestions reçues, brutes
+ "always_rules": [PermissionUpdate, …]}    // ce que « Toujours » enverra (vide : bouton indisponible)
 {"kind": "question", "tool_name": "AskUserQuestion", "tool_input": {…},
  "questions": [{"question": "…", "header": "…", "multi_select": false,
                 "options": [{"label": "…", "description": "…"}]}]}
 {"kind": "permission" | "question", "detailed": false}     // connue seulement par une Notification
 ```
+
+`answerable` (dans `pending`) : un relais `PermissionRequest` attend la décision ; l'app peut répondre.
+
+`always_rules` : les `suggestions` de type `addRules`, de comportement `allow`, vers `session`, `localSettings` (`.claude/settings.local.json`) ou `projectSettings` (`.claude/settings.json`). Les autres sont écartées : changement de mode (« Toujours » ne fait jamais passer en `acceptEdits` ou `auto`), dossiers, règles `deny`/`ask`, et `userSettings` (`~/.claude/settings.json` : « Toujours pour ce projet » ne touche pas à la configuration de l'utilisateur). Exemple d'entrée : `{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm test"}], "behavior": "allow", "destination": "localSettings"}`.
 
 ### Profil, ancienne session
 
@@ -209,25 +264,65 @@ Lancés par Claude Code, avec l'environnement du processus `claude` :
 
 | Variable | Valeur |
 |---|---|
-| `ORCH_SOCKET` | chemin du socket |
+| `ORCH_SOCKET` | chemin du socket **des relais** (`relay.sock`) ; celui de contrôle n'est jamais passé |
 | `ORCH_TOKEN` | jeton de 16 octets tirés du générateur aléatoire du système (`getrandom`), en hexadécimal (32 caractères), propre au processus `claude` en cours ; renouvelé à chaque reprise |
 | `ORCH_SESSION` | identifiant interne de la session (information, jamais utilisé pour authentifier) |
 
+Toute autre variable `ORCH_*` ou `DEVMAESTRO_*` héritée du démon est retirée de l'environnement de `claude`.
+
 Le démon rattache une trame à sa session **par le jeton** (comparé en temps constant), jamais par le `session_id` du JSON (qui change sur `/clear`). Jeton inconnu (session terminée, faux jeton) : trame ignorée.
 
-- **`orchd hook <événement>`** lit stdin, envoie une trame `0x10`, attend l'accusé `0x12` (envoyé une fois l'événement appliqué : les hooks d'une session sont traités dans l'ordre où Claude Code les lance), puis sort. Budget total : 1 s, 0,5 s pour `SessionEnd` (qui partage 1,5 s avec les hooks de fin de l'utilisateur). Il n'écrit **jamais** rien et sort **toujours** en 0 : démon absent, variable manquante, JSON illisible, délai dépassé, tout est silencieux. Au lot 2, `PermissionRequest` est relayé sans décision (la TUI garde la main) ; au lot 3, le démon répondra sur la même connexion.
-- **`orchd statusline --config-dir <dossier du profil>`** envoie une trame `0x11` sans attendre de réponse (300 ms au plus), lance la statusline de l'utilisateur (`statusLine.command` de `<dossier>/settings.json`, par `sh -c` dans son propre groupe de processus, même stdin) et affiche sa sortie. Au bout de 2 s (commande trop lente, ou descendant en arrière-plan qui garde la sortie ouverte), tout le groupe est tué et le relais affiche ce qui a été écrit jusque-là ; à défaut, une ligne `DevMaestro · contexte 3 % · 0,22 $`. La variable `DEVMAESTRO_STATUSLINE_CHAINED` posée pour la statusline de l'utilisateur empêche une boucle.
+- **`orchd hook <événement>`** (sauf `PermissionRequest`) lit stdin, envoie une trame `0x10`, attend l'accusé `0x12` (envoyé une fois l'événement appliqué : les hooks d'une session sont traités dans l'ordre où Claude Code les lance), puis sort. Budget total : 1 s, 0,5 s pour `SessionEnd` (qui partage 1,5 s avec les hooks de fin de l'utilisateur). Il n'écrit **jamais** rien et sort **toujours** en 0 : démon absent, variable manquante, JSON illisible, délai dépassé, tout est silencieux.
+- **`orchd hook PermissionRequest --wait <s>`** (relais bloquant, ADR 0003) :
+  1. envoie la trame `0x10` et garde la connexion ouverte ;
+  2. le démon applique l'événement, puis rattache le relais à la demande créée ou retrouvée (même demande déjà connue : il s'y ajoute) ; la demande passe `answerable: true` ;
+  3. réponse de l'app → trame `0x13` : le relais écrit ce JSON (suivi d'un saut de ligne) sur sa sortie standard, puis sort en 0. Forme : `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow" | "deny", …}}}` (§ 4) ;
+  4. libération **sans décision** → trame `0x12`, rien n'est écrit, sortie en 0 : demande close par un autre chemin (`PostToolUse` après une réponse dans la TUI, `PostToolUseFailure`, `PermissionDenied`, `Stop`, `StopFailure`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`), processus `claude` terminé, session arrêtée, arrêt du démon (les relais sont libérés dès le début de l'arrêt), ou trame que le démon ne peut rattacher (jeton inconnu, JSON illisible, session arrêtée) ;
+  5. délai `--wait` dépassé ou démon disparu (fin de connexion) : rien n'est écrit, sortie en 0. Le démon voit la connexion se fermer et détache le relais (`answerable: false`) ; la demande reste affichée (la TUI la montre toujours).
+
+  Le relais n'autorise **jamais** rien de lui-même. Le `timeout` du hook est écrit dans `hooks.json` (600 s, le défaut de Claude Code) et `--wait` vaut ce délai moins une marge (5 s ; un quart du délai, au moins 1 s, pour un délai court) : le relais rend la main avant que Claude Code ne le tue. La variable `DEVMAESTRO_PERMISSION_TIMEOUT_SECS` du **démon** (2 à 3600) change ce délai, pour les tests ; elle n'est jamais transmise à `claude`.
+- **`orchd statusline --config-dir <dossier du profil>`** envoie une trame `0x11` et attend l'accusé `0x12` (300 ms au plus, en parallèle de la suite : le démon vérifie que l'expéditeur, encore vivant, est un processus de la session), lance la statusline de l'utilisateur (`statusLine.command` de `<dossier>/settings.json`, par `sh -c` dans son propre groupe de processus, même stdin) et affiche sa sortie. Au bout de 2 s (commande trop lente, ou descendant en arrière-plan qui garde la sortie ouverte), tout le groupe est tué et le relais affiche ce qui a été écrit jusque-là ; à défaut, une ligne `DevMaestro · contexte 3 % · 0,22 $`. La variable `DEVMAESTRO_STATUSLINE_CHAINED` posée pour la statusline de l'utilisateur empêche une boucle.
 
 Fichiers générés (au démarrage du démon et avant chaque lancement) :
 
-- `$XDG_DATA_HOME/devmaestro/claude-plugin/` : `.claude-plugin/plugin.json` et `hooks/hooks.json`, où chaque événement (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied`, `Notification`, `Stop`, `StopFailure`, `SessionEnd`, `SubagentStart`, `SubagentStop`) appelle `<orchd> hook <événement>` en forme exec (`command` + `args`) ; matcher `*` pour les événements d'outil ;
-- `$XDG_DATA_HOME/devmaestro/settings/<profil>.json` : `{"statusLine": {"type": "command", "command": "'<orchd>' statusline --config-dir '<dossier>'"}}`.
+- `$XDG_DATA_HOME/devmaestro/claude-plugin/` : `.claude-plugin/plugin.json` et `hooks/hooks.json`, où chaque événement (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied`, `Notification`, `Stop`, `StopFailure`, `SessionEnd`, `SubagentStart`, `SubagentStop`) appelle `<orchd> hook <événement>` en forme exec (`command` + `args`) ; matcher `*` pour les événements d'outil ; `PermissionRequest` porte en plus `"timeout": 600` et `args: ["hook", "PermissionRequest", "--wait", "595"]` ;
+- `$XDG_DATA_HOME/devmaestro/settings/<profil>.json` : `{"statusLine": {"type": "command", "command": "'<orchd>' statusline --config-dir '<dossier>'"}}`, plus `"permissions": {"disableBypassPermissionsMode": "disable"}` quand `allow_dangerous_modes` est faux (Claude Code refuse alors d'entrer en `bypassPermissions` ; ce verrou applique la valeur la plus stricte de toutes les sources). Il n'existe pas de verrou équivalent pour `dontAsk` (qui refuse, au lieu d'autoriser, tout ce qui demanderait une permission).
 
 ## 9. Cycle de vie et persistance
 
+- **Scope systemd** : si `systemd-run --user --scope` fonctionne au démarrage du démon (gestionnaire systemd utilisateur joignable ; désactivable par `DEVMAESTRO_SYSTEMD_SCOPE=off`), chaque lancement devient `systemd-run --user --scope --quiet --collect --unit=devmaestro-session-<id8>-<alea8>.scope -- claude …` : `systemd-run` s'inscrit dans le scope puis exécute `claude` à sa place (même pid, même PTY, même environnement et dossier). Sinon, lancement direct. Le mode est écrit au journal au démarrage et dans `Session.scope`. Pour les tests seulement, `DEVMAESTRO_SYSTEMD_RUNTIME_DIR` donne à `systemd-run` le vrai `XDG_RUNTIME_DIR` quand celui du démon est temporaire.
 - Lancement : `claude (--session-id <uuid> | --resume <id>) [--permission-mode <mode>] [--model <m>] --plugin-dir <plugin> --settings <réglages du profil> [-- "<prompt>"]` dans un PTY, `cwd` = le dossier demandé, avec `TERM=xterm-256color`, `COLORTERM=truecolor`, les variables du § 8, et `CLAUDE_CONFIG_DIR` pour les profils autres que `default` (retiré de l'environnement hérité pour `default`). Le mode `default` s'écrit `manual` sur la ligne de commande. Le binaire vient de `DEVMAESTRO_CLAUDE_BIN`, sinon du `PATH` du démon. Le prompt suit `--` (fin des options façon commander.js, d'après `claude --help`) : un prompt comme `--dangerously-skip-permissions` ou `- liste` n'est pas lu comme une option. **À vérifier avec le vrai CLI** : que `--` est accepté et qu'un prompt égal au nom d'une sous-commande (`mcp`, `update`…) n'est pas lancé comme telle.
 - À la fin du processus `claude`, son groupe de processus reçoit `SIGHUP` (outils restés en arrière-plan), comme à la fermeture d'un terminal.
-- Les sessions sont enregistrées dans `$XDG_DATA_HOME/devmaestro/state.db` (SQLite, WAL, `synchronous=NORMAL`) : identifiants, profil, dossiers, branche, modèle, mode, statut, dates, pid. Écriture à chaque changement de statut ou de champ ; une session qui ne change que par sa dernière activité est réécrite au plus toutes les 30 s. Le schéma est versionné (`PRAGMA user_version`, migrations pas à pas) : une base d'une version plus récente est refusée (le démon ne démarre pas, message en français) ; une base illisible ou corrompue est renommée `state.db.corrupt-<horodatage>` et remplacée par une base vide (avertissement au journal).
+- Les sessions sont enregistrées dans `$XDG_DATA_HOME/devmaestro/state.db` (SQLite, WAL, `synchronous=NORMAL`) : identifiants, profil, dossiers, branche, modèle, mode, statut, dates, pid, et (schéma v2) date de démarrage du processus et scope systemd. Au redémarrage après un plantage, les processus `claude` relus dont des processus vivent encore (eux-mêmes, ou d'autres dans leur groupe ou leur session) restent refusés au socket de contrôle (§ 10). Écriture à chaque changement de statut ou de champ ; une session qui ne change que par sa dernière activité est réécrite au plus toutes les 30 s. Le schéma est versionné (`PRAGMA user_version`, migrations pas à pas) : une base d'une version plus récente est refusée (le démon ne démarre pas, message en français) ; une base illisible ou corrompue est renommée `state.db.corrupt-<horodatage>` et remplacée par une base vide (avertissement au journal).
 - Droits : dossiers `$XDG_RUNTIME_DIR/devmaestro`, `$XDG_DATA_HOME/devmaestro` et `$XDG_STATE_HOME/devmaestro` en 0700 (refusés s'ils sont un lien symbolique ou appartiennent à un autre utilisateur), base, journal, plugin et réglages en 0600.
 - **Arrêter le démon termine les sessions** : `SIGTERM`, `SIGINT` ou `SIGHUP` → `SIGHUP` à chaque session (le socket reste ouvert pour recevoir les `SessionEnd`), `SIGKILL` au bout de 3 s, puis fin. Un second signal pendant cet arrêt envoie `SIGKILL` à toutes les sessions et sort aussitôt. Les sessions restent reprenables. Après un plantage du démon, les sessions qui étaient en démarrage, en cours, à répondre ou inactives sont relues arrêtées (`daemon_restart`) ; celles déjà arrêtées ou en erreur sont relues telles quelles (statut et date inchangés).
 - Journal : sortie d'erreur et `$XDG_STATE_HOME/devmaestro/orchd.log`.
+- Réglages du démon (facultatifs, jamais écrits par lui) : `$XDG_CONFIG_HOME/devmaestro/config.toml` (repli `~/.config/devmaestro/config.toml`), lu **une fois au démarrage** : un changement demande de redémarrer le démon (l'app le fera après avoir changé le réglage). Seule clé : `allow_dangerous_modes = true | false` (faux par défaut) : autorise `bypassPermissions` et `dontAsk` au lancement, à la reprise et par `sessions.setMode`. Fichier absent, illisible ou invalide : valeurs par défaut (avertissement au journal). L'app l'exposera plus tard comme un réglage explicite.
+
+## 10. Modèle de menace
+
+**Frontière de confiance : l'utilisateur.** Le démon, l'app, `claude` et tout ce que `claude` exécute tournent sous le même uid. Les droits (`0700` / `0600`) protègent des **autres** utilisateurs ; ils n'arrêtent pas un processus de l'utilisateur.
+
+### Ce qui est protégé (défense en profondeur)
+
+**Une session ne pilote pas le démon.** Un processus `claude` supervisé, et tout ce qu'il lance (une commande Bash détournée par une injection de prompt, par exemple), ne doit pas pouvoir lancer une session en `bypassPermissions`, taper dans une autre session, ni approuver ses propres demandes (`sessions.answerPermission`).
+
+- **Deux sockets** : `claude` ne reçoit que le chemin de `relay.sock`, qui n'accepte que des trames de hook et de statusline.
+- **Socket de contrôle, pair refusé** (contrôles faits à chaque connexion, dans l'ordre) :
+  1. uid différent de celui du démon, ou pair non identifiable (`SO_PEERCRED`) ;
+  2. pair dans un **scope systemd de session** (`/proc/<pid>/cgroup` contient `devmaestro-session-…scope`). L'appartenance à un cgroup survit à `setsid`, aux doubles forks et au rattachement à `init` : en sortir demande un appel **délibéré** à `systemd-run` (ou l'écriture dans un autre cgroup de l'utilisateur). Seulement quand les sessions sont lancées dans un scope (§ 9) ;
+  3. `ORCH_TOKEN=` ou `ORCH_SESSION=` dans l'environnement du pair (`/proc/<pid>/environ`) : un descendant qui n'a pas nettoyé son environnement. Un environnement illisible ne fait pas refuser (un processus peut aussi simplement retirer ces variables) ;
+  4. pair = processus `claude` supervisé, actuel, passé, ou relu en base après un plantage du démon, ou l'un de ses descendants : chaîne des parents remontée dans `/proc`, et à chaque étape groupe et session comparés à ceux des sessions (lancées par `setsid` : pid = groupe = session). Les processus supervisés sont identifiés par leur date de démarrage : un pid réattribué depuis ne fait pas refuser un client légitime ; une date inconnue ne correspond à rien. Un processus supervisé disparu, dont plus aucun processus ne vit dans son groupe ni sa session, est oublié.
+  
+  Le pair est épinglé par `SO_PEERPIDFD` (noyau 6.5 et plus) : après les lectures de `/proc`, le démon vérifie que ce processus vit toujours (son pid n'a donc pas été réattribué entre l'acceptation et la fin des contrôles). Sans pidfd, la date de démarrage du pid est relue et comparée.
+- **Socket des relais** : une trame n'est acceptée que si son jeton désigne une session vivante **et** si le pair descend du processus `claude` de cette session (ou partage son scope systemd). Un processus d'une session ne peut donc rien envoyer pour une **autre** session. En revanche, un processus d'une session connaît le jeton de **sa** session et peut forger des événements pour elle (une fausse demande, une fausse fin de tour) : l'app affiche toujours le contenu exact de la demande, et « Toujours » ne reprend que les suggestions de la **première** trame d'une demande, seulement des règles qui correspondent à l'outil et à l'entrée de la demande (`toolName` égal ; pour `Bash`, `ruleContent` obligatoire, égal à la commande ou préfixe `…:*` qu'elle prolonge ; pour les outils de fichiers, `ruleContent` obligatoire, égal au chemin ou `<dossier absolu>/**` qui le contient).
+- **Environnement de `claude`** : les variables `ORCH_*` et `DEVMAESTRO_*` héritées sont retirées.
+- **Modes qui suppriment les demandes** (`bypassPermissions`, `dontAsk`) : réglage explicite du démon (§ 9), y compris quand ils viennent d'un `defaultMode` du projet ou du profil ; `bypassPermissions` verrouillé dans les réglages passés à `claude` ; passage détecté et signalé (`dangerous_mode_detected`).
+- **Le relais n'autorise jamais rien par défaut** (délai, démon absent : sortie sans décision).
+
+### Ce qui n'est pas protégé (atténuation, pas un bac à sable)
+
+- **Sans scope systemd** (pas de gestionnaire utilisateur) : un processus qui crée sa propre session (`setsid -f`) **et** nettoie son environnement n'est plus reconnu (constaté par les tests). Avec un scope, il faut en plus en sortir délibérément.
+- Un processus de l'utilisateur peut lire ses fichiers et, selon `ptrace_scope`, la mémoire de ses autres processus (dont le démon et l'app), ou écrire dans ses autres cgroups.
+- Un processus lancé par l'utilisateur **depuis** une session (par exemple l'app de développement lancée dans un terminal d'une session DevMaestro) est refusé sur le socket de contrôle : la lancer hors des sessions.
+- `orchd ctl` passe par le socket de contrôle comme le front : il fonctionne depuis un terminal ordinaire, pas depuis une session supervisée.

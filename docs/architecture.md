@@ -104,7 +104,7 @@ Git (branche, diff, worktrees) est interrogé directement, avec une surveillance
 3. lance dans un PTY, avec `cwd` = worktree :
 
 ```
-CLAUDE_CONFIG_DIR=<profil>  ORCH_SOCKET=<socket>  ORCH_TOKEN=<jeton>
+CLAUDE_CONFIG_DIR=<profil>  ORCH_SOCKET=<relay.sock>  ORCH_TOKEN=<jeton>
 claude --session-id <uuid> --permission-mode <mode> --model <modèle>
        --plugin-dir <plugin orchestrateur> --settings <statusline chaînée>
        "<prompt initial>"
@@ -168,7 +168,7 @@ Interface `QuotaSource`, résultat par profil, chaque fenêtre (5 h, 7 jours) po
 | Plugin Claude Code généré | `$XDG_DATA_HOME/devmaestro/claude-plugin/` | plugin Claude Code |
 | Réglages générés (statusline chaînée) | `$XDG_DATA_HOME/devmaestro/settings/<profil>.json` | JSON |
 | Journal du démon | `$XDG_STATE_HOME/devmaestro/orchd.log` | texte |
-| Socket | `$XDG_RUNTIME_DIR/devmaestro/orchd.sock` | droits 0600 |
+| Sockets | `$XDG_RUNTIME_DIR/devmaestro/orchd.sock` (contrôle) et `relay.sock` (relais), voir [protocole § 1 et § 10](protocole.md) | droits 0600 |
 
 ## 14. Protocole entre l'app et le démon
 
@@ -250,6 +250,8 @@ Piste à valider avant la v0.3 (ADR à écrire) :
 | Accès pour l'app | lire le JSON | CLI `--json`, bibliothèque npm | CLI, MCP HTTP, serveur HTTP |
 
 Piste retenue : un port `CodeGraphProvider` (entrée : diff d'une session ; sortie : symboles et fichiers touchés avec profondeur d'impact, recherche). **Premier adaptateur : CodeGraph** (MIT, SQLite lisible, appelable depuis Node), télémétrie désactivée et sans son installeur (qui modifie `CLAUDE.md` et les permissions) : son serveur MCP est injecté par notre plugin, session par session. **GitNexus** (licence non commerciale) et **Graphify** restent des plugins optionnels installés par l'utilisateur, jamais embarqués.
+
+**Graphicle** (ajouté le 2026-10-19 ; Apache-2.0, binaire Rust unique, SQLite, HTTP et MCP sur 127.0.0.1, sans télémétrie) : portage en Rust du moteur de Graphify, avec en plus une **mémoire de projet** rattachée aux fonctions, marquée périmée quand le code change, et dont les entrées proposées par un agent attendent la validation d'un humain ; impact des PR via `gh`. Très jeune (version 0.1, une vingtaine de commits) et `setup` intrusif (modifie `AGENTS.md`, installe des hooks). Candidat pour un second adaptateur et pour un plugin « mémoire de projet », à réévaluer avant la v0.3.
 
 Conséquence immédiate : garder les ports du domaine et les zones de l'interface assez génériques pour accueillir des contributions, sans construire le système de plugins avant d'en avoir deux vrais cas.
 

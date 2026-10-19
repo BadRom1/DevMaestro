@@ -1,7 +1,9 @@
 //! `orchd statusline [--config-dir <dossier>]` : statusline chaînée (ADR 0002).
 //!
-//! 1. lit le JSON de la statusline sur stdin et l'envoie au démon, sans
-//!    attendre de réponse ;
+//! 1. lit le JSON de la statusline sur stdin et l'envoie au démon, en
+//!    attendant son accusé (300 ms au plus, en parallèle de l'étape 2) : le
+//!    démon vérifie que l'expéditeur est un processus de la session, ce qui
+//!    demande qu'il vive encore ;
 //! 2. lance la statusline de l'utilisateur pour ce profil
 //!    (`statusLine.command` de `<dossier du profil>/settings.json`), avec le
 //!    même JSON sur stdin, par `sh -c`, au plus [`USER_TIMEOUT`] ;
@@ -43,7 +45,9 @@ pub fn run(config_dir: Option<PathBuf>) {
             let deadline = Instant::now() + FORWARD_BUDGET;
             Some(std::thread::spawn(move || {
                 let frame = Frame::Statusline { token, json };
-                let _ = send_frame(Path::new(&socket), &frame, false, deadline);
+                // L'accusé garde le relais en vie le temps que le démon
+                // vérifie qu'il vient bien de la session (socket des relais).
+                let _ = send_frame(Path::new(&socket), &frame, true, deadline);
             }))
         }
         _ => None,

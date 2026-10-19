@@ -30,6 +30,9 @@ enum Cmd {
         /// Nom de l'événement (SessionStart, Stop…).
         #[arg(value_name = "ÉVÉNEMENT")]
         event: Option<String>,
+        /// PermissionRequest : attente maximale de la décision, en secondes.
+        #[arg(long, value_name = "SECONDES")]
+        wait: Option<u64>,
     },
     /// Relais de la statusline (lancé par les réglages générés).
     Statusline {
@@ -39,7 +42,7 @@ enum Cmd {
     },
     /// Petit client du démon, pour les vérifications à la main.
     Ctl {
-        /// Socket du démon (par défaut $XDG_RUNTIME_DIR/devmaestro/orchd.sock).
+        /// Socket de contrôle du démon (par défaut $XDG_RUNTIME_DIR/devmaestro/orchd.sock).
         #[arg(long, value_name = "CHEMIN")]
         socket: Option<PathBuf>,
         #[command(subcommand)]
@@ -231,7 +234,16 @@ fn main() -> ExitCode {
         Some("hook") => {
             std::panic::set_hook(Box::new(|_| {}));
             let event = args.get(2).and_then(|a| a.to_str()).map(str::to_owned);
-            let _ = std::panic::catch_unwind(|| relay::hook::run(event.as_deref()));
+            // `--wait <secondes>` (PermissionRequest) : 1 à 3600 s, sinon ignoré.
+            let wait = match (args.get(3).and_then(|a| a.to_str()), args.get(4)) {
+                (Some("--wait"), Some(n)) => n
+                    .to_str()
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .filter(|n| (1..=3600).contains(n))
+                    .map(std::time::Duration::from_secs),
+                _ => None,
+            };
+            let _ = std::panic::catch_unwind(|| relay::hook::run(event.as_deref(), wait));
             return ExitCode::SUCCESS;
         }
         Some("statusline") => {
@@ -274,8 +286,8 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Cmd::Daemon => daemon::run_foreground(),
         // Déjà traités plus haut ; gardés pour l'aide.
-        Cmd::Hook { event } => {
-            relay::hook::run(event.as_deref());
+        Cmd::Hook { event, .. } => {
+            relay::hook::run(event.as_deref(), None);
             Ok(())
         }
         Cmd::Statusline { config_dir } => {
@@ -283,6 +295,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         Cmd::Ctl { socket, command } => {
+            // Socket de contrôle ; refusé depuis une session supervisée.
             let socket = socket.unwrap_or_else(|| Paths::from_env().socket());
             ctl::run(&socket, ctl_command(command))
         }

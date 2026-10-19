@@ -2,8 +2,11 @@
 //! PTY, garde leur état et leur écran, et sert les clients sur un socket Unix.
 //!
 //! - une seule instance par utilisateur (verrou `orchd.lock`) ;
-//! - socket `$XDG_RUNTIME_DIR/devmaestro/orchd.sock`, dossier en 0700,
-//!   socket en 0600 ;
+//! - deux sockets dans `$XDG_RUNTIME_DIR/devmaestro` (dossier en 0700,
+//!   sockets en 0600) : `orchd.sock` pour les clients (front, `orchd ctl`),
+//!   refusé aux sessions supervisées et à leurs descendants ([`peer`]), et
+//!   `relay.sock` pour les relais de hooks et de statusline (seules les
+//!   trames de hook et de statusline y sont acceptées) ;
 //! - journal sur la sortie d'erreur et dans `$XDG_STATE_HOME/devmaestro/orchd.log` ;
 //! - arrêt propre sur `SIGTERM`, `SIGINT` ou `SIGHUP` : chaque session reçoit
 //!   `SIGHUP` (puis `SIGKILL` si elle traîne) ; un second signal pendant
@@ -13,7 +16,9 @@
 pub mod claude_config;
 pub mod launch;
 pub(crate) mod log;
+pub mod peer;
 pub mod server;
+pub mod settings;
 pub mod supervisor;
 pub mod terminal;
 
@@ -40,13 +45,60 @@ pub fn default_config(paths: Paths) -> Result<Config, String> {
         .and_then(|p| p.canonicalize())
         .map_err(|e| format!("chemin du binaire orchd introuvable : {e}"))?;
     Ok(Config {
-        paths,
         orchd_exe,
         claude_bin_env: std::env::var_os("DEVMAESTRO_CLAUDE_BIN"),
         path_env: std::env::var_os("PATH"),
         exit_grace: Duration::from_millis(500),
         stop_timeout: Duration::from_secs(3),
+        // Réglage réservé aux tests : jamais transmis aux processus `claude`.
+        permission_timeout_secs: std::env::var("DEVMAESTRO_PERMISSION_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|n| (2..=3600).contains(n))
+            .unwrap_or(claude_config::DEFAULT_PERMISSION_TIMEOUT_SECS),
+        allow_dangerous_modes: settings::DaemonSettings::load(&paths.config_file())
+            .allow_dangerous_modes,
+        systemd_run: detect_systemd_scope(),
+        systemd_runtime_dir: std::env::var_os("DEVMAESTRO_SYSTEMD_RUNTIME_DIR"),
+        paths,
     })
+}
+
+/// `systemd-run`, si `DEVMAESTRO_SYSTEMD_SCOPE` ne vaut pas `off` et qu'un
+/// scope de test se lance (gestionnaire systemd utilisateur joignable) en
+/// moins de 3 s ; sinon `None` (lancement direct).
+fn detect_systemd_scope() -> Option<PathBuf> {
+    if std::env::var("DEVMAESTRO_SYSTEMD_SCOPE").is_ok_and(|v| v == "off") {
+        return None;
+    }
+    let bin = std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|d| d.join("systemd-run"))
+        .find(|p| p.is_file())?;
+    let mut probe = std::process::Command::new(&bin);
+    if let Some(dir) = std::env::var_os("DEVMAESTRO_SYSTEMD_RUNTIME_DIR") {
+        probe.env("XDG_RUNTIME_DIR", dir);
+    }
+    let mut child = probe
+        .args(["--user", "--scope", "--quiet", "--collect", "--", "true"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success().then_some(bin),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 /// Lance le démon au premier plan, jusqu'à un signal d'arrêt.
@@ -98,6 +150,16 @@ async fn run(paths: Paths) -> Result<(), String> {
         );
     }
     let config = default_config(paths.clone())?;
+    match &config.systemd_run {
+        Some(bin) => info!(
+            "sessions lancées chacune dans un scope systemd ({} --user --scope)",
+            bin.display()
+        ),
+        None => info!("pas de gestionnaire systemd utilisateur : sessions lancées directement"),
+    }
+    if config.allow_dangerous_modes {
+        log::warning!("allow_dangerous_modes = true : bypassPermissions et dontAsk autorisés");
+    }
     let deps = Deps {
         pty: Box::new(NativePty),
         vcs: Box::new(GitCli::default()),
@@ -111,21 +173,22 @@ async fn run(paths: Paths) -> Result<(), String> {
     daemon.restore();
 
     let socket = paths.socket();
-    // Le verrou est pris : un socket présent est celui d'un démon mort.
-    let _ = std::fs::remove_file(&socket);
-    let listener = UnixListener::bind(&socket)
-        .map_err(|e| format!("écoute sur {} : {e}", socket.display()))?;
-    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("droits du socket : {e}"))?;
+    let relay_socket = paths.relay_socket();
+    let listener = bind_private(&socket)?;
+    let relay_listener = bind_private(&relay_socket)?;
     info!(
-        "orchd {} à l'écoute sur {} (pid {})",
+        "orchd {} à l'écoute sur {} (relais : {}) (pid {})",
         env!("CARGO_PKG_VERSION"),
         socket.display(),
+        relay_socket.display(),
         std::process::id()
     );
 
     let accept_daemon = daemon.clone();
     let accept = tokio::spawn(async move { accept_loop(accept_daemon, listener).await });
+    let relay_daemon = daemon.clone();
+    let accept_relays =
+        tokio::spawn(async move { accept_relay_loop(relay_daemon, relay_listener).await });
 
     wait_for_stop_signal().await?;
     info!("signal d'arrêt reçu");
@@ -141,7 +204,9 @@ async fn run(paths: Paths) -> Result<(), String> {
         }
     }
     accept.abort();
+    accept_relays.abort();
     remove_socket(&socket);
+    remove_socket(&relay_socket);
     info!("orchd arrêté");
     Ok(())
 }
@@ -154,14 +219,56 @@ fn remove_socket(socket: &PathBuf) {
     }
 }
 
+/// Écoute sur un socket en 0600. Le verrou est pris : un socket présent est
+/// celui d'un démon mort.
+fn bind_private(path: &PathBuf) -> Result<UnixListener, String> {
+    let _ = std::fs::remove_file(path);
+    let listener =
+        UnixListener::bind(path).map_err(|e| format!("écoute sur {} : {e}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("droits du socket {} : {e}", path.display()))?;
+    Ok(listener)
+}
+
+/// Socket de contrôle : chaque pair est vérifié ([`peer::check`]) avant
+/// d'être servi ; un refus ferme la connexion sans rien envoyer.
 async fn accept_loop(daemon: Arc<Daemon>, listener: UnixListener) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(server::handle_connection(daemon.clone(), stream));
+                // Les lectures de /proc se font hors du runtime.
+                let d = daemon.clone();
+                let verdict = tokio::task::spawn_blocking(move || {
+                    let peer = peer::Peer::of(&stream)?;
+                    d.check_control_peer(&peer).map(|()| stream)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("contrôle du pair : {e}")));
+                match verdict {
+                    Ok(stream) => {
+                        tokio::spawn(server::handle_connection(daemon.clone(), stream));
+                    }
+                    Err(why) => log::warning!("connexion au socket de contrôle refusée : {why}"),
+                }
             }
             Err(e) => {
                 error!("accept : {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+/// Socket des relais : authentification par jeton, trames de hook et de
+/// statusline seulement.
+async fn accept_relay_loop(daemon: Arc<Daemon>, listener: UnixListener) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                tokio::spawn(server::handle_relay_connection(daemon.clone(), stream));
+            }
+            Err(e) => {
+                error!("accept (relais) : {e}");
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }

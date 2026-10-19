@@ -43,6 +43,11 @@
 //! | `StopFailure` | toutes retirées (`Cleared`) | → `Error` |
 //! | `SessionEnd` | toutes retirées (`Cleared`) | → `Stopped { reason }` |
 //! | `SubagentStart`, `SubagentStop`, autres | inchangées | inchangée |
+//! | Réponse de l'app ([`SessionState::resolve_by_app`]) | retire **cette** demande (`AnsweredByApp`) | → `Running` |
+//!
+//! [`apply_tracked`] indique en plus, pour un `PermissionRequest` (et le
+//! `PreToolUse` d'`AskUserQuestion`), la demande créée ou retrouvée : c'est
+//! à elle que le démon rattache le relais bloquant (ADR 0003).
 //!
 //! Une session `Stopped` n'en sort que par un `SessionStart` (reprise) ; les
 //! autres événements tardifs (y compris un `UserPromptSubmit`) ne mettent à
@@ -150,6 +155,9 @@ pub enum Resolution {
     /// Fin de tour, nouveau prompt, fin de session, ou attente sans détails
     /// devenue caduque.
     Cleared,
+    /// Répondue depuis l'app (`sessions.answerPermission`,
+    /// `sessions.answerQuestion`) : la décision part par le relais.
+    AnsweredByApp,
 }
 
 /// Ce que le démon doit faire après un événement.
@@ -218,6 +226,31 @@ impl SessionState {
         self.possibly_stale
     }
 
+    /// Demande en attente portant cet identifiant.
+    pub fn pending_request(&self, id: RequestId) -> Option<&PendingRequest> {
+        self.pending.iter().find(|r| r.id == id)
+    }
+
+    /// La demande `id` a reçu une réponse de l'app (la décision part par son
+    /// relais) : elle est retirée (`AnsweredByApp`) et Claude reprend
+    /// (`Running`). `None` si elle n'attend plus (déjà close, ou inconnue).
+    ///
+    /// La clôture est datée comme les autres : une `Notification`
+    /// `permission_prompt` en retard ne recrée pas d'attente sans détails.
+    pub fn resolve_by_app(&mut self, id: RequestId, now: OffsetDateTime) -> Option<Vec<Effect>> {
+        let index = self.pending.iter().position(|r| r.id == id)?;
+        let mut fx = Vec::new();
+        self.remove(index, Resolution::AnsweredByApp, now, &mut fx);
+        if !self.is_stopped() {
+            self.activity = SessionStatus::Running;
+        }
+        if self.pending.is_empty() {
+            self.possibly_stale = false;
+            fx.push(Effect::ClearWaiting);
+        }
+        Some(fx)
+    }
+
     fn add(
         &mut self,
         pending: Pending,
@@ -225,7 +258,7 @@ impl SessionState {
         agent_id: Option<String>,
         now: OffsetDateTime,
         fx: &mut Vec<Effect>,
-    ) {
+    ) -> RequestId {
         self.next_id += 1;
         let id = RequestId(self.next_id);
         fx.push(Effect::NotifyWaiting {
@@ -239,6 +272,7 @@ impl SessionState {
             agent_id,
             since: now,
         });
+        id
     }
 
     fn remove(&mut self, index: usize, how: Resolution, now: OffsetDateTime, fx: &mut Vec<Effect>) {
@@ -320,7 +354,8 @@ impl SessionState {
         }
     }
 
-    /// Nouvelle demande détaillée, sauf si la même attend déjà.
+    /// Nouvelle demande détaillée, sauf si la même attend déjà. Renvoie
+    /// l'identifiant de la demande, nouvelle ou retrouvée.
     fn request(
         &mut self,
         pending: Pending,
@@ -329,7 +364,7 @@ impl SessionState {
         agent_id: Option<String>,
         now: OffsetDateTime,
         fx: &mut Vec<Effect>,
-    ) {
+    ) -> RequestId {
         let same = self.pending.iter_mut().find(|r| {
             r.pending.tool_name() == Some(call.tool_name.as_str())
                 && same_origin(&r.tool_use_id, &tool_use_id)
@@ -341,7 +376,10 @@ impl SessionState {
             if existing.tool_use_id.is_none() {
                 existing.tool_use_id = tool_use_id;
             }
-            return;
+            // Les suggestions de « Toujours » sont celles de la **première**
+            // trame : une trame suivante (relance du hook, ou trame forgée
+            // par un processus de la session) ne les remplace jamais.
+            return existing.id;
         }
         let kind = pending.kind();
         self.remove_where(
@@ -350,7 +388,7 @@ impl SessionState {
             now,
             fx,
         );
-        self.add(pending, tool_use_id, agent_id, now, fx);
+        self.add(pending, tool_use_id, agent_id, now, fx)
     }
 
     /// Clôture d'un appel d'outil : retire sa demande, s'il y en a une.
@@ -493,14 +531,33 @@ impl SessionState {
 
 /// Applique un événement de hook à l'état d'une session. Voir les règles du module.
 pub fn apply(state: &mut SessionState, event: &HookEvent, now: OffsetDateTime) -> Vec<Effect> {
+    apply_tracked(state, event, now).effects
+}
+
+/// Résultat de [`apply_tracked`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Applied {
+    pub effects: Vec<Effect>,
+    /// Pour un `PermissionRequest` (ou un `PreToolUse` d'`AskUserQuestion`) :
+    /// la demande à laquelle il se rattache, nouvelle ou déjà connue. C'est
+    /// à elle que le démon accroche le relais qui attend la décision.
+    pub request: Option<RequestId>,
+}
+
+/// Comme [`apply`], en indiquant la demande créée ou retrouvée.
+pub fn apply_tracked(state: &mut SessionState, event: &HookEvent, now: OffsetDateTime) -> Applied {
     state.last_activity = Some(now);
     if let Some(mode) = &event.common.permission_mode {
         state.permission_mode = Some(mode.clone());
     }
     let is_session_start = matches!(event.kind, HookKind::SessionStart { .. });
     if matches!(state.activity, SessionStatus::Stopped { .. }) && !is_session_start {
-        return Vec::new();
+        return Applied {
+            effects: Vec::new(),
+            request: None,
+        };
     }
+    let mut request = None;
 
     let was_waiting = !state.pending.is_empty();
     let agent_id = event.common.agent_id.clone();
@@ -518,14 +575,14 @@ pub fn apply(state: &mut SessionState, event: &HookEvent, now: OffsetDateTime) -
             if call.tool_name == ASK_USER_QUESTION {
                 state.remember(call, true);
                 let tool_use_id = call.tool_use_id.clone();
-                state.request(
+                request = Some(state.request(
                     question_from(call),
                     call,
                     tool_use_id,
                     agent_id,
                     now,
                     &mut fx,
-                );
+                ));
             } else {
                 state.remember(call, false);
                 state.clear_undetailed(now, &mut fx);
@@ -542,9 +599,10 @@ pub fn apply(state: &mut SessionState, event: &HookEvent, now: OffsetDateTime) -
                 Pending::Permission(PermissionPending {
                     tool_name: call.tool_name.clone(),
                     tool_input: call.tool_input.clone(),
+                    suggestions: call.permission_suggestions.clone(),
                 })
             };
-            state.request(pending, call, tool_use_id, agent_id, now, &mut fx);
+            request = Some(state.request(pending, call, tool_use_id, agent_id, now, &mut fx));
         }
         HookKind::PostToolUse(call) => state.close(call, Resolution::Answered, now, &mut fx),
         HookKind::PostToolUseFailure {
@@ -585,7 +643,10 @@ pub fn apply(state: &mut SessionState, event: &HookEvent, now: OffsetDateTime) -
             fx.push(Effect::ClearWaiting);
         }
     }
-    fx
+    Applied {
+        effects: fx,
+        request,
+    }
 }
 
 fn kind_index(kind: WaitKind) -> usize {

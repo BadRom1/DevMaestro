@@ -4,309 +4,17 @@
 //! reprise, relecture de la base après un plantage, arrêt propre.
 //!
 //! Aucun vrai `claude`, aucun réseau : dossiers XDG et `HOME` temporaires.
+mod common;
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use devmaestro_core::protocol::{Frame, read_frame, request, write_frame};
+use common::*;
 use serde_json::{Value, json};
 use uuid::Uuid;
-
-const ORCHD: &str = env!("CARGO_BIN_EXE_orchd");
-const FAKE: &str = env!("CARGO_BIN_EXE_devmaestro-fake-claude");
-const TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Dossiers temporaires d'un test.
-struct Env {
-    _root: tempfile::TempDir,
-    // Le socket doit tenir dans sun_path (108 octets) : dossier court dans /tmp.
-    _run: tempfile::TempDir,
-    home: PathBuf,
-    run: PathBuf,
-    data: PathBuf,
-    state: PathBuf,
-    proj: PathBuf,
-    fake_log: PathBuf,
-    claude_bin: PathBuf,
-}
-
-impl Env {
-    fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
-        let run = tempfile::Builder::new()
-            .prefix("dm")
-            .tempdir_in("/tmp")
-            .unwrap();
-        let r = root.path().canonicalize().unwrap();
-        let home = r.join("home");
-        std::fs::create_dir_all(home.join(".claude")).unwrap();
-        std::fs::write(home.join(".claude/settings.json"), "{}").unwrap();
-        // Profil « work » avec sa propre statusline, pour vérifier le chaînage.
-        std::fs::create_dir_all(home.join(".claude-work/projects")).unwrap();
-        std::fs::write(
-            home.join(".claude-work/settings.json"),
-            r#"{"statusLine":{"type":"command","command":"echo statusline-utilisateur-work"}}"#,
-        )
-        .unwrap();
-        let proj = r.join("projet");
-        std::fs::create_dir_all(&proj).unwrap();
-        Self {
-            home,
-            run: run.path().to_path_buf(),
-            data: r.join("data"),
-            state: r.join("state"),
-            fake_log: r.join("fake-claude.log"),
-            claude_bin: PathBuf::from(FAKE),
-            proj,
-            _root: root,
-            _run: run,
-        }
-    }
-
-    fn socket(&self) -> PathBuf {
-        self.run.join("devmaestro/orchd.sock")
-    }
-
-    fn command(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(ORCHD);
-        c.args(args)
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("HOME", &self.home)
-            .env("XDG_RUNTIME_DIR", &self.run)
-            .env("XDG_DATA_HOME", &self.data)
-            .env("XDG_STATE_HOME", &self.state)
-            .env("DEVMAESTRO_CLAUDE_BIN", &self.claude_bin)
-            .env("FAKE_CLAUDE_LOG", &self.fake_log)
-            // Doit être retiré pour le profil par défaut.
-            .env("CLAUDE_CONFIG_DIR", "/ne/doit/pas/arriver");
-        c
-    }
-
-    fn start_daemon(&self) -> DaemonProc {
-        let child = self
-            .command(&["daemon"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let start = Instant::now();
-        while UnixStream::connect(self.socket()).is_err() {
-            assert!(start.elapsed() < TIMEOUT, "le démon ne démarre pas");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        DaemonProc(child)
-    }
-
-    fn fake_launches(&self) -> Vec<Value> {
-        std::fs::read_to_string(&self.fake_log)
-            .unwrap_or_default()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect()
-    }
-}
-
-/// Démon lancé par le test, tué s'il reste à la fin (même sur panique).
-struct DaemonProc(Child);
-
-impl DaemonProc {
-    fn signal(&self, sig: nix::sys::signal::Signal) {
-        nix::sys::signal::kill(nix::unistd::Pid::from_raw(self.0.id() as i32), sig).unwrap();
-    }
-
-    fn wait(&mut self) -> std::process::ExitStatus {
-        let start = Instant::now();
-        loop {
-            if let Some(s) = self.0.try_wait().unwrap() {
-                return s;
-            }
-            assert!(start.elapsed() < TIMEOUT, "le démon ne s'arrête pas");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-}
-
-impl Drop for DaemonProc {
-    fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-}
-
-/// Client de test : lit les trames dans un fil, garde notifications et sorties.
-struct Client {
-    stream: UnixStream,
-    rx: mpsc::Receiver<Frame>,
-    next_id: u64,
-    notifications: Vec<Value>,
-    pty: HashMap<Uuid, Vec<u8>>,
-    responses: HashMap<u64, Value>,
-}
-
-impl Client {
-    fn connect(env: &Env) -> Self {
-        let stream = UnixStream::connect(env.socket()).unwrap();
-        let mut reader = stream.try_clone().unwrap();
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            while let Ok(Some(frame)) = read_frame(&mut reader) {
-                if tx.send(frame).is_err() {
-                    break;
-                }
-            }
-        });
-        Self {
-            stream,
-            rx,
-            next_id: 1,
-            notifications: Vec::new(),
-            pty: HashMap::new(),
-            responses: HashMap::new(),
-        }
-    }
-
-    fn pump(&mut self, wait: Duration) -> bool {
-        let frame = match self.rx.recv_timeout(wait) {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
-        match frame {
-            Frame::Rpc(bytes) => {
-                let v: Value = serde_json::from_slice(&bytes).unwrap();
-                if let Some(id) = v.get("id").and_then(Value::as_u64) {
-                    self.responses.insert(id, v);
-                } else {
-                    self.notifications.push(v);
-                }
-            }
-            Frame::PtyOutput { session, data } => {
-                self.pty.entry(session).or_default().extend(data);
-            }
-            other => panic!("trame inattendue : {other:?}"),
-        }
-        true
-    }
-
-    fn call_raw(&mut self, method: &str, params: Value) -> Value {
-        let id = self.next_id;
-        self.next_id += 1;
-        write_frame(&mut self.stream, &Frame::rpc(&request(id, method, params))).unwrap();
-        let start = Instant::now();
-        loop {
-            if let Some(v) = self.responses.remove(&id) {
-                return v;
-            }
-            assert!(start.elapsed() < TIMEOUT, "pas de réponse à {method}");
-            self.pump(Duration::from_millis(50));
-        }
-    }
-
-    fn call(&mut self, method: &str, params: Value) -> Value {
-        let v = self.call_raw(method, params);
-        assert!(v.get("error").is_none(), "{method} : {v}");
-        v["result"].clone()
-    }
-
-    fn input(&mut self, id: Uuid, data: &[u8]) {
-        write_frame(
-            &mut self.stream,
-            &Frame::PtyInput {
-                session: id,
-                data: data.to_vec(),
-            },
-        )
-        .unwrap();
-    }
-
-    /// Attend qu'une condition sur l'état du client soit vraie.
-    fn wait_until(&mut self, what: &str, mut cond: impl FnMut(&Self) -> bool) {
-        let start = Instant::now();
-        while !cond(self) {
-            assert!(
-                start.elapsed() < TIMEOUT,
-                "délai dépassé : {what}\nstatuts vus : {:?}",
-                self.notifications
-                    .iter()
-                    .filter(|n| n["method"] == "session.updated")
-                    .map(|n| status_label(&n["params"]["session"]))
-                    .collect::<Vec<_>>()
-            );
-            self.pump(Duration::from_millis(20));
-        }
-    }
-
-    fn output_text(&self, id: Uuid) -> String {
-        String::from_utf8_lossy(self.pty.get(&id).map_or(&[][..], |v| v)).into_owned()
-    }
-
-    /// Statuts successifs de la session vus dans `session.updated`, sans répétition.
-    fn statuses(&self, id: Uuid) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for n in &self.notifications {
-            if n["method"] == "session.updated" && n["params"]["session"]["id"] == json!(id) {
-                let s = status_label(&n["params"]["session"]);
-                if out.last() != Some(&s) {
-                    out.push(s);
-                }
-            }
-        }
-        out
-    }
-
-    fn last_session(&self, id: Uuid) -> Option<Value> {
-        self.notifications
-            .iter()
-            .rev()
-            .find(|n| n["method"] == "session.updated" && n["params"]["session"]["id"] == json!(id))
-            .map(|n| n["params"]["session"].clone())
-    }
-
-    fn effects(&self, id: Uuid) -> Vec<Value> {
-        self.notifications
-            .iter()
-            .filter(|n| n["method"] == "session.effect" && n["params"]["id"] == json!(id))
-            .map(|n| n["params"]["effect"].clone())
-            .collect()
-    }
-}
-
-fn status_label(session: &Value) -> String {
-    let st = &session["status"];
-    match (
-        st["state"].as_str(),
-        st["wait"].as_str(),
-        st["reason"].as_str(),
-    ) {
-        (Some(s), Some(w), _) => format!("{s}:{w}"),
-        (Some("stopped"), _, Some(r)) => format!("stopped:{r}"),
-        (Some(s), _, _) => s.to_owned(),
-        _ => "?".into(),
-    }
-}
-
-/// `expected` apparaît-il, dans l'ordre, dans `seen` ?
-fn is_subsequence(seen: &[String], expected: &[&str]) -> bool {
-    let mut it = seen.iter();
-    expected.iter().all(|e| it.any(|s| s == e))
-}
-
-fn git_available() -> bool {
-    Command::new("git")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
 
 const TURN: &[&str] = &["running", "waiting:permission", "running", "idle"];
 
@@ -416,6 +124,16 @@ fn launch_follow_reconnect_stop_resume() {
     assert_eq!(l["CLAUDE_CONFIG_DIR"], json!(null));
     assert_eq!(l["ORCH_SESSION"], json!(id));
     assert_eq!(l["ORCH_TOKEN_present"], true);
+    // Seules les variables des relais arrivent : ni ORCH_* hérité, ni DEVMAESTRO_*.
+    let mut keys: Vec<&str> = l["env_keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["ORCH_SESSION", "ORCH_SOCKET", "ORCH_TOKEN"]);
+    assert_eq!(l["ORCH_SOCKET"], json!(env.relay_socket()));
     assert_eq!(l["TERM"], "xterm-256color");
     assert_eq!(l["COLORTERM"], "truecolor");
 
@@ -581,6 +299,10 @@ fn launch_follow_reconnect_stop_resume() {
     });
     assert!(daemon.wait().success());
     assert!(!env.socket().exists(), "socket retiré à l'arrêt");
+    assert!(
+        !env.relay_socket().exists(),
+        "socket des relais retiré à l'arrêt"
+    );
     let log = std::fs::read_to_string(env.state.join("devmaestro/orchd.log")).unwrap();
     assert!(log.contains("orchd arrêté"));
 }
@@ -630,7 +352,7 @@ fn relays_never_fail_nor_print() {
 
     // Démon présent mais jeton inconnu : rien non plus.
     let _daemon = env.start_daemon();
-    let socket = env.socket();
+    let socket = env.relay_socket();
     let (out, _) = run(
         &["hook", "Stop"],
         &[
@@ -688,21 +410,6 @@ fn relays_never_fail_nor_print() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "ligne-lente\n");
     assert!(elapsed < Duration::from_millis(3500), "{elapsed:?}");
     let _ = Path::new(missing);
-}
-
-/// Lance une session et attend qu'elle soit inactive (fin du premier tour).
-fn launch_idle(c: &mut Client, env: &Env, params: Value) -> Uuid {
-    let mut p = json!({"cwd": env.proj, "cols": 80, "rows": 24});
-    for (k, v) in params.as_object().unwrap() {
-        p[k] = v.clone();
-    }
-    let r = c.call("sessions.launch", p);
-    let id: Uuid = r["session"]["id"].as_str().unwrap().parse().unwrap();
-    c.wait_until("session inactive", |c| {
-        c.last_session(id)
-            .is_some_and(|s| status_label(&s) == "idle")
-    });
-    id
 }
 
 fn sessions_without_times(c: &mut Client) -> Value {

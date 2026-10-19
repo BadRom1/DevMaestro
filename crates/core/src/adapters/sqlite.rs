@@ -33,6 +33,13 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX sessions_claude_id ON sessions (claude_session_id);
     ",
+    // v1 → v2 : identité du processus claude (date de démarrage, scope
+    // systemd), pour refuser au socket de contrôle les processus restés
+    // d'une session après un plantage du démon.
+    "
+    ALTER TABLE sessions ADD COLUMN pid_start INTEGER;
+    ALTER TABLE sessions ADD COLUMN scope_unit TEXT;
+    ",
 ];
 
 /// Version du schéma gérée par ce binaire.
@@ -210,6 +217,8 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
         updated_at: parse_time(Some(updated)).unwrap_or(now),
         last_activity: parse_time(row.get("last_activity")?),
         pid: row.get::<_, Option<i64>>("pid")?.map(|p| p as u32),
+        pid_start: row.get::<_, Option<i64>>("pid_start")?.map(|p| p as u64),
+        scope_unit: row.get("scope_unit")?,
     }))
 }
 
@@ -218,15 +227,17 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().map_err(other)?;
         conn.execute(
             "INSERT INTO sessions (id, claude_session_id, profile, cwd, project_root, branch,
-                model, mode, status, status_reason, created_at, updated_at, last_activity, pid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                model, mode, status, status_reason, created_at, updated_at, last_activity, pid,
+                pid_start, scope_unit)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(id) DO UPDATE SET
                 claude_session_id = excluded.claude_session_id,
                 profile = excluded.profile, cwd = excluded.cwd,
                 project_root = excluded.project_root, branch = excluded.branch,
                 model = excluded.model, mode = excluded.mode, status = excluded.status,
                 status_reason = excluded.status_reason, updated_at = excluded.updated_at,
-                last_activity = excluded.last_activity, pid = excluded.pid",
+                last_activity = excluded.last_activity, pid = excluded.pid,
+                pid_start = excluded.pid_start, scope_unit = excluded.scope_unit",
             params![
                 r.id.to_string(),
                 r.claude_session_id,
@@ -242,6 +253,8 @@ impl SessionStore for SqliteStore {
                 fmt_time(r.updated_at),
                 r.last_activity.map(fmt_time),
                 r.pid.map(i64::from),
+                r.pid_start.map(|s| s as i64),
+                r.scope_unit,
             ],
         )
         .map_err(other)?;
@@ -285,6 +298,8 @@ mod tests {
             updated_at: OffsetDateTime::from_unix_timestamp(updated).unwrap(),
             last_activity: None,
             pid: Some(42),
+            pid_start: Some(1234),
+            scope_unit: Some("devmaestro-session-1.scope".into()),
         }
     }
 
@@ -367,6 +382,37 @@ mod tests {
         // Réouverture : pas de migration rejouée.
         drop(store);
         SqliteStore::open(&path).unwrap();
+    }
+
+    #[test]
+    fn migrates_a_v1_database_keeping_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, claude_session_id, profile, cwd, project_root,
+                    status, created_at, updated_at, pid)
+                 VALUES (?1, 'c', 'default', '/p', '/p', 'idle', ?2, ?2, 42)",
+                params![
+                    Uuid::from_u128(9).to_string(),
+                    fmt_time(OffsetDateTime::UNIX_EPOCH)
+                ],
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let all = store.load_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].pid, Some(42));
+        assert_eq!(all[0].pid_start, None);
+        assert_eq!(all[0].scope_unit, None);
+        let mut r = all[0].clone();
+        r.pid_start = Some(77);
+        store.upsert(&r).unwrap();
+        assert_eq!(store.load_all().unwrap()[0].pid_start, Some(77));
     }
 
     #[test]

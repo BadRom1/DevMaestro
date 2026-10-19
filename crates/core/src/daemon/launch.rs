@@ -1,7 +1,7 @@
 //! Ligne de commande et environnement du processus `claude` (architecture § 7).
 //!
 //! ```text
-//! [CLAUDE_CONFIG_DIR=<profil>] ORCH_SOCKET=… ORCH_TOKEN=… ORCH_SESSION=…
+//! [CLAUDE_CONFIG_DIR=<profil>] ORCH_SOCKET=<relay.sock> ORCH_TOKEN=… ORCH_SESSION=…
 //! claude (--session-id <uuid> | --resume <id>) --permission-mode <mode>
 //!        [--model <modèle>] --plugin-dir <plugin> --settings <réglages> ["<prompt>"]
 //! ```
@@ -11,6 +11,13 @@
 //! - `CLAUDE_CONFIG_DIR` n'est passé que pour les profils autres que le
 //!   profil par défaut, et il est **retiré** de l'environnement hérité pour
 //!   le profil par défaut (sinon Claude Code chercherait `~/.claude/.claude.json`).
+//! - `ORCH_SOCKET` est le socket des **relais** : le chemin du socket de
+//!   contrôle n'est jamais passé à `claude`. Les variables `ORCH_*` et
+//!   `DEVMAESTRO_*` héritées du démon sont retirées.
+//! - Si un gestionnaire systemd utilisateur répond, `claude` est lancé dans
+//!   un scope transitoire : `systemd-run --user --scope --quiet --collect
+//!   --unit=devmaestro-session-<id>.scope -- claude …` ; le socket de
+//!   contrôle refuse tout processus de ce cgroup (voir [`super::peer`]).
 //! - `--plugin-dir` et `--settings` sont repassés à chaque reprise : Claude
 //!   Code ne les restaure pas.
 //! - Le prompt initial vient en dernier, après `--` : `claude` analyse ses
@@ -33,6 +40,13 @@ use crate::protocol::{ENV_SESSION, ENV_SOCKET, ENV_TOKEN};
 /// lancé depuis une session Claude Code ne doit pas les transmettre). Nos
 /// variables `ORCH_*` sont, elles, toujours reposées et remplacent l'héritage.
 const INHERITED_ENV_REMOVED: &[&str] = &["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"];
+
+/// Préfixes des variables héritées du démon toujours retirées : les
+/// variables `ORCH_*` d'une autre session (si le démon a été lancé depuis une
+/// session) et les réglages `DEVMAESTRO_*` du démon (binaire `claude`,
+/// délais…), qui ne regardent pas `claude` ni ses outils. Seules les trois
+/// variables des relais sont reposées.
+const INHERITED_ENV_PREFIXES: &[&str] = &["ORCH_", "DEVMAESTRO_"];
 
 /// Nouvelle session ou reprise.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +73,24 @@ pub struct LaunchSpec<'a> {
     pub token: &'a str,
     /// Identifiant interne de la session (`ORCH_SESSION`).
     pub session: &'a str,
+    /// Noms des variables de l'environnement du démon (hérité par `claude`) :
+    /// celles de [`INHERITED_ENV_PREFIXES`] sont retirées.
+    pub inherited_env: &'a [String],
+    /// Lancement dans un scope systemd.
+    pub scope: Option<ScopeSpec<'a>>,
+}
+
+/// Scope systemd d'un lancement.
+#[derive(Debug, Clone, Copy)]
+pub struct ScopeSpec<'a> {
+    /// Binaire `systemd-run`.
+    pub systemd_run: &'a Path,
+    /// Nom de l'unité (`devmaestro-session-….scope`).
+    pub unit: &'a str,
+    /// `XDG_RUNTIME_DIR` à donner à `systemd-run` pour joindre le
+    /// gestionnaire systemd utilisateur, s'il diffère de celui du démon
+    /// (tests seulement).
+    pub runtime_dir: Option<&'a std::ffi::OsStr>,
 }
 
 /// Valeur de `--permission-mode` pour un mode.
@@ -111,12 +143,45 @@ pub fn build(spec: &LaunchSpec<'_>) -> CommandLine {
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
+    let ours = [ENV_SOCKET, ENV_TOKEN, ENV_SESSION];
+    for key in spec.inherited_env {
+        if INHERITED_ENV_PREFIXES.iter().any(|p| key.starts_with(p))
+            && !ours.contains(&key.as_str())
+            && !env_remove.contains(key)
+        {
+            env_remove.push(key.clone());
+        }
+    }
     match spec.profile.config_dir_env() {
         Some(dir) => env.push(("CLAUDE_CONFIG_DIR".into(), dir.into())),
         None => env_remove.push("CLAUDE_CONFIG_DIR".into()),
     }
+    let (program, args) = match spec.scope {
+        // `systemd-run --scope` s'inscrit dans le scope puis exécute la
+        // commande à sa place (même pid, même environnement, même dossier,
+        // même terminal).
+        Some(ScopeSpec {
+            systemd_run, unit, ..
+        }) => {
+            let mut wrapped: Vec<OsString> = vec![
+                "--user".into(),
+                "--scope".into(),
+                "--quiet".into(),
+                "--collect".into(),
+                format!("--unit={unit}").into(),
+                "--".into(),
+                spec.claude_bin.into(),
+            ];
+            wrapped.extend(args);
+            (systemd_run.to_path_buf(), wrapped)
+        }
+        None => (spec.claude_bin.to_path_buf(), args),
+    };
+    if let Some(dir) = spec.scope.and_then(|s| s.runtime_dir) {
+        env.push(("XDG_RUNTIME_DIR".into(), dir.into()));
+    }
     CommandLine {
-        program: spec.claude_bin.to_path_buf(),
+        program,
         args,
         cwd: spec.cwd.to_path_buf(),
         env,
@@ -135,7 +200,8 @@ pub fn find_claude(env_bin: Option<OsString>, path: Option<OsString>) -> Option<
         .find(|p| is_executable(p))
 }
 
-fn is_executable(p: &Path) -> bool {
+/// Fichier exécutable ?
+pub fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
@@ -158,6 +224,8 @@ mod tests {
             socket: Path::new("/run/orchd.sock"),
             token: "jeton",
             session: "interne",
+            inherited_env: &[],
+            scope: None,
         }
     }
 
@@ -213,6 +281,74 @@ mod tests {
         assert_eq!(env(&c, "TERM").unwrap(), "xterm-256color");
         assert_eq!(env(&c, "COLORTERM").unwrap(), "truecolor");
         assert!(c.env_remove.iter().any(|k| k == "CLAUDECODE"));
+    }
+
+    #[test]
+    fn inherited_control_variables_are_removed() {
+        let p = Profile::default_for("/home/u/.claude");
+        let inherited: Vec<String> = [
+            "ORCH_SOCKET",
+            "ORCH_TOKEN",
+            "ORCH_AUTRE",
+            "DEVMAESTRO_CLAUDE_BIN",
+            "DEVMAESTRO_PERMISSION_TIMEOUT_SECS",
+            "PATH",
+            "HOME",
+        ]
+        .map(String::from)
+        .to_vec();
+        let mut s = spec(
+            &p,
+            LaunchKind::New {
+                claude_session_id: "u".into(),
+            },
+        );
+        s.inherited_env = &inherited;
+        let c = build(&s);
+        for k in [
+            "ORCH_AUTRE",
+            "DEVMAESTRO_CLAUDE_BIN",
+            "DEVMAESTRO_PERMISSION_TIMEOUT_SECS",
+        ] {
+            assert!(c.env_remove.iter().any(|r| r == k), "{k}");
+        }
+        for k in ["ORCH_SOCKET", "ORCH_TOKEN", "PATH", "HOME"] {
+            assert!(!c.env_remove.iter().any(|r| r == k), "{k}");
+        }
+        assert_eq!(env(&c, "ORCH_SOCKET").unwrap(), "/run/orchd.sock");
+    }
+
+    #[test]
+    fn scope_wraps_the_command_in_systemd_run() {
+        let p = Profile::default_for("/home/u/.claude");
+        let mut s = spec(
+            &p,
+            LaunchKind::New {
+                claude_session_id: "u".into(),
+            },
+        );
+        s.scope = Some(ScopeSpec {
+            systemd_run: Path::new("/usr/bin/systemd-run"),
+            unit: "devmaestro-session-ab.scope",
+            runtime_dir: None,
+        });
+        let c = build(&s);
+        assert_eq!(c.program, Path::new("/usr/bin/systemd-run"));
+        let a = args(&c);
+        assert_eq!(
+            &a[..8],
+            [
+                "--user",
+                "--scope",
+                "--quiet",
+                "--collect",
+                "--unit=devmaestro-session-ab.scope",
+                "--",
+                "/usr/bin/claude",
+                "--session-id"
+            ]
+        );
+        assert_eq!(env(&c, "ORCH_TOKEN").unwrap(), "jeton");
     }
 
     #[test]

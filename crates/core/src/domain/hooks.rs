@@ -45,6 +45,10 @@ pub struct ToolCall {
     pub tool_input: Value,
     /// Absent de `PermissionRequest` (ADR 0003).
     pub tool_use_id: Option<String>,
+    /// `permission_suggestions` de `PermissionRequest` : les mises à jour de
+    /// permissions que Claude Code propose pour cette demande (entrées
+    /// `addRules`, `setMode`…), gardées brutes. Vide ailleurs ou si absent.
+    pub permission_suggestions: Vec<Value>,
 }
 
 /// Événement, avec ses champs propres.
@@ -235,6 +239,11 @@ fn tool_call(obj: &Map<String, Value>) -> Result<ToolCall, HookParseError> {
         tool_name: str_field(obj, "tool_name").ok_or(HookParseError::MissingField("tool_name"))?,
         tool_input: obj.get("tool_input").cloned().unwrap_or(Value::Null),
         tool_use_id: str_field(obj, "tool_use_id"),
+        permission_suggestions: obj
+            .get("permission_suggestions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
     })
 }
 
@@ -264,6 +273,26 @@ mod tests {
         assert_eq!(call.tool_name, "Bash");
         assert_eq!(call.tool_input["command"], "touch /tmp/x");
         assert_eq!(call.tool_use_id, None);
+        assert!(call.permission_suggestions.is_empty());
+    }
+
+    #[test]
+    fn keeps_permission_suggestions() {
+        let ev = HookEvent::parse(
+            &format!(
+                r#"{{"session_id":"{SID}","hook_event_name":"PermissionRequest","tool_name":"Bash",
+                "tool_input":{{"command":"rm -rf node_modules"}},
+                "permission_suggestions":[{{"type":"addRules","rules":[{{"toolName":"Bash","ruleContent":"rm -rf node_modules"}}],
+                "behavior":"allow","destination":"localSettings"}}, 3]}}"#
+            ),
+            None,
+        )
+        .unwrap();
+        let HookKind::PermissionRequest(call) = ev.kind else {
+            panic!("PermissionRequest attendu");
+        };
+        assert_eq!(call.permission_suggestions.len(), 2);
+        assert_eq!(call.permission_suggestions[0]["type"], "addRules");
     }
 
     #[test]

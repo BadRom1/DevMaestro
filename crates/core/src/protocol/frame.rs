@@ -24,8 +24,12 @@ pub mod kind {
     pub const HOOK: u8 = 0x10;
     /// Statusline, relais → démon : jeton, JSON brut.
     pub const STATUSLINE: u8 = 0x11;
-    /// Accusé de réception d'un hook, démon → relais, sans charge utile.
+    /// Accusé de réception d'un hook, démon → relais, sans charge utile. Pour
+    /// `PermissionRequest` : relais libéré **sans décision**.
     pub const ACK: u8 = 0x12;
+    /// Décision pour un relais `PermissionRequest`, démon → relais : le JSON
+    /// à écrire tel quel sur la sortie du hook.
+    pub const DECISION: u8 = 0x13;
 }
 
 /// Une trame décodée.
@@ -50,6 +54,7 @@ pub enum Frame {
         json: Vec<u8>,
     },
     Ack,
+    Decision(Vec<u8>),
     /// Type inconnu : ignoré par le destinataire.
     Unknown {
         kind: u8,
@@ -79,6 +84,7 @@ impl Frame {
             Frame::Hook { .. } => kind::HOOK,
             Frame::Statusline { .. } => kind::STATUSLINE,
             Frame::Ack => kind::ACK,
+            Frame::Decision(_) => kind::DECISION,
             Frame::Unknown { kind } => *kind,
         }
     }
@@ -92,7 +98,7 @@ impl Frame {
     pub fn encode(&self) -> Vec<u8> {
         let mut payload = Vec::new();
         match self {
-            Frame::Rpc(json) => payload.extend_from_slice(json),
+            Frame::Rpc(json) | Frame::Decision(json) => payload.extend_from_slice(json),
             Frame::PtyOutput { session, data } | Frame::PtyInput { session, data } => {
                 payload.extend_from_slice(session.as_bytes());
                 payload.extend_from_slice(data);
@@ -152,6 +158,7 @@ impl Frame {
                 }
             }
             kind::ACK => Frame::Ack,
+            kind::DECISION => Frame::Decision(payload),
             other => Frame::Unknown { kind: other },
         })
     }
@@ -264,6 +271,7 @@ mod tests {
             json: b"{}".to_vec(),
         });
         roundtrip(Frame::Ack);
+        roundtrip(Frame::Decision(br#"{"hookSpecificOutput":{}}"#.to_vec()));
     }
 
     #[test]

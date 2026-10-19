@@ -127,6 +127,10 @@ pub struct SessionRecord {
     pub updated_at: OffsetDateTime,
     pub last_activity: Option<OffsetDateTime>,
     pub pid: Option<u32>,
+    /// Date de démarrage du processus `pid` (`/proc/<pid>/stat`).
+    pub pid_start: Option<u64>,
+    /// Scope systemd de la session (`devmaestro-session-….scope`), s'il y en a un.
+    pub scope_unit: Option<String>,
 }
 
 /// Persistance des sessions.

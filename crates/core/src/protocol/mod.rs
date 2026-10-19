@@ -15,6 +15,8 @@ pub use frame::{
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Variables d'environnement passées au processus `claude` (et donc aux hooks).
+/// `ORCH_SOCKET` est le socket des **relais** (`relay.sock`), jamais celui de
+/// contrôle.
 pub const ENV_SOCKET: &str = "ORCH_SOCKET";
 pub const ENV_TOKEN: &str = "ORCH_TOKEN";
 pub const ENV_SESSION: &str = "ORCH_SESSION";
@@ -34,6 +36,20 @@ pub mod error_code {
     pub const UNKNOWN_PROFILE: i64 = -32003;
     /// Lancement impossible (binaire `claude` absent, dossier invalide…).
     pub const LAUNCH_FAILED: i64 = -32004;
+    /// Mode refusé : `bypassPermissions` ou `dontAsk` sans `allow_dangerous_modes`.
+    pub const DANGEROUS_MODE: i64 = -32005;
+    /// Demande inconnue ou déjà close (réponse venue d'ailleurs, fin de tour…).
+    pub const UNKNOWN_REQUEST: i64 = -32010;
+    /// Mauvais genre : répondre à une question comme à une permission, ou l'inverse.
+    pub const WRONG_REQUEST_KIND: i64 = -32011;
+    /// Aucun relais n'attend la décision (demande sans détails, délai du relais
+    /// dépassé, relais pas encore rattaché) : répondre dans le terminal.
+    pub const NOT_ANSWERABLE: i64 = -32012;
+    /// « Toujours » sans règle proposée par Claude Code.
+    pub const NO_SUGGESTIONS: i64 = -32013;
+    /// `sessions.setMode` impossible : mode courant inconnu ou hors du cycle
+    /// de Shift+Tab, ou mode visé hors du cycle.
+    pub const MODE_UNREACHABLE: i64 = -32014;
 }
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {

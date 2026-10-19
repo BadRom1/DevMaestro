@@ -27,6 +27,7 @@ fn call(tool: &str, input: Value, id: Option<&str>) -> ToolCall {
         tool_name: tool.into(),
         tool_input: input,
         tool_use_id: id.map(str::to_owned),
+        permission_suggestions: Vec::new(),
     }
 }
 
@@ -590,4 +591,91 @@ fn restored_state_has_no_pending_and_resumes_on_session_start() {
         t(7),
     );
     assert_eq!(s.status(), SessionStatus::Idle);
+}
+
+#[test]
+fn tracked_apply_returns_new_or_matched_request() {
+    let mut s = running();
+    let a = apply_tracked(&mut s, &pre("Bash", bash("ls"), "toolu_1"), t(1));
+    assert_eq!(a.request, None);
+    let a = apply_tracked(&mut s, &perm("Bash", bash("ls")), t(2));
+    assert_eq!(a.request, Some(RequestId(1)));
+    assert_eq!(notified(&a.effects), [RequestId(1)]);
+    // Même demande relancée : pas de nouvelle carte, même identifiant.
+    let a = apply_tracked(&mut s, &perm("Bash", bash("ls")), t(3));
+    assert_eq!(a.request, Some(RequestId(1)));
+    assert!(a.effects.is_empty());
+
+    // Question : créée au PreToolUse, retrouvée au PermissionRequest.
+    let q = json!({"questions": [{"question": "A ?", "options": [{"label": "oui"}]}]});
+    let a = apply_tracked(&mut s, &pre(ASK_USER_QUESTION, q.clone(), "toolu_q"), t(4));
+    assert_eq!(a.request, Some(RequestId(2)));
+    let a = apply_tracked(&mut s, &perm(ASK_USER_QUESTION, q), t(5));
+    assert_eq!(a.request, Some(RequestId(2)));
+    assert!(a.effects.is_empty());
+    assert_eq!(s.pending().len(), 2);
+}
+
+#[test]
+fn suggestions_are_kept_on_the_permission() {
+    let mut s = running();
+    let mut c = call("Bash", bash("rm -rf x"), None);
+    c.permission_suggestions = vec![json!({"type": "addRules"})];
+    apply(&mut s, &ev(HookKind::PermissionRequest(c)), t(1));
+    let Pending::Permission(p) = &s.pending()[0].pending else {
+        panic!("permission attendue");
+    };
+    assert_eq!(p.suggestions, [json!({"type": "addRules"})]);
+}
+
+#[test]
+fn app_answer_resolves_once_and_late_events_find_nothing() {
+    let mut s = running();
+    apply(&mut s, &pre("Bash", bash("ls"), "toolu_1"), t(1));
+    apply(&mut s, &perm("Bash", bash("ls")), t(2));
+    assert_eq!(s.status(), SessionStatus::Waiting(WaitKind::Permission));
+
+    let fx = s.resolve_by_app(RequestId(1), t(3)).unwrap();
+    assert_eq!(
+        fx,
+        [resolved(1, Resolution::AnsweredByApp), Effect::ClearWaiting]
+    );
+    assert_eq!(s.status(), SessionStatus::Running);
+    // Déjà close : plus rien.
+    assert!(s.resolve_by_app(RequestId(1), t(3)).is_none());
+    assert!(s.pending_request(RequestId(1)).is_none());
+    // Le PostToolUse qui suit ne clôt rien de plus.
+    let fx = apply(&mut s, &post("Bash", bash("ls"), Some("toolu_1")), t(4));
+    assert!(fx.is_empty(), "{fx:?}");
+    // Une notification permission_prompt en retard ne recrée pas d'attente.
+    let fx = apply(&mut s, &notif("permission_prompt"), t(4));
+    assert!(fx.is_empty(), "{fx:?}");
+    assert_eq!(s.status(), SessionStatus::Running);
+}
+
+#[test]
+fn app_answer_keeps_other_pending_requests() {
+    let mut s = running();
+    apply(&mut s, &perm("Bash", bash("a")), t(1));
+    apply(&mut s, &perm("Bash", bash("b")), t(2));
+    let fx = s.resolve_by_app(RequestId(2), t(3)).unwrap();
+    assert_eq!(fx, [resolved(2, Resolution::AnsweredByApp)]);
+    assert_eq!(s.status(), SessionStatus::Waiting(WaitKind::Permission));
+    assert!(s.pending_request(RequestId(1)).is_some());
+}
+
+#[test]
+fn a_second_frame_never_replaces_the_first_suggestions() {
+    let mut s = running();
+    let mut first = call("Bash", bash("rm -rf x"), None);
+    first.permission_suggestions = vec![json!({"type": "addRules", "n": 1})];
+    let mut forged = call("Bash", bash("rm -rf x"), None);
+    forged.permission_suggestions = vec![json!({"type": "addRules", "n": 2})];
+    let a = apply_tracked(&mut s, &ev(HookKind::PermissionRequest(first)), t(1));
+    let b = apply_tracked(&mut s, &ev(HookKind::PermissionRequest(forged)), t(2));
+    assert_eq!(a.request, b.request);
+    let Pending::Permission(p) = &s.pending()[0].pending else {
+        panic!("permission attendue");
+    };
+    assert_eq!(p.suggestions, [json!({"type": "addRules", "n": 1})]);
 }

@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::hooks::{HookEvent, HookKind};
 use super::metrics::{Metrics, ModelInfo};
-use super::state::{Effect, SessionState, apply};
+use super::state::{Applied, Effect, SessionState, apply_tracked};
 use super::statusline::Statusline;
 
 /// Une session : un processus `claude` lancé ou repris par l'app.
@@ -68,6 +68,12 @@ impl Session {
     /// Applique un événement de hook : met à jour le `session_id` de Claude
     /// Code et le modèle sur `SessionStart`, puis la machine à états.
     pub fn apply_hook(&mut self, event: &HookEvent, now: OffsetDateTime) -> Vec<Effect> {
+        self.apply_hook_tracked(event, now).effects
+    }
+
+    /// Comme [`Session::apply_hook`], en indiquant la demande à laquelle
+    /// l'événement se rattache (voir [`crate::domain::state::apply_tracked`]).
+    pub fn apply_hook_tracked(&mut self, event: &HookEvent, now: OffsetDateTime) -> Applied {
         if let HookKind::SessionStart { model, .. } = &event.kind {
             self.claude_session_id = event.common.session_id.clone();
             if let Some(id) = model {
@@ -84,7 +90,7 @@ impl Session {
                 }
             }
         }
-        apply(&mut self.state, event, now)
+        apply_tracked(&mut self.state, event, now)
     }
 
     /// Fusionne les mesures d'une statusline (voir [`Metrics::merge`]).
@@ -181,6 +187,9 @@ pub const ASK_USER_QUESTION: &str = "AskUserQuestion";
 pub struct PermissionPending {
     pub tool_name: String,
     pub tool_input: Value,
+    /// `permission_suggestions` reçues avec la demande, brutes : la source de
+    /// « Toujours » (voir [`crate::domain::decision::always_rules`]).
+    pub suggestions: Vec<Value>,
 }
 
 /// Question posée par Claude avec `AskUserQuestion`.
@@ -296,6 +305,31 @@ impl PermissionMode {
             Self::Other(s) => s,
         }
     }
+
+    /// Modes qui retirent les demandes de permission : jamais proposés sans
+    /// réglage explicite du démon (`allow_dangerous_modes`).
+    pub fn is_dangerous(&self) -> bool {
+        matches!(self, Self::BypassPermissions) || self.as_str() == "dontAsk"
+    }
+}
+
+/// Cycle de Shift+Tab dans la TUI, relevé avec Claude Code 2.1.303
+/// (prototype n° 1, Q9) : `manual` → `accept edits` → `plan` → `auto` →
+/// `manual`. Il peut changer d'une version à l'autre (ou selon les modes
+/// disponibles) : `sessions.setMode` est un contournement, faute d'API.
+pub const SHIFT_TAB_CYCLE: [PermissionMode; 4] = [
+    PermissionMode::Default,
+    PermissionMode::AcceptEdits,
+    PermissionMode::Plan,
+    PermissionMode::Auto,
+];
+
+/// Nombre de Shift+Tab pour passer du mode `current` au mode `target` le
+/// long de [`SHIFT_TAB_CYCLE`] ; `None` si l'un des deux n'est pas sur le cycle.
+pub fn shift_tab_steps(current: &PermissionMode, target: &PermissionMode) -> Option<usize> {
+    let pos = |m: &PermissionMode| SHIFT_TAB_CYCLE.iter().position(|c| c == m);
+    let (from, to) = (pos(current)?, pos(target)?);
+    Some((to + SHIFT_TAB_CYCLE.len() - from) % SHIFT_TAB_CYCLE.len())
 }
 
 #[cfg(test)]
@@ -353,6 +387,22 @@ mod tests {
             PermissionMode::parse("nouveau"),
             PermissionMode::Other("nouveau".into())
         );
+    }
+
+    #[test]
+    fn shift_tab_cycle() {
+        use PermissionMode::*;
+        assert_eq!(shift_tab_steps(&Default, &Default), Some(0));
+        assert_eq!(shift_tab_steps(&Default, &AcceptEdits), Some(1));
+        assert_eq!(shift_tab_steps(&Default, &Auto), Some(3));
+        assert_eq!(shift_tab_steps(&Auto, &Default), Some(1));
+        assert_eq!(shift_tab_steps(&Plan, &AcceptEdits), Some(3));
+        assert_eq!(shift_tab_steps(&BypassPermissions, &Default), None);
+        assert_eq!(shift_tab_steps(&Default, &BypassPermissions), None);
+        assert_eq!(shift_tab_steps(&Other("dontAsk".into()), &Plan), None);
+        assert!(BypassPermissions.is_dangerous());
+        assert!(PermissionMode::parse("dontAsk").is_dangerous());
+        assert!(!Auto.is_dangerous());
     }
 
     #[test]

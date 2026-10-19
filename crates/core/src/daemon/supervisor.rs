@@ -16,17 +16,18 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use time::OffsetDateTime;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
 use super::claude_config;
-use super::launch::{self, LaunchKind, LaunchSpec};
+use super::launch::{self, LaunchKind, LaunchSpec, ScopeSpec};
 use super::log::{error, info, warning};
+use super::peer::{self, Peer, Supervised, SupervisedProc};
 use super::terminal::{Chunk, RESUME_RESET, Snapshot, Terminal};
-use crate::domain::HookEvent;
+use crate::domain::decision::{self, AnswerError, PermissionAnswer};
 use crate::domain::{
-    PermissionMode, ProcessExit, Profile, REASON_DAEMON_RESTART, Session, SessionState,
-    SessionStatus, Statusline, WaitKind,
+    Effect, HookEvent, HookKind, PermissionMode, ProcessExit, Profile, REASON_DAEMON_RESTART,
+    RequestId, Session, SessionState, SessionStatus, Statusline, WaitKind, shift_tab_steps,
 };
 use crate::paths::Paths;
 use crate::ports::{
@@ -87,7 +88,55 @@ impl RpcError {
     fn launch(message: impl Into<String>) -> Self {
         Self::new(error_code::LAUNCH_FAILED, message)
     }
+    fn unknown_request(id: RequestId) -> Self {
+        Self::new(
+            error_code::UNKNOWN_REQUEST,
+            format!("demande {} inconnue ou déjà close", id.0),
+        )
+    }
+    fn not_answerable(id: RequestId) -> Self {
+        Self::new(
+            error_code::NOT_ANSWERABLE,
+            format!(
+                "demande {} : aucun relais n'attend de décision, répondre dans le terminal",
+                id.0
+            ),
+        )
+    }
 }
+
+impl From<AnswerError> for RpcError {
+    fn from(e: AnswerError) -> Self {
+        let code = match &e {
+            AnswerError::WrongKind { .. } => error_code::WRONG_REQUEST_KIND,
+            AnswerError::Undetailed => error_code::NOT_ANSWERABLE,
+            AnswerError::NoSuggestions => error_code::NO_SUGGESTIONS,
+            AnswerError::InvalidAnswers(_) => error_code::INVALID_PARAMS,
+        };
+        Self::new(code, e.to_string())
+    }
+}
+
+/// Décision transmise à un relais `PermissionRequest` : le JSON à écrire sur
+/// la sortie du hook, ou `None` (libéré sans décision).
+pub type Decision = Option<Vec<u8>>;
+
+/// Relais `PermissionRequest` rattaché à une demande : la connexion attend
+/// sur `decision`, et se détache avec [`Daemon::detach_waiter`] si le relais
+/// s'en va.
+pub struct PermissionWait {
+    pub session: Uuid,
+    pub request: RequestId,
+    pub waiter: u64,
+    pub decision: oneshot::Receiver<Decision>,
+}
+
+/// Pour `sessions.setMode` : file d'entrée du PTY, octets à y écrire, et
+/// nombre de Shift+Tab qu'ils contiennent.
+pub type ModeKeys = (mpsc::Sender<Vec<u8>>, Vec<u8>, usize);
+
+/// Séquence envoyée par Shift+Tab (CSI Z, « back tab »).
+pub const SHIFT_TAB: &[u8] = b"\x1b[Z";
 
 /// Réglages du démon.
 #[derive(Debug, Clone)]
@@ -103,6 +152,19 @@ pub struct Config {
     pub exit_grace: Duration,
     /// Délai entre `SIGHUP` et `SIGKILL` pour arrêter une session.
     pub stop_timeout: Duration,
+    /// `timeout` du hook `PermissionRequest` écrit dans `hooks.json`, en
+    /// secondes (600 par défaut ; `DEVMAESTRO_PERMISSION_TIMEOUT_SECS` le
+    /// réduit pour les tests). Le relais attend un peu moins.
+    pub permission_timeout_secs: u64,
+    /// `allow_dangerous_modes` de `config.toml`, lu **au démarrage** du démon
+    /// (un changement demande de redémarrer le démon).
+    pub allow_dangerous_modes: bool,
+    /// `systemd-run`, si un gestionnaire systemd utilisateur répond au
+    /// démarrage : chaque session est alors lancée dans son propre scope.
+    pub systemd_run: Option<PathBuf>,
+    /// `DEVMAESTRO_SYSTEMD_RUNTIME_DIR` : `XDG_RUNTIME_DIR` à donner à
+    /// `systemd-run` (tests, dont le dossier runtime est temporaire).
+    pub systemd_runtime_dir: Option<OsString>,
 }
 
 /// Adaptateurs utilisés par le démon.
@@ -132,6 +194,8 @@ struct Run {
     control: Box<dyn PtyControl>,
     input: mpsc::Sender<Vec<u8>>,
     stop_requested: bool,
+    /// Identité du processus (date de démarrage, scope systemd).
+    proc: SupervisedProc,
     /// Code de sortie, posé par le fil d'attente dès la fin du processus
     /// (avant que le démon ne la constate).
     exited: Arc<Mutex<Option<ExitStatus>>>,
@@ -160,7 +224,20 @@ struct Entry {
     last_exit: Option<ExitStatus>,
     /// Dernier enregistrement écrit en base, et quand.
     persisted: Option<(SessionRecord, Instant)>,
+    /// Relais `PermissionRequest` qui attendent une décision, par demande
+    /// (plusieurs si Claude Code relance le même hook).
+    waiters: HashMap<RequestId, Vec<(u64, oneshot::Sender<Decision>)>>,
+    /// Processus `claude` d'avant un plantage du démon, relu en base, dont des
+    /// processus vivent encore : gardé en base tant qu'il est supervisé.
+    orphan: Option<(u32, SupervisedProc)>,
+    /// `sessions.setMode` envoyé, pas encore confirmé par un hook : mode visé
+    /// et date de l'envoi.
+    mode_change: Option<(PermissionMode, Instant)>,
 }
+
+/// Délai au bout duquel un `sessions.setMode` non confirmé n'empêche plus
+/// le suivant.
+const MODE_CHANGE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Default)]
 struct Registry {
@@ -201,7 +278,13 @@ pub struct Daemon {
     events: broadcast::Sender<Event>,
     runtime: tokio::runtime::Handle,
     next_run: AtomicU64,
+    next_waiter: AtomicU64,
     shutting_down: AtomicBool,
+    /// Processus `claude` lancés depuis le démarrage (pid = pgid = sid,
+    /// `setsid`) : leurs descendants n'ont pas accès au socket de contrôle.
+    /// Associe à chaque pid sa date de démarrage (`/proc/<pid>/stat`), pour
+    /// ne jamais confondre avec un pid réattribué.
+    supervised: Mutex<Supervised>,
 }
 
 /// Instantané, historique éventuel, flux de sortie et terminal d'une session.
@@ -259,13 +342,6 @@ fn pid_alive(pid: u32) -> bool {
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
 }
 
-fn signal_group(pid: u32, sig: nix::sys::signal::Signal) {
-    let pgid = nix::unistd::Pid::from_raw(pid as i32);
-    if nix::sys::signal::killpg(pgid, sig).is_err() {
-        let _ = nix::sys::signal::kill(pgid, sig);
-    }
-}
-
 /// Champs d'un enregistrement qui justifient une écriture immédiate.
 fn significant(r: &SessionRecord) -> SessionRecord {
     let mut r = r.clone();
@@ -286,6 +362,47 @@ impl Entry {
             token: None,
             last_exit: None,
             persisted: None,
+            waiters: HashMap::new(),
+            orphan: None,
+            mode_change: None,
+        }
+    }
+
+    /// Processus `claude` à persister : celui qui tourne, sinon l'orphelin.
+    fn process(&self) -> Option<(u32, SupervisedProc)> {
+        match &self.run {
+            Some(r) => r.pid.map(|p| (p, r.proc.clone())),
+            None => self.orphan.clone(),
+        }
+    }
+
+    /// Un relais attend-il la décision de cette demande ?
+    fn answerable(&self, id: RequestId) -> bool {
+        self.waiters.get(&id).is_some_and(|w| !w.is_empty())
+    }
+
+    /// Libère sans décision les relais d'une demande.
+    fn release(&mut self, id: RequestId) {
+        for (_, tx) in self.waiters.remove(&id).unwrap_or_default() {
+            let _ = tx.send(None);
+        }
+    }
+
+    /// Libère sans décision tous les relais de la session.
+    fn release_all(&mut self) {
+        for (_, list) in self.waiters.drain() {
+            for (_, tx) in list {
+                let _ = tx.send(None);
+            }
+        }
+    }
+
+    /// Libère les relais des demandes closes par ces effets.
+    fn release_resolved(&mut self, effects: &[Effect]) {
+        for e in effects {
+            if let Effect::RequestResolved { request_id, .. } = e {
+                self.release(*request_id);
+            }
         }
     }
 
@@ -310,7 +427,9 @@ impl Entry {
             created_at: self.created_at,
             updated_at: self.updated_at,
             last_activity: self.session.state.last_activity,
-            pid: self.run.as_ref().and_then(|r| r.pid),
+            pid: self.process().map(|(p, _)| p),
+            pid_start: self.process().and_then(|(_, p)| p.start),
+            scope_unit: self.process().and_then(|(_, p)| p.scope),
         }
     }
 
@@ -327,7 +446,9 @@ impl Entry {
             "model": self.model,
             "mode": s.state.permission_mode.as_ref().map(|m| m.as_str()),
             "status": status_json(&s.state.status()),
-            "pending": s.state.pending().iter().map(pending_request_json).collect::<Vec<_>>(),
+            "pending": s.state.pending().iter()
+                .map(|r| pending_request_json(r, self.answerable(r.id)))
+                .collect::<Vec<_>>(),
             "possibly_stale": s.state.possibly_stale(),
             "metrics": metrics_json(&s.metrics),
             "last_activity": time_json(s.state.last_activity),
@@ -335,6 +456,7 @@ impl Entry {
             "updated_at": time_json(Some(self.updated_at)),
             "alive": self.run.is_some(),
             "pid": self.run.as_ref().and_then(|r| r.pid),
+            "scope": self.run.as_ref().and_then(|r| r.proc.scope.clone()),
             "last_exit": match &self.last_exit {
                 Some(ExitStatus::Code(c)) => json!({"code": c}),
                 Some(ExitStatus::Signal(sig)) => json!({"signal": sig}),
@@ -378,6 +500,15 @@ pub fn size_param(params: &Value, default: TermSize) -> Result<TermSize, RpcErro
     })
 }
 
+/// Lit un identifiant de demande `request_id` (entier positif).
+pub fn request_id_param(params: &Value) -> Result<RequestId, RpcError> {
+    params
+        .get("request_id")
+        .and_then(Value::as_u64)
+        .map(RequestId)
+        .ok_or_else(|| RpcError::params("« request_id » manquant ou invalide"))
+}
+
 fn mode_param(params: &Value) -> Result<Option<PermissionMode>, RpcError> {
     match opt_str(params, "mode")? {
         None => Ok(None),
@@ -416,7 +547,9 @@ impl Daemon {
             events,
             runtime: tokio::runtime::Handle::current(),
             next_run: AtomicU64::new(1),
+            next_waiter: AtomicU64::new(1),
             shutting_down: AtomicBool::new(false),
+            supervised: Mutex::new(Supervised::new()),
         })
     }
 
@@ -457,6 +590,106 @@ impl Daemon {
         let _ = self.events.send(Event::Updated(entry.session.id));
     }
 
+    /// Contrôle du pair d'une connexion au socket de contrôle (voir
+    /// [`peer::check_control`]). Les processus supervisés disparus sont
+    /// d'abord oubliés (lecture de `/proc` hors de tout verrou du registre).
+    pub fn check_control_peer(&self, peer: &Peer) -> Result<(), String> {
+        let live = peer::scan();
+        let supervised = {
+            let mut sup = self.supervised.lock().unwrap_or_else(|e| e.into_inner());
+            peer::prune(&mut sup, &live);
+            sup.clone()
+        };
+        peer::check_control(peer, nix::unistd::getuid().as_raw(), &supervised)
+    }
+
+    /// Une trame de relais avec ce jeton vient-elle bien d'un processus de la
+    /// session (voir [`peer::check_relay`]) ? Jeton inconnu : non.
+    pub fn check_relay_peer(&self, token: &str, peer: &Peer) -> Result<(), String> {
+        let claude = {
+            let reg = self.lock();
+            reg.session_of(token)
+                .and_then(|id| reg.sessions.get(&id))
+                .and_then(|e| e.run.as_ref())
+                .and_then(|r| r.pid.map(|p| (p, r.proc.clone())))
+        };
+        let Some((pid, proc)) = claude else {
+            return Err("jeton inconnu".into());
+        };
+        peer::check_relay(peer, nix::unistd::getuid().as_raw(), pid, &proc)
+    }
+
+    /// Signale le groupe de processus d'une session (`killpg`, jamais `kill`
+    /// sur un pid seul). Si le pid désigne désormais un autre processus
+    /// (date de démarrage différente : pid réattribué), rien n'est envoyé.
+    fn signal_group(&self, pid: u32, sig: nix::sys::signal::Signal) {
+        let start = self
+            .supervised
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&pid)
+            .and_then(|p| p.start);
+        if let (Some(start), Some(now)) = (start, peer::start_time(pid))
+            && start != now
+        {
+            return;
+        }
+        let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid as i32), sig);
+    }
+
+    /// Mode à passer quand l'appelant n'en donne pas : `permissions.defaultMode`
+    /// des réglages du projet ou du profil (lecture seule). Un mode dangereux
+    /// non autorisé devient `default` (`--permission-mode manual`), avec un
+    /// avertissement.
+    fn effective_mode(
+        &self,
+        cwd: &Path,
+        profile: &Profile,
+        warnings: &mut Vec<String>,
+    ) -> Option<PermissionMode> {
+        let (mode, source) = claude_config::default_mode(cwd, &profile.config_dir)?;
+        if mode.is_dangerous() && !self.config.allow_dangerous_modes {
+            let w = format!(
+                "le mode par défaut « {} » de {} n'est pas autorisé par le démon : session lancée en mode « default » \
+                 (régler allow_dangerous_modes = true dans {})",
+                mode.as_str(),
+                source.display(),
+                self.config.paths.config_file().display()
+            );
+            warning!("{w}");
+            warnings.push(w);
+            return Some(PermissionMode::Default);
+        }
+        Some(mode)
+    }
+
+    /// Refuse un mode dangereux sans `allow_dangerous_modes`.
+    fn check_mode_allowed(
+        &self,
+        mode: Option<&PermissionMode>,
+        inherited: bool,
+    ) -> Result<(), RpcError> {
+        let Some(mode) = mode.filter(|m| m.is_dangerous()) else {
+            return Ok(());
+        };
+        if self.config.allow_dangerous_modes {
+            return Ok(());
+        }
+        let origin = if inherited {
+            format!("la session était en mode « {} »", mode.as_str())
+        } else {
+            format!("mode « {} » demandé", mode.as_str())
+        };
+        Err(RpcError::new(
+            error_code::DANGEROUS_MODE,
+            format!(
+                "{origin} : ce mode supprime les demandes de permission et n'est pas autorisé \
+                 (régler allow_dangerous_modes = true dans {}, puis redémarrer le démon)",
+                self.config.paths.config_file().display()
+            ),
+        ))
+    }
+
     fn emit_effects(&self, id: Uuid, effects: &[crate::domain::Effect]) {
         for e in effects {
             let _ = self.events.send(Event::Effect {
@@ -469,14 +702,23 @@ impl Daemon {
     /// Régénère le plugin et les réglages de tous les profils connus.
     pub fn write_claude_config(&self) {
         let orchd = &self.config.orchd_exe;
-        if let Err(e) = claude_config::write_plugin(&self.config.paths.plugin_dir(), orchd) {
+        if let Err(e) = claude_config::write_plugin(
+            &self.config.paths.plugin_dir(),
+            orchd,
+            self.config.permission_timeout_secs,
+        ) {
             error!("écriture du plugin Claude Code : {e}");
         }
         match self.deps.profiles.profiles() {
             Ok(profiles) => {
                 for p in profiles {
                     let path = self.config.paths.settings_for(&p.name);
-                    if let Err(e) = claude_config::write_settings(&path, orchd, &p) {
+                    if let Err(e) = claude_config::write_settings(
+                        &path,
+                        orchd,
+                        &p,
+                        !self.config.allow_dangerous_modes,
+                    ) {
                         error!("écriture des réglages du profil {} : {e}", p.name);
                     }
                 }
@@ -498,8 +740,32 @@ impl Daemon {
             }
         };
         let now = self.now();
+        // Processus restés d'avant un plantage : toujours refusés au socket de
+        // contrôle tant qu'eux (ou des processus de leur session) vivent.
+        let live = peer::scan();
         let mut reg = self.lock();
         for r in records {
+            let mut orphan = None;
+            if let (Some(pid), Some(start)) = (r.pid, r.pid_start) {
+                let proc = SupervisedProc {
+                    start: Some(start),
+                    scope: r.scope_unit.clone(),
+                };
+                let mut one: Supervised = [(pid, proc.clone())].into();
+                peer::prune(&mut one, &live);
+                if !one.is_empty() {
+                    warning!(
+                        "session {} : des processus de l'ancien claude {pid} vivent encore ; \
+                         ils restent refusés au socket de contrôle",
+                        r.id
+                    );
+                    self.supervised
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(pid, proc.clone());
+                    orphan = Some((pid, proc));
+                }
+            }
             let mut status = status_from_record(&r.status, r.status_reason.clone());
             let was_active = matches!(
                 status,
@@ -534,9 +800,11 @@ impl Daemon {
             );
             let mut entry = Entry::new(session, Terminal::new(DEFAULT_SIZE), r.created_at);
             entry.model = r.model.clone();
+            entry.orphan = orphan;
             entry.updated_at = if was_active { now } else { r.updated_at };
+            let orphan_changed = entry.orphan.is_none() && r.pid.is_some();
             entry.persisted = Some((r, Instant::now()));
-            if was_active {
+            if was_active || orphan_changed {
                 let record = entry.record();
                 if let Err(e) = self.deps.store.upsert(&record) {
                     error!("écriture de la session {} en base : {e}", record.id);
@@ -648,6 +916,9 @@ impl Daemon {
             self.config.claude_bin_env.clone(),
             self.config.path_env.clone(),
         )
+        // Vérifié avant le lancement : derrière `systemd-run`, un binaire absent
+        // ne ferait échouer qu'après coup, dans le scope.
+        .filter(|p| launch::is_executable(p))
         .ok_or_else(|| {
             RpcError::launch("binaire « claude » introuvable (PATH ou DEVMAESTRO_CLAUDE_BIN)")
         })
@@ -672,7 +943,7 @@ impl Daemon {
         let profile_name = opt_str(params, "profile")?
             .unwrap_or_else(|| crate::domain::profile::DEFAULT_PROFILE_NAME.to_owned());
         let id = Uuid::new_v4();
-        let plan = Plan {
+        let mut plan = Plan {
             claude: self.claude_bin()?,
             kind: LaunchKind::New {
                 claude_session_id: id.to_string(),
@@ -684,6 +955,11 @@ impl Daemon {
             prompt: opt_str(params, "prompt")?.filter(|p| !p.is_empty()),
             size: size_param(params, DEFAULT_SIZE)?,
         };
+        self.check_mode_allowed(plan.mode.as_ref(), false)?;
+        let mut warnings = Vec::new();
+        if plan.mode.is_none() {
+            plan.mode = self.effective_mode(&plan.cwd, &plan.profile, &mut warnings);
+        }
         let repo = self.deps.vcs.resolve(&cwd);
         let mut session = Session::new(
             id,
@@ -705,7 +981,7 @@ impl Daemon {
             entry.session.profile
         );
         self.commit(&mut entry);
-        let result = json!({"session": entry.json()});
+        let result = json!({"session": entry.json(), "warnings": warnings});
         reg.sessions.insert(id, entry);
         Ok(result)
     }
@@ -776,7 +1052,8 @@ impl Daemon {
             let entry = &reg.sessions[&id];
             let profile =
                 self.profile(profile_param.as_deref().unwrap_or(&entry.session.profile))?;
-            let plan = Plan {
+            let mode_inherited = mode_param.is_none();
+            let mut plan = Plan {
                 claude,
                 kind: LaunchKind::Resume {
                     claude_session_id: entry.session.claude_session_id.clone(),
@@ -792,6 +1069,11 @@ impl Daemon {
                     entry.terminal.size()
                 },
             };
+            self.check_mode_allowed(plan.mode.as_ref(), mode_inherited)?;
+            let mut warnings = Vec::new();
+            if plan.mode.is_none() {
+                plan.mode = self.effective_mode(&plan.cwd, &plan.profile, &mut warnings);
+            }
             let terminal = entry.terminal.clone();
             let (run, token) = self.spawn_run(id, &terminal, &plan, true)?;
             let now = self.now();
@@ -803,7 +1085,7 @@ impl Daemon {
                 entry.session.claude_session_id
             );
             self.commit(&mut entry);
-            let result = json!({"session": entry.json()});
+            let result = json!({"session": entry.json(), "warnings": warnings});
             reg.sessions.insert(id, entry);
             return Ok(result);
         }
@@ -817,7 +1099,7 @@ impl Daemon {
                 .as_deref()
                 .unwrap_or(crate::domain::profile::DEFAULT_PROFILE_NAME),
         )?;
-        let plan = Plan {
+        let mut plan = Plan {
             claude,
             kind: LaunchKind::Resume {
                 claude_session_id: cid.clone(),
@@ -829,6 +1111,11 @@ impl Daemon {
             prompt,
             size: size_param,
         };
+        self.check_mode_allowed(plan.mode.as_ref(), false)?;
+        let mut warnings = Vec::new();
+        if plan.mode.is_none() {
+            plan.mode = self.effective_mode(&plan.cwd, &plan.profile, &mut warnings);
+        }
         let repo = self.deps.vcs.resolve(&cwd);
         let id = Uuid::new_v4();
         let mut session = Session::new(
@@ -848,7 +1135,7 @@ impl Daemon {
             entry.session.claude_session_id
         );
         self.commit(&mut entry);
-        let result = json!({"session": entry.json()});
+        let result = json!({"session": entry.json(), "warnings": warnings});
         reg.sessions.insert(id, entry);
         Ok(result)
     }
@@ -866,15 +1153,38 @@ impl Daemon {
         let paths = &self.config.paths;
         let plugin_dir = paths.plugin_dir();
         let settings = paths.settings_for(&plan.profile.name);
-        claude_config::write_plugin(&plugin_dir, &self.config.orchd_exe)
-            .and_then(|()| {
-                claude_config::write_settings(&settings, &self.config.orchd_exe, &plan.profile)
-            })
-            .map_err(|e| RpcError::launch(format!("écriture du plugin ou des réglages : {e}")))?;
+        claude_config::write_plugin(
+            &plugin_dir,
+            &self.config.orchd_exe,
+            self.config.permission_timeout_secs,
+        )
+        .and_then(|()| {
+            claude_config::write_settings(
+                &settings,
+                &self.config.orchd_exe,
+                &plan.profile,
+                !self.config.allow_dangerous_modes,
+            )
+        })
+        .map_err(|e| RpcError::launch(format!("écriture du plugin ou des réglages : {e}")))?;
 
         let token = new_token()?;
-        let socket = paths.socket();
+        // Socket des relais seulement : celui de contrôle n'est jamais passé.
+        let socket = paths.relay_socket();
+        let inherited_env: Vec<String> = std::env::vars_os()
+            .filter_map(|(k, _)| k.into_string().ok())
+            .collect();
         let session_str = id.to_string();
+        // Scope systemd propre à ce processus (nom unique : un scope précédent
+        // de la même session peut encore se vider).
+        let scope = self.config.systemd_run.as_ref().map(|_| {
+            format!(
+                "{}{}-{}.scope",
+                peer::SCOPE_PREFIX,
+                &id.simple().to_string()[..8],
+                &token[..8]
+            )
+        });
         let command = launch::build(&LaunchSpec {
             claude_bin: &plan.claude,
             kind: plan.kind.clone(),
@@ -888,6 +1198,17 @@ impl Daemon {
             socket: &socket,
             token: &token,
             session: &session_str,
+            inherited_env: &inherited_env,
+            scope: self
+                .config
+                .systemd_run
+                .as_deref()
+                .zip(scope.as_deref())
+                .map(|(systemd_run, unit)| ScopeSpec {
+                    systemd_run,
+                    unit,
+                    runtime_dir: self.config.systemd_runtime_dir.as_deref(),
+                }),
         });
         let spawned = self.deps.pty.spawn(&command, plan.size).map_err(|e| {
             RpcError::launch(format!("lancement de {} : {e}", plan.claude.display()))
@@ -895,6 +1216,18 @@ impl Daemon {
 
         let run_id = self.next_run.fetch_add(1, Ordering::SeqCst);
         let pid = spawned.child.pid();
+        // `systemd-run --scope` garde le pid en exécutant claude : la date de
+        // démarrage est celle du processus lancé.
+        let proc = SupervisedProc {
+            start: pid.and_then(peer::start_time),
+            scope: scope.clone(),
+        };
+        if let Some(pid) = pid {
+            self.supervised
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(pid, proc.clone());
+        }
         terminal.resize(plan.size);
         if reset {
             // Avant le premier octet du nouveau processus (le lecteur n'est pas encore lancé).
@@ -943,7 +1276,7 @@ impl Daemon {
             // Les descendants restés dans le groupe (outils lancés par claude)
             // reçoivent SIGHUP, comme à la fermeture d'un terminal.
             if let Some(pid) = pid {
-                signal_group(pid, nix::sys::signal::Signal::SIGHUP);
+                daemon.signal_group(pid, nix::sys::signal::Signal::SIGHUP);
             }
             *exited_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(status.clone());
             let rt = daemon.runtime.clone();
@@ -957,6 +1290,7 @@ impl Daemon {
                 control: spawned.control,
                 input: input_tx,
                 stop_requested: false,
+                proc,
                 exited,
             },
             token,
@@ -973,12 +1307,14 @@ impl Daemon {
             .sessions
             .get_mut(id)
             .ok_or_else(|| RpcError::unknown_session(id))?;
+        // Aucune décision ne viendra plus : les relais en attente rendent la main.
+        entry.release_all();
         let Some(run) = entry.run.as_mut() else {
             return Ok(json!({"stopping": false, "alive": false}));
         };
         run.stop_requested = true;
         if let Some(pid) = run.pid {
-            signal_group(pid, nix::sys::signal::Signal::SIGHUP);
+            self.signal_group(pid, nix::sys::signal::Signal::SIGHUP);
             let run_id = run.id;
             let daemon = Arc::clone(self);
             let id = *id;
@@ -992,7 +1328,7 @@ impl Daemon {
                     && let Some(pid) = run.pid
                 {
                     warning!("session {id} : pas sortie après SIGHUP, SIGKILL");
-                    signal_group(pid, nix::sys::signal::Signal::SIGKILL);
+                    daemon.signal_group(pid, nix::sys::signal::Signal::SIGKILL);
                 }
             });
         }
@@ -1048,27 +1384,268 @@ impl Daemon {
     /// Trame de hook d'un relais. Ignorée (avec un avertissement) si le jeton
     /// est inconnu ou le JSON illisible.
     pub fn on_hook(&self, token: &str, event: &str, json: &[u8]) {
+        let _ = self.apply_hook(token, event, json, false);
+    }
+
+    /// Trame `PermissionRequest` d'un relais : l'événement est appliqué, puis
+    /// le relais est rattaché à la demande créée ou retrouvée (déduplication)
+    /// et attend sa décision. `None` : rien à attendre (jeton inconnu, JSON
+    /// illisible, session arrêtée, démon qui s'arrête) ; le relais est alors
+    /// libéré sans décision.
+    pub fn on_permission_request(&self, token: &str, json: &[u8]) -> Option<PermissionWait> {
+        self.apply_hook(token, "PermissionRequest", json, true)
+    }
+
+    fn apply_hook(
+        &self,
+        token: &str,
+        event: &str,
+        json: &[u8],
+        wait: bool,
+    ) -> Option<PermissionWait> {
         let mut reg = self.lock();
         let Some(id) = reg.session_of(token) else {
             warning!("hook {event} avec un jeton inconnu, ignoré");
-            return;
+            return None;
         };
         let now = self.now();
-        let Some(entry) = reg.sessions.get_mut(&id) else {
-            return;
-        };
+        let entry = reg.sessions.get_mut(&id)?;
         let text = String::from_utf8_lossy(json);
         let event = match HookEvent::parse(&text, Some(event)) {
             Ok(ev) => ev,
             Err(e) => {
                 warning!("session {id} : hook {event} illisible : {e}");
-                return;
+                return None;
             }
         };
-        let effects = entry.session.apply_hook(&event, now);
+        let mode_before = entry.session.state.permission_mode.clone();
+        let applied = entry.session.apply_hook_tracked(&event, now);
         entry.updated_at = now;
+        entry.release_resolved(&applied.effects);
+        if let Some(mode) = &event.common.permission_mode {
+            // Un hook porte le mode : un `setMode` en cours est confirmé (ou démenti).
+            if let Some((target, _)) = entry.mode_change.take()
+                && &target != mode
+            {
+                warning!(
+                    "session {id} : mode « {} » attendu après setMode, « {} » rapporté",
+                    target.as_str(),
+                    mode.as_str()
+                );
+            }
+            // Mode dangereux sans autorisation (Shift+Tab dans la TUI, réglage
+            // de l'utilisateur…) : on ne peut pas l'empêcher, on le signale.
+            if mode.is_dangerous()
+                && !self.config.allow_dangerous_modes
+                && mode_before.as_ref() != Some(mode)
+            {
+                warning!(
+                    "session {id} : mode dangereux « {} » détecté sans allow_dangerous_modes",
+                    mode.as_str()
+                );
+                let _ = self.events.send(Event::Effect {
+                    id,
+                    effect: Arc::new(json!({
+                        "type": "dangerous_mode_detected",
+                        "mode": mode.as_str(),
+                    })),
+                });
+            }
+        }
+        let mut handle = None;
+        if wait
+            && matches!(event.kind, HookKind::PermissionRequest(_))
+            && !self.shutting_down.load(Ordering::SeqCst)
+            && let Some(request) = applied.request
+            && entry.session.state.pending_request(request).is_some()
+        {
+            let waiter = self.next_waiter.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = oneshot::channel();
+            let list = entry.waiters.entry(request).or_default();
+            list.push((waiter, tx));
+            info!(
+                "session {id} : relais rattaché à la demande {} ({} en attente)",
+                request.0,
+                list.len()
+            );
+            handle = Some(PermissionWait {
+                session: id,
+                request,
+                waiter,
+                decision: rx,
+            });
+        }
+        self.emit_effects(id, &applied.effects);
+        // Après le rattachement : le `session.updated` porte `answerable: true`.
+        self.commit(entry);
+        handle
+    }
+
+    /// Le relais `waiter` est parti (délai dépassé, Claude Code l'a tué) :
+    /// il est détaché ; si plus aucun relais n'attend, la demande n'est plus
+    /// répondable depuis l'app (`answerable: false`).
+    pub fn detach_waiter(&self, session: Uuid, request: RequestId, waiter: u64) {
+        let mut reg = self.lock();
+        let Some(entry) = reg.sessions.get_mut(&session) else {
+            return;
+        };
+        let Some(list) = entry.waiters.get_mut(&request) else {
+            return;
+        };
+        list.retain(|(w, _)| *w != waiter);
+        if list.is_empty() {
+            entry.waiters.remove(&request);
+            if entry.session.state.pending_request(request).is_some() {
+                info!(
+                    "session {session} : le relais de la demande {} est parti sans décision",
+                    request.0
+                );
+                self.commit(entry);
+            }
+        }
+    }
+
+    // ------------------------------------------------- réponses depuis l'app
+
+    /// `sessions.answerPermission {id, request_id, decision, message?}`.
+    pub fn answer_permission(&self, params: &Value) -> Result<Value, RpcError> {
+        let id = session_id_param(params)?;
+        let request = request_id_param(params)?;
+        let message = opt_str(params, "message")?;
+        let answer = match opt_str(params, "decision")?.as_deref() {
+            Some("allow") => PermissionAnswer::Allow,
+            Some("allow_always") => PermissionAnswer::AllowAlways,
+            Some("deny") => PermissionAnswer::Deny { message },
+            Some(other) => {
+                return Err(RpcError::params(format!(
+                    "décision inconnue : {other} (attendu : allow, allow_always, deny)"
+                )));
+            }
+            None => return Err(RpcError::params("« decision » manquant")),
+        };
+        self.answer(id, request, |pending| {
+            decision::permission_decision(pending, &answer)
+        })
+    }
+
+    /// `sessions.answerQuestion {id, request_id, answers}`.
+    pub fn answer_question(&self, params: &Value) -> Result<Value, RpcError> {
+        let id = session_id_param(params)?;
+        let request = request_id_param(params)?;
+        let answers = params
+            .get("answers")
+            .and_then(Value::as_object)
+            .ok_or_else(|| RpcError::params("« answers » manquant (objet attendu)"))?
+            .clone();
+        self.answer(id, request, |pending| {
+            decision::question_decision(pending, &answers)
+        })
+    }
+
+    /// Construit la décision, la remet aux relais qui attendent, puis clôt la
+    /// demande (`AnsweredByApp`). Rien ne change en cas d'erreur.
+    fn answer(
+        &self,
+        id: Uuid,
+        request: RequestId,
+        build: impl FnOnce(&crate::domain::Pending) -> Result<Value, AnswerError>,
+    ) -> Result<Value, RpcError> {
+        let mut reg = self.lock();
+        let entry = reg
+            .sessions
+            .get_mut(&id)
+            .ok_or_else(|| RpcError::unknown_session(&id))?;
+        let pending = entry
+            .session
+            .state
+            .pending_request(request)
+            .ok_or_else(|| RpcError::unknown_request(request))?;
+        let output = build(&pending.pending)?;
+        if !entry.answerable(request) {
+            return Err(RpcError::not_answerable(request));
+        }
+        let bytes = serde_json::to_vec(&output)
+            .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))?;
+        let mut delivered = 0;
+        for (_, tx) in entry.waiters.remove(&request).unwrap_or_default() {
+            if tx.send(Some(bytes.clone())).is_ok() {
+                delivered += 1;
+            }
+        }
+        if delivered == 0 {
+            // Les relais sont partis entre-temps : la demande reste à la TUI.
+            self.commit(entry);
+            return Err(RpcError::not_answerable(request));
+        }
+        let now = self.now();
+        let effects = entry
+            .session
+            .state
+            .resolve_by_app(request, now)
+            .ok_or_else(|| RpcError::unknown_request(request))?;
+        entry.updated_at = now;
+        entry.release_resolved(&effects);
+        info!("session {id} : demande {} répondue depuis l'app", request.0);
         self.emit_effects(id, &effects);
         self.commit(entry);
+        Ok(json!({"request_id": request.0, "resolved": true}))
+    }
+
+    /// `sessions.setMode {id, mode}` : nombre de Shift+Tab le long du cycle
+    /// de la TUI ([`crate::domain::SHIFT_TAB_CYCLE`]) depuis le mode courant
+    /// connu. Renvoie la file d'entrée du PTY et les octets à y écrire ; la
+    /// confirmation viendra du `permission_mode` du hook suivant.
+    pub fn set_mode(&self, params: &Value) -> Result<ModeKeys, RpcError> {
+        let id = session_id_param(params)?;
+        let target = mode_param(params)?.ok_or_else(|| RpcError::params("« mode » manquant"))?;
+        self.check_mode_allowed(Some(&target), false)?;
+        let mut reg = self.lock();
+        let entry = reg
+            .sessions
+            .get_mut(&id)
+            .ok_or_else(|| RpcError::unknown_session(&id))?;
+        if let Some((pending, at)) = &entry.mode_change
+            && at.elapsed() < MODE_CHANGE_TIMEOUT
+        {
+            return Err(RpcError::new(
+                error_code::INVALID_STATE,
+                format!(
+                    "changement de mode vers « {} » pas encore confirmé par Claude Code : réessayer après le prochain hook",
+                    pending.as_str()
+                ),
+            ));
+        }
+        let run = entry
+            .run
+            .as_ref()
+            .ok_or_else(|| RpcError::new(error_code::INVALID_STATE, "la session ne tourne pas"))?;
+        if !entry.session.state.pending().is_empty() {
+            return Err(RpcError::new(
+                error_code::INVALID_STATE,
+                "une demande attend une réponse : Shift+Tab agirait sur le dialogue de la TUI",
+            ));
+        }
+        let current = entry.session.state.permission_mode.clone().ok_or_else(|| {
+            RpcError::new(
+                error_code::MODE_UNREACHABLE,
+                "mode courant inconnu : attendre le prochain hook de la session",
+            )
+        })?;
+        let steps = shift_tab_steps(&current, &target).ok_or_else(|| {
+            RpcError::new(
+                error_code::MODE_UNREACHABLE,
+                format!(
+                    "pas de passage de « {} » à « {} » par Shift+Tab (cycle : default, acceptEdits, plan, auto)",
+                    current.as_str(),
+                    target.as_str()
+                ),
+            )
+        })?;
+        let input = run.input.clone();
+        if steps > 0 {
+            entry.mode_change = Some((target, Instant::now()));
+        }
+        Ok((input, SHIFT_TAB.repeat(steps), steps))
     }
 
     /// Trame de statusline d'un relais.
@@ -1135,6 +1712,8 @@ impl Daemon {
         };
         let now = self.now();
         let effects = entry.session.state.process_exited(&exit, now);
+        entry.release_resolved(&effects);
+        entry.release_all();
         entry.run = None;
         entry.last_exit = Some(status.clone());
         entry.updated_at = now;
@@ -1172,7 +1751,7 @@ impl Daemon {
     pub fn kill_all(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         for pid in self.running_pids() {
-            signal_group(pid, nix::sys::signal::Signal::SIGKILL);
+            self.signal_group(pid, nix::sys::signal::Signal::SIGKILL);
         }
     }
 
@@ -1182,6 +1761,10 @@ impl Daemon {
         self.shutting_down.store(true, Ordering::SeqCst);
         let pids: Vec<u32> = {
             let mut reg = self.lock();
+            // Les relais en attente rendent la main tout de suite, sans décision.
+            for entry in reg.sessions.values_mut() {
+                entry.release_all();
+            }
             reg.sessions
                 .values_mut()
                 .filter_map(|e| e.run.as_mut())
@@ -1196,7 +1779,7 @@ impl Daemon {
         }
         info!("arrêt : SIGHUP à {} session(s)", pids.len());
         for pid in &pids {
-            signal_group(*pid, nix::sys::signal::Signal::SIGHUP);
+            self.signal_group(*pid, nix::sys::signal::Signal::SIGHUP);
         }
         let deadline = tokio::time::Instant::now() + self.config.stop_timeout;
         while self.running_count() > 0 && tokio::time::Instant::now() < deadline {
@@ -1206,7 +1789,7 @@ impl Daemon {
             return;
         }
         for pid in self.running_pids() {
-            signal_group(pid, nix::sys::signal::Signal::SIGKILL);
+            self.signal_group(pid, nix::sys::signal::Signal::SIGKILL);
         }
         let deadline =
             tokio::time::Instant::now() + self.config.exit_grace + Duration::from_secs(1);
@@ -1225,6 +1808,7 @@ impl Daemon {
                 .session
                 .state
                 .process_exited(&ProcessExit::Requested, now);
+            entry.release_all();
             entry.run = None;
             entry.updated_at = now;
             self.commit(entry);
@@ -1240,6 +1824,8 @@ fn install_run(reg: &mut Registry, entry: &mut Entry, run: Run, token: String, p
     reg.by_token.push((token.clone(), entry.session.id));
     entry.token = Some(token);
     entry.run = Some(run);
+    entry.orphan = None;
+    entry.mode_change = None;
     entry.last_exit = None;
     entry.session.cwd = plan.cwd;
     entry.session.profile = plan.profile.name;
@@ -1343,6 +1929,8 @@ mod tests {
             updated_at: OffsetDateTime::UNIX_EPOCH,
             last_activity: None,
             pid: None,
+            pid_start: None,
+            scope_unit: None,
         };
         let mut later = r.clone();
         later.updated_at = OffsetDateTime::now_utc();

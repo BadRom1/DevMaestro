@@ -7,10 +7,12 @@
 //! | Plugin Claude Code généré | `$XDG_DATA_HOME/devmaestro/claude-plugin/` |
 //! | Réglages générés par profil | `$XDG_DATA_HOME/devmaestro/settings/<profil>.json` |
 //! | Journal du démon | `$XDG_STATE_HOME/devmaestro/orchd.log` |
-//! | Socket, verrou | `$XDG_RUNTIME_DIR/devmaestro/orchd.sock`, `orchd.lock` |
+//! | Réglages du démon (facultatifs) | `$XDG_CONFIG_HOME/devmaestro/config.toml` |
+//! | Socket de contrôle (clients), socket des relais, verrou | `$XDG_RUNTIME_DIR/devmaestro/orchd.sock`, `relay.sock`, `orchd.lock` |
 //!
 //! Replis quand une variable est absente ou relative (la spécification
-//! demande alors de l'ignorer) : `~/.local/share`, `~/.local/state`, et pour
+//! demande alors de l'ignorer) : `~/.local/share`, `~/.local/state`,
+//! `~/.config`, et pour
 //! `XDG_RUNTIME_DIR`, `$TMPDIR/devmaestro-<uid>` (ou `/tmp/…`).
 
 use std::env;
@@ -19,8 +21,10 @@ use std::path::{Path, PathBuf};
 
 /// Nom du dossier de l'app dans chaque base XDG.
 pub const APP_DIR: &str = "devmaestro";
-/// Nom du socket du démon.
+/// Nom du socket de contrôle du démon (clients : front, `orchd ctl`).
 pub const SOCKET_NAME: &str = "orchd.sock";
+/// Nom du socket des relais (`orchd hook`, `orchd statusline`).
+pub const RELAY_SOCKET_NAME: &str = "relay.sock";
 
 /// Emplacements résolus.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +33,8 @@ pub struct Paths {
     pub data_dir: PathBuf,
     /// `$XDG_STATE_HOME/devmaestro`.
     pub state_dir: PathBuf,
+    /// `$XDG_CONFIG_HOME/devmaestro` (lu seulement, jamais créé par le démon).
+    pub config_dir: PathBuf,
     /// `$XDG_RUNTIME_DIR/devmaestro`, à créer en 0700.
     pub runtime_dir: PathBuf,
     /// Dossier personnel (profils Claude Code).
@@ -69,6 +75,7 @@ impl Paths {
         Self {
             data_dir: xdg("XDG_DATA_HOME", ".local/share"),
             state_dir: xdg("XDG_STATE_HOME", ".local/state"),
+            config_dir: xdg("XDG_CONFIG_HOME", ".config"),
             runtime_dir,
             home,
         }
@@ -76,6 +83,16 @@ impl Paths {
 
     pub fn socket(&self) -> PathBuf {
         self.runtime_dir.join(SOCKET_NAME)
+    }
+
+    /// Socket des relais : son chemin est le seul passé aux processus `claude`.
+    pub fn relay_socket(&self) -> PathBuf {
+        self.runtime_dir.join(RELAY_SOCKET_NAME)
+    }
+
+    /// Réglages du démon (`config.toml`).
+    pub fn config_file(&self) -> PathBuf {
+        self.config_dir.join("config.toml")
     }
 
     pub fn lock_file(&self) -> PathBuf {
@@ -192,7 +209,15 @@ mod tests {
             p.socket(),
             Path::new("/run/user/1000/devmaestro/orchd.sock")
         );
+        assert_eq!(
+            p.relay_socket(),
+            Path::new("/run/user/1000/devmaestro/relay.sock")
+        );
         assert_eq!(p.plugin_dir(), Path::new("/d/devmaestro/claude-plugin"));
+        assert_eq!(
+            p.config_file(),
+            Path::new("/home/u/.config/devmaestro/config.toml")
+        );
         assert_eq!(
             p.settings_for("work"),
             Path::new("/d/devmaestro/settings/work.json")

@@ -1,4 +1,9 @@
-//! Socket du démon : connexions, trames, méthodes JSON-RPC.
+//! Sockets du démon : connexions, trames, méthodes JSON-RPC.
+//!
+//! - socket de contrôle ([`handle_connection`]) : JSON-RPC et entrées de PTY ;
+//!   les trames de hook et de statusline y ferment la connexion ;
+//! - socket des relais ([`handle_relay_connection`]) : trames de hook et de
+//!   statusline seulement ; toute autre trame ferme la connexion.
 //!
 //! Chaque connexion a une tâche d'écriture alimentée par une file bornée.
 //! Les sorties de PTY auxquelles elle est abonnée et les notifications sont
@@ -10,13 +15,14 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use super::log::warning;
+use super::peer::Peer;
 use super::supervisor::{
     DEFAULT_SIZE, Daemon, Event, RpcError, opt_str, session_id_param, size_param,
 };
@@ -104,18 +110,126 @@ pub async fn handle_connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     let _ = tx.send(data).await;
                 }
             }
-            Frame::Hook { token, event, json } => {
-                conn.daemon.on_hook(&token, &event, &json);
-                // L'accusé rend la main au relais une fois l'événement appliqué :
-                // deux hooks successifs sont ainsi traités dans l'ordre.
-                let _ = conn.out.send(Frame::Ack).await;
+            // Type inconnu : ignoré (compatibilité ascendante).
+            Frame::Unknown { .. } => {}
+            // Type connu mais inattendu ici (trame de relais, ou trame que
+            // seul le démon envoie) : connexion fermée.
+            other @ (Frame::Hook { .. }
+            | Frame::Statusline { .. }
+            | Frame::PtyOutput { .. }
+            | Frame::Ack
+            | Frame::Decision(_)) => {
+                warning!(
+                    "trame 0x{:02x} refusée sur le socket de contrôle : connexion fermée",
+                    other.kind()
+                );
+                break;
             }
-            Frame::Statusline { token, json } => conn.daemon.on_statusline(&token, &json),
-            Frame::PtyOutput { .. } | Frame::Ack | Frame::Unknown { .. } => {}
         }
     }
     drop(conn);
     let _ = writer.await;
+}
+
+/// Lit une trame ; `None` en fin de flux ou sur une erreur (journalisée si
+/// ce n'est pas une simple déconnexion).
+async fn next_frame<R: AsyncRead + Unpin>(rd: &mut R) -> Option<Frame> {
+    match read_frame_async(rd).await {
+        Ok(f) => f,
+        Err(crate::protocol::FrameError::Io(e))
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            None
+        }
+        Err(e) => {
+            warning!("connexion fermée sur une trame illisible : {e}");
+            None
+        }
+    }
+}
+
+/// Sert une connexion du socket des relais jusqu'à sa fermeture.
+///
+/// - hook : appliqué, puis accusé `0x12` (les hooks d'une session restent
+///   ainsi dans l'ordre) ;
+/// - hook `PermissionRequest` : appliqué, puis la connexion attend la
+///   décision de l'app (trame `0x13`) ou la libération sans décision
+///   (`0x12`) ; si le relais s'en va avant, il est détaché de sa demande ;
+/// - statusline : appliquée, puis accusé `0x12` ;
+/// - toute autre trame (JSON-RPC, entrée de PTY…) : connexion fermée.
+pub async fn handle_relay_connection(daemon: Arc<Daemon>, stream: UnixStream) {
+    let peer = match Peer::of(&stream) {
+        Ok(p) => Arc::new(p),
+        Err(e) => {
+            warning!("relais : identité du pair illisible ({e}), connexion fermée");
+            return;
+        }
+    };
+    let (mut rd, mut wr) = stream.into_split();
+    while let Some(frame) = next_frame(&mut rd).await {
+        // Seul un processus de la session du jeton peut parler pour elle.
+        if let Frame::Hook { token, .. } | Frame::Statusline { token, .. } = &frame {
+            let (d, p, t) = (daemon.clone(), peer.clone(), token.clone());
+            let verdict = tokio::task::spawn_blocking(move || d.check_relay_peer(&t, &p))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+            if let Err(why) = verdict {
+                warning!("trame de relais ignorée : {why}");
+                if wr.write_all(&Frame::Ack.encode()).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+        }
+        match frame {
+            Frame::Hook { token, event, json } if event == "PermissionRequest" => {
+                let Some(wait) = daemon.on_permission_request(&token, &json) else {
+                    let _ = wr.write_all(&Frame::Ack.encode()).await;
+                    continue;
+                };
+                let (session, request, waiter) = (wait.session, wait.request, wait.waiter);
+                let decision = tokio::select! {
+                    d = wait.decision => d.unwrap_or(None),
+                    // Le relais n'envoie rien d'autre : fin de flux = relais parti.
+                    _ = next_frame(&mut rd) => {
+                        daemon.detach_waiter(session, request, waiter);
+                        break;
+                    }
+                };
+                let reply = match decision {
+                    Some(json) => Frame::Decision(json),
+                    None => Frame::Ack,
+                };
+                if wr.write_all(&reply.encode()).await.is_err() {
+                    break;
+                }
+            }
+            Frame::Hook { token, event, json } => {
+                daemon.on_hook(&token, &event, &json);
+                if wr.write_all(&Frame::Ack.encode()).await.is_err() {
+                    break;
+                }
+            }
+            Frame::Statusline { token, json } => {
+                daemon.on_statusline(&token, &json);
+                if wr.write_all(&Frame::Ack.encode()).await.is_err() {
+                    break;
+                }
+            }
+            Frame::Unknown { .. } => {}
+            other => {
+                warning!(
+                    "trame 0x{:02x} refusée sur le socket des relais : connexion fermée",
+                    other.kind()
+                );
+                break;
+            }
+        }
+    }
+    let _ = wr.shutdown().await;
 }
 
 impl Connection {
@@ -228,11 +342,16 @@ impl Connection {
                 json!({"unsubscribed": was})
             }
             "sessions.setMode" => {
-                return Err(RpcError::new(
-                    error_code::METHOD_NOT_FOUND,
-                    "sessions.setMode n'est pas encore disponible (lot 3)",
-                ));
+                let (tx, bytes, sent) = d.set_mode(params)?;
+                if sent > 0 {
+                    tx.send(bytes).await.map_err(|_| {
+                        RpcError::new(error_code::INVALID_STATE, "la session ne tourne plus")
+                    })?;
+                }
+                json!({"sent": sent})
             }
+            "sessions.answerPermission" => d.answer_permission(params)?,
+            "sessions.answerQuestion" => d.answer_question(params)?,
             "transcripts.list" => {
                 let profile = opt_str(params, "profile")?
                     .unwrap_or_else(|| crate::domain::profile::DEFAULT_PROFILE_NAME.to_owned());
