@@ -1,0 +1,27 @@
+/** Messages d'erreur en français pour les codes du démon (protocole § 3). */
+import { ErrorCode } from '../../../shared/protocol'
+
+const FRIENDLY: Record<number, string> = {
+  [ErrorCode.UnknownSession]: 'session inconnue du démon',
+  [ErrorCode.InvalidState]: 'action impossible dans l’état actuel de la session',
+  [ErrorCode.UnknownProfile]: 'profil inconnu',
+  [ErrorCode.LaunchFailed]: 'lancement impossible',
+  [-32005]: 'mode dangereux refusé (bypassPermissions ou dontAsk demandent allow_dangerous_modes dans la configuration du démon)',
+  [-32010]: 'demande déjà close (répondue dans le terminal, ou tour terminé)',
+  [-32011]: 'mauvais type de demande',
+  [-32012]: 'aucun relais n’attend cette réponse : réponds dans le terminal',
+  [-32013]: '« Toujours » impossible : Claude Code ne propose aucune règle pour cette demande',
+  [-32014]: 'changement de mode impossible : mode courant inconnu ou hors du cycle Shift+Tab',
+  [ErrorCode.Timeout]: 'le démon n’a pas répondu à temps',
+  [ErrorCode.Disconnected]: 'démon non connecté',
+}
+
+export const ALREADY_CLOSED = -32010
+
+/** Texte d'une erreur du démon : explication, puis détail du démon s'il apporte quelque chose. */
+export function describeError(code: number, message: string): string {
+  const f = FRIENDLY[code]
+  if (!f) return message
+  if (!message || message === f || code === ErrorCode.Disconnected) return f
+  return `${f} (${message})`
+}
