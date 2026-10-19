@@ -1,4 +1,4 @@
-# Architecture d'Orchestrateur
+# Architecture de DevMaestro
 
 > Statut : proposition validée le 2026-10-19. Prototype n° 1 concluant ([résultats](spikes/01-pty-hooks.md#résultats)) ; prototype n° 2 tranché en faveur d'Electron ([résultats](spikes/02-tauri-xterm.md#résultats)) ; prototypes 3 et 4 à faire (voir § 17).
 > Décisions détaillées : [ADR 0001](adr/0001-demon-orchd.md), [ADR 0002](adr/0002-injection-des-hooks.md), [ADR 0003](adr/0003-permissions-depuis-l-app.md), [ADR 0004](adr/0004-front-electron.md).
@@ -6,7 +6,7 @@
 
 ## 1. Objet
 
-Orchestrateur est une application desktop open source pour suivre et piloter plusieurs sessions Claude Code en parallèle : statut, questions en attente, contexte, coût, diff, fichiers, tests, livraison.
+DevMaestro est une application desktop open source pour suivre et piloter plusieurs sessions Claude Code en parallèle : statut, questions en attente, contexte, coût, diff, fichiers, tests, livraison.
 
 L'intelligence reste dans Claude Code. L'app lance le vrai `claude` interactif dans un terminal et ajoute le suivi par-dessus. Elle ne remplace ni le modèle ni l'interface de Claude Code.
 
@@ -162,11 +162,11 @@ Interface `QuotaSource`, résultat par profil, chaque fenêtre (5 h, 7 jours) po
 
 | Quoi | Où | Format |
 |---|---|---|
-| État (sessions, revues, livraisons, runners) | `$XDG_DATA_HOME/orchestrateur/state.db` | SQLite |
-| Configuration (profils, projets, voix, raccourcis) | `$XDG_CONFIG_HOME/orchestrateur/config.toml` | TOML |
-| Thèmes | `$XDG_CONFIG_HOME/orchestrateur/themes/*.toml` | TOML, partageables |
-| Plugin Claude Code généré | `$XDG_DATA_HOME/orchestrateur/claude-plugin/` | plugin Claude Code |
-| Socket | `$XDG_RUNTIME_DIR/orchestrateur/orchd.sock` | droits 0600 |
+| État (sessions, revues, livraisons, runners) | `$XDG_DATA_HOME/devmaestro/state.db` | SQLite |
+| Configuration (profils, projets, voix, raccourcis) | `$XDG_CONFIG_HOME/devmaestro/config.toml` | TOML |
+| Thèmes | `$XDG_CONFIG_HOME/devmaestro/themes/*.toml` | TOML, partageables |
+| Plugin Claude Code généré | `$XDG_DATA_HOME/devmaestro/claude-plugin/` | plugin Claude Code |
+| Socket | `$XDG_RUNTIME_DIR/devmaestro/orchd.sock` | droits 0600 |
 
 ## 14. Protocole entre l'app et le démon
 
