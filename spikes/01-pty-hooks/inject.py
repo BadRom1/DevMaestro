@@ -4,7 +4,7 @@
   inject.py paste "<texte>"        (\\n dans le texte = retour à la ligne)
   inject.py paste-file <chemin>
   inject.py keys shift-tab [n]
-  inject.py keys enter|esc
+  inject.py keys enter|esc|ctrl-c [n]
 """
 import fcntl
 import json
@@ -20,7 +20,7 @@ def commands(args):
     if len(args) == 2 and args[0] == "paste-file":
         with open(args[1], encoding="utf-8") as f:
             return [{"paste": f.read()}]
-    if args[:1] == ["keys"] and len(args) in (2, 3) and args[1] in ("shift-tab", "enter", "esc"):
+    if args[:1] == ["keys"] and len(args) in (2, 3) and args[1] in ("shift-tab", "enter", "esc", "ctrl-c"):
         return [{"keys": args[1]}] * (int(args[2]) if len(args) == 3 else 1)
     sys.exit(__doc__)
 

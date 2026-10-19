@@ -1,6 +1,6 @@
 # ADR 0002 : nos hooks arrivent par un plugin, la statusline est chaînée
 
-- Statut : accepté sous réserve du [prototype n° 1](../spikes/01-pty-hooks.md) (2026-10-19)
+- Statut : accepté, confirmé par le [prototype n° 1](../spikes/01-pty-hooks.md) (2026-10-19) : les hooks du plugin s'ajoutent à ceux de l'utilisateur, l'environnement et le `session_id` arrivent aux hooks, la statusline se chaîne.
 - Voir aussi : [architecture § 6 et § 7](../architecture.md#6-sources-de-données-par-ordre-de-confiance)
 
 ## Contexte

@@ -61,13 +61,17 @@ def wait_decision(payload, hook_timeout):
     # SPIKE_RELAY_GRACE négatif : le relais attend plus longtemps que claude, pour voir claude le tuer.
     deadline = start + max(1, hook_timeout - float(os.environ.get("SPIKE_RELAY_GRACE", "5")))
     outcome = "deadline"
+    updated_input = None
     try:
         while time.time() < deadline:
             if os.path.exists(decision_path):
                 with open(decision_path, encoding="utf-8") as f:
                     raw = f.read().strip()
                 try:
-                    outcome = json.loads(raw).get("decision", "")
+                    parsed = json.loads(raw)
+                    outcome = parsed.get("decision", "")
+                    # Q7 : permet de répondre à AskUserQuestion via updatedInput.answers.
+                    updated_input = parsed.get("updatedInput")
                 except ValueError:
                     outcome = raw
                 os.remove(decision_path)
@@ -86,6 +90,8 @@ def wait_decision(payload, hook_timeout):
         decision = {"behavior": outcome}
         if outcome == "deny":
             decision["message"] = "Refusé depuis decide.py (prototype n° 1)"
+        elif updated_input is not None:
+            decision["updatedInput"] = updated_input
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}))
     # « terminal » ou délai dépassé : aucune sortie, la TUI doit afficher sa propre demande.
 

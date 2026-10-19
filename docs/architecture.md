@@ -1,6 +1,6 @@
 # Architecture d'Orchestrateur
 
-> Statut : proposition validée le 2026-10-19, à confirmer par les prototypes techniques (voir § 17).
+> Statut : proposition validée le 2026-10-19. Prototype n° 1 concluant ([résultats](spikes/01-pty-hooks.md#résultats)) ; prototypes 2 à 4 à faire (voir § 17).
 > Décisions détaillées : [ADR 0001](adr/0001-demon-orchd.md), [ADR 0002](adr/0002-injection-des-hooks.md), [ADR 0003](adr/0003-permissions-depuis-l-app.md).
 > Maquettes : [`prototype/orchestrateur.html`](../prototype/orchestrateur.html).
 
@@ -123,8 +123,9 @@ Voir [ADR 0003](adr/0003-permissions-depuis-l-app.md). En résumé :
 
 - **PTY** côté démon (crate de type `portable-pty`), un par session et par runner.
 - **Émulateur sans affichage** par PTY (type `alacritty_terminal` ou `vt100`) + tampon circulaire : une UI qui se reconnecte reçoit l'écran courant puis le flux.
-- **Écrire dans une session** : les textes multi-lignes (revue, échecs de tests, dictée) partent en *bracketed paste*, sinon le premier retour à la ligne enverrait le message trop tôt.
-- **Changer de mode** : pas d'API. Le démon envoie Shift+Tab et vérifie le `permission_mode` du hook suivant. Contournement assumé, isolé dans un adaptateur.
+- **Écrire dans une session** : les textes multi-lignes (revue, échecs de tests, dictée) partent en *bracketed paste*, sinon le premier retour à la ligne enverrait le message trop tôt. Claude Code encadre un texte collé dans une balise `<pasted_content>`, que Claude traite comme du contenu venu d'ailleurs : la **consigne est tapée** (« Voici ma revue du diff, applique-la : »), seul le contenu est collé, puis Entrée.
+- **Changer de mode** : pas d'API. Le cycle de Shift+Tab est `manual` → `accept edits` → `plan` → `auto`. Le démon envoie le nombre de Shift+Tab nécessaires et vérifie le `permission_mode` du hook suivant. Contournement assumé, isolé dans un adaptateur.
+- **Confiance du dossier** : enregistrée par profil. Au premier lancement d'un projet dans un profil, la TUI la demande ; l'app doit le signaler au lieu de croire la session bloquée.
 
 ## 10. Intégrations
 

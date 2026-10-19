@@ -19,7 +19,7 @@ import tty
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
 FIFO = os.path.join(OUT, "inject.fifo")
-KEYS = {"shift-tab": b"\x1b[Z", "enter": b"\r", "esc": b"\x1b"}
+KEYS = {"shift-tab": b"\x1b[Z", "enter": b"\r", "esc": b"\x1b", "ctrl-c": b"\x03"}
 
 
 def log(**fields):

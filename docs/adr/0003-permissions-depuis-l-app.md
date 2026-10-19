@@ -1,6 +1,6 @@
 # ADR 0003 : répondre aux permissions depuis l'app, avec repli sur le terminal
 
-- Statut : accepté sous réserve du [prototype n° 1](../spikes/01-pty-hooks.md) (2026-10-19)
+- Statut : accepté, révisé après le [prototype n° 1](../spikes/01-pty-hooks.md) (2026-10-19)
 - Voir aussi : [architecture § 8](../architecture.md#8-permissions-et-questions)
 
 ## Contexte
@@ -11,11 +11,13 @@ Le hook `PermissionRequest` reçoit `tool_name` et `tool_input` et peut renvoyer
 
 ## Décision
 
+> Révisée le 2026-10-19 après le prototype n° 1 : la TUI affiche sa propre demande **pendant** que le hook attend. L'app et le terminal sont deux canaux concurrents ; la première réponse gagne.
+
 1. `orchd hook PermissionRequest` envoie la demande au démon et **attend la décision**. La session passe à « à répondre » et une notification part.
-2. Dans l'app : **Autoriser**, **Toujours pour ce projet** (Autoriser + règle ajoutée dans la configuration du projet), **Refuser**, ou **Répondre dans le terminal**.
-3. **Repli** : « Répondre dans le terminal », le dépassement du délai ou un démon injoignable font sortir le hook **sans décision**. Claude Code affiche alors sa propre demande dans la TUI. Le relais n'autorise jamais rien par défaut.
-4. Une réponse donnée dans le terminal (après repli) est détectée par le hook suivant (`PostToolUse` ou `Stop`), qui fait sortir la session de l'état « à répondre ».
-5. **Questions de Claude** (`AskUserQuestion`) : si un hook `PreToolUse` les voit passer, la question et ses options s'affichent dans l'app, et la réponse est envoyée au terminal par des touches. Sinon, l'app montre « Claude te pose une question » et ouvre le terminal.
+2. Dans l'app : **Autoriser**, **Toujours pour ce projet** (Autoriser + règle ajoutée dans la configuration du projet), **Refuser**. Une réponse de l'app ferme la demande affichée dans la TUI (constaté).
+3. **Réponse dans le terminal** : toujours possible, la demande y est affichée en même temps. Le démon la détecte au hook suivant (`PostToolUse` avec le même `tool_name` + `tool_input`, `Stop` ou `UserPromptSubmit`), retire la demande de l'app et libère le relais sans décision.
+4. Délai dépassé ou démon injoignable : le relais sort **sans décision**, la demande reste dans la TUI. Le relais n'autorise jamais rien par défaut.
+5. **Questions de Claude** (`AskUserQuestion`) : `PreToolUse` et `PermissionRequest` reçoivent la question et ses options, qui s'affichent dans l'app. La réponse part par le `PermissionRequest` : `allow` avec `updatedInput` = `tool_input` + `answers: {"<question>": "<option>"}`. Aucune touche simulée (constaté au prototype n° 1).
 
 ## Ce que le prototype n° 1 doit confirmer
 
@@ -29,6 +31,7 @@ Le hook `PermissionRequest` reçoit `tool_name` et `tool_input` et peut renvoyer
 
 - **Envoyer les touches de la TUI** (flèches, Entrée) pour répondre. Dépend de l'affichage exact de la TUI, casse à chaque version.
 - **Toujours répondre dans le terminal.** Plus simple, mais rate le besoin principal.
+- **Un bouton « Répondre dans le terminal » qui libère le hook.** Prévu dans la première version de cet ADR ; inutile puisque la TUI affiche déjà la demande.
 - **Autoriser par défaut au bout du délai.** Dangereux : jamais.
 
 ## Conséquences
