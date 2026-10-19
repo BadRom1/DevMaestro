@@ -17,6 +17,9 @@ pub use session::{
     Pending, PermissionMode, PermissionPending, Question, QuestionOption, QuestionPending, Session,
     SessionStatus, WaitKind,
 };
-pub use state::{Effect, PendingRequest, RequestId, Resolution, SessionState, apply};
+pub use state::{
+    Effect, PendingRequest, ProcessExit, REASON_DAEMON_RESTART, REASON_PROCESS_EXIT,
+    REASON_STOPPED_BY_APP, RequestId, Resolution, SessionState, apply,
+};
 pub use statusline::{Statusline, StatuslineParseError};
 pub use transcript::PastSession;

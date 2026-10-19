@@ -51,7 +51,7 @@ Tauri 2 a été écarté après mesure : sous Linux, il consomme 5 à 6 fois plu
 
 ### 4.3 Relais des hooks et de la statusline
 
-Sous-commandes du binaire `orchd` (`orchd hook <événement>`, `orchd statusline`), lancées par Claude Code. Elles lisent le JSON sur stdin, le transmettent au démon par le socket et, pour `PermissionRequest` uniquement, attendent la décision. Les autres événements sont envoyés sans attendre de réponse (`SessionEnd` ne dispose que de 1,5 s).
+Sous-commandes du binaire `orchd` (`orchd hook <événement>`, `orchd statusline`), lancées par Claude Code. Elles lisent le JSON sur stdin, le transmettent au démon par le socket et, pour `PermissionRequest` uniquement, attendent la décision. Pour les autres événements, le relais attend seulement un accusé de réception (pas une décision), dans un budget court (1 s, 0,5 s pour `SessionEnd`, qui ne dispose que de 1,5 s) : les hooks d'une session sont ainsi appliqués dans l'ordre. Détails : [protocole](protocole.md#8-relais-orchd-hook-orchd-statusline).
 
 ### 4.4 Préparer SSH sans le faire
 
@@ -166,11 +166,13 @@ Interface `QuotaSource`, résultat par profil, chaque fenêtre (5 h, 7 jours) po
 | Configuration (profils, projets, voix, raccourcis) | `$XDG_CONFIG_HOME/devmaestro/config.toml` | TOML |
 | Thèmes | `$XDG_CONFIG_HOME/devmaestro/themes/*.toml` | TOML, partageables |
 | Plugin Claude Code généré | `$XDG_DATA_HOME/devmaestro/claude-plugin/` | plugin Claude Code |
+| Réglages générés (statusline chaînée) | `$XDG_DATA_HOME/devmaestro/settings/<profil>.json` | JSON |
+| Journal du démon | `$XDG_STATE_HOME/devmaestro/orchd.log` | texte |
 | Socket | `$XDG_RUNTIME_DIR/devmaestro/orchd.sock` | droits 0600 |
 
 ## 14. Protocole entre l'app et le démon
 
-- Socket Unix, trames préfixées par leur longueur, avec un octet de type : JSON-RPC 2.0 (requêtes, réponses, notifications d'état) ou octets bruts d'un PTY (identifiant de session + données).
+- Socket Unix, trames préfixées par leur longueur, avec un octet de type : JSON-RPC 2.0 (requêtes, réponses, notifications d'état) ou octets bruts d'un PTY (identifiant de session + données). Contrat détaillé : [protocole](protocole.md).
 - L'app s'abonne aux sessions affichées ; le démon pousse les changements d'état à tous les clients.
 - Côté front, le processus principal Electron relaie vers la page par `MessagePort` (octets du terminal en binaire, par lots d'au moins ~1 Ko ou toutes les ~16 ms).
 

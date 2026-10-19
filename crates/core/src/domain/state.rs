@@ -412,6 +412,85 @@ impl SessionState {
     }
 }
 
+/// Fin du processus `claude`, vue par le démon (lot 2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessExit {
+    /// Le démon a demandé l'arrêt (`sessions.stop`, arrêt du démon).
+    Requested,
+    /// Le processus est sorti seul avec ce code.
+    Code(i32),
+    /// Le processus a été tué par un signal que le démon n'a pas envoyé.
+    Signal(String),
+}
+
+/// Raison d'arrêt quand le processus sort sans `SessionEnd`, à la demande du démon.
+pub const REASON_STOPPED_BY_APP: &str = "stopped_by_app";
+/// Raison d'arrêt quand le processus sort seul, avec le code 0, sans `SessionEnd`.
+pub const REASON_PROCESS_EXIT: &str = "process_exit";
+/// Raison d'arrêt d'une session retrouvée active en base au démarrage du démon.
+pub const REASON_DAEMON_RESTART: &str = "daemon_restart";
+
+impl SessionState {
+    /// État relu depuis la base : activité, mode et dernière activité, sans
+    /// demande en attente (elles ne survivent pas au processus). `Waiting`
+    /// est lu comme `Running`.
+    pub fn restored(
+        status: SessionStatus,
+        permission_mode: Option<PermissionMode>,
+        last_activity: Option<OffsetDateTime>,
+    ) -> Self {
+        let activity = match status {
+            SessionStatus::Waiting(_) => SessionStatus::Running,
+            other => other,
+        };
+        Self {
+            permission_mode,
+            last_activity,
+            activity,
+            ..Self::default()
+        }
+    }
+
+    /// Le processus `claude` est terminé.
+    ///
+    /// Règles (architecture § 5.1) :
+    /// - déjà `Stopped` (un `SessionEnd` est arrivé) : rien ne change ;
+    /// - sinon toutes les demandes sont retirées (`Cleared`) et l'activité
+    ///   devient `Stopped { reason: stopped_by_app }` si le démon a demandé
+    ///   l'arrêt, `Stopped { reason: process_exit }` pour un code 0, `Error`
+    ///   pour un code non nul ou un signal inattendu.
+    ///
+    /// `last_activity` n'est pas modifiée : ce n'est pas un événement de Claude.
+    pub fn process_exited(&mut self, exit: &ProcessExit, now: OffsetDateTime) -> Vec<Effect> {
+        if matches!(self.activity, SessionStatus::Stopped { .. }) {
+            return Vec::new();
+        }
+        let activity = match exit {
+            ProcessExit::Requested => SessionStatus::Stopped {
+                reason: Some(REASON_STOPPED_BY_APP.to_owned()),
+            },
+            ProcessExit::Code(0) => SessionStatus::Stopped {
+                reason: Some(REASON_PROCESS_EXIT.to_owned()),
+            },
+            ProcessExit::Code(_) | ProcessExit::Signal(_) => SessionStatus::Error,
+        };
+        let was_waiting = !self.pending.is_empty();
+        let mut fx = Vec::new();
+        self.end_turn(activity, now, &mut fx);
+        self.possibly_stale = false;
+        if was_waiting {
+            fx.push(Effect::ClearWaiting);
+        }
+        fx
+    }
+
+    /// Vrai si l'activité est `Stopped` (un `SessionEnd` est arrivé, ou le
+    /// processus est terminé).
+    pub fn is_stopped(&self) -> bool {
+        matches!(self.activity, SessionStatus::Stopped { .. })
+    }
+}
+
 /// Applique un événement de hook à l'état d'une session. Voir les règles du module.
 pub fn apply(state: &mut SessionState, event: &HookEvent, now: OffsetDateTime) -> Vec<Effect> {
     state.last_activity = Some(now);

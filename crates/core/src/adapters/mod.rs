@@ -1,9 +1,15 @@
 //! Adaptateurs : implémentations concrètes des ports.
 
 pub mod clock;
+pub mod git_cli;
 pub mod profiles;
+pub mod pty;
+pub mod sqlite;
 pub mod transcripts;
 
 pub use clock::SystemClock;
+pub use git_cli::GitCli;
 pub use profiles::{FsProfileSource, discover_profiles};
+pub use pty::NativePty;
+pub use sqlite::SqliteStore;
 pub use transcripts::{FsTranscriptSource, list_past_sessions};

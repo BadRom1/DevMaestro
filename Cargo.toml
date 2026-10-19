@@ -15,6 +15,14 @@ publish = false
 # Versions vérifiées sur crates.io le 2026-10-19 (`cargo search` / `cargo info`).
 serde_json = "1.0.154"
 thiserror = "2.0.21"
-time = { version = "0.3.55", features = ["parsing"] }
-uuid = "1.28.0"
+time = { version = "0.3.55", features = ["parsing", "formatting"] }
+uuid = { version = "1.28.0", features = ["v4", "serde"] }
 tempfile = "3.27.0"
+# Lot 2, versions vérifiées sur crates.io le 2026-10-19 (`cargo search` / `cargo info`).
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
+portable-pty = "0.9.0"
+vt100 = "0.18.1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+clap = { version = "4.6.7", features = ["derive"] }
+getrandom = "0.4.3"
+nix = { version = "0.31.3", features = ["signal", "fs", "process", "term", "ioctl", "poll", "user"] }

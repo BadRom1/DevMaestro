@@ -17,6 +17,12 @@ Claude Code accepte au lancement `--settings <fichier ou JSON>` et `--plugin-dir
 4. **Reprise** : `--plugin-dir` et `--settings` sont repassés à chaque `--resume`, Claude Code ne les restaure pas.
 5. Les hooks non bloquants envoient leur événement sans attendre (`SessionEnd` ne dispose que de 1,5 s).
 
+### Amendement du 2026-10-19 (lot 2)
+
+- **Accusé de réception** : le relais attend un accusé du démon (pas une décision) dans un budget de 1 s (0,5 s pour `SessionEnd`), puis sort en 0 quoi qu'il arrive. Sans cet accusé, deux hooks lancés coup sur coup passent par deux connexions et peuvent être appliqués dans le désordre. Le point 5 ci-dessus est remplacé par cette règle.
+- **Événements déclarés** : le plugin déclare 13 événements : ceux du point 1, plus `PostToolUseFailure`, `PermissionDenied` (clôture des demandes refusées ou en échec), `SubagentStart` et `SubagentStop` (suivi des sous-agents).
+- **Mode de permission** : `--permission-mode` n'est passé que si l'utilisateur choisit un mode au lancement ; sinon Claude Code applique le `defaultMode` du profil. Le mode « par défaut » s'écrit `manual` en ligne de commande et revient `default` dans les hooks.
+
 ## Ce que le prototype n° 1 doit confirmer
 
 - Les hooks du plugin s'exécutent **en plus** de ceux de l'utilisateur (peon-ping sonne toujours). La documentation des hooks l'indique (les hooks des différents niveaux de réglages et des plugins s'additionnent) ; reste à le constater.

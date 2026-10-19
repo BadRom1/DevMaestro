@@ -511,3 +511,83 @@ fn unknown_events_change_nothing_but_activity() {
     apply(&mut s, &notif("autre_chose"), t(6));
     assert_eq!(s.status(), SessionStatus::Running);
 }
+
+#[test]
+fn process_exit_without_session_end() {
+    // Code 0 sans SessionEnd : arrêtée, demandes retirées.
+    let mut s = running();
+    apply(&mut s, &perm("Bash", bash("ls")), t(1));
+    let fx = s.process_exited(&ProcessExit::Code(0), t(2));
+    assert_eq!(
+        fx,
+        vec![resolved(1, Resolution::Cleared), Effect::ClearWaiting]
+    );
+    assert_eq!(
+        s.status(),
+        SessionStatus::Stopped {
+            reason: Some(REASON_PROCESS_EXIT.into())
+        }
+    );
+    assert!(s.pending().is_empty());
+    assert_eq!(s.last_activity, Some(t(1)));
+
+    // Code non nul ou signal inattendu : erreur.
+    let mut s = running();
+    assert!(s.process_exited(&ProcessExit::Code(1), t(2)).is_empty());
+    assert_eq!(s.status(), SessionStatus::Error);
+    let mut s = running();
+    s.process_exited(&ProcessExit::Signal("SIGKILL".into()), t(2));
+    assert_eq!(s.status(), SessionStatus::Error);
+
+    // Arrêt demandé par le démon.
+    let mut s = running();
+    s.process_exited(&ProcessExit::Requested, t(2));
+    assert_eq!(
+        s.status(),
+        SessionStatus::Stopped {
+            reason: Some(REASON_STOPPED_BY_APP.into())
+        }
+    );
+}
+
+#[test]
+fn process_exit_after_session_end_keeps_reason() {
+    let mut s = running();
+    apply(
+        &mut s,
+        &ev(HookKind::SessionEnd {
+            reason: Some("prompt_input_exit".into()),
+        }),
+        t(1),
+    );
+    assert!(s.process_exited(&ProcessExit::Code(1), t(2)).is_empty());
+    assert_eq!(
+        s.status(),
+        SessionStatus::Stopped {
+            reason: Some("prompt_input_exit".into())
+        }
+    );
+    assert!(s.is_stopped());
+}
+
+#[test]
+fn restored_state_has_no_pending_and_resumes_on_session_start() {
+    let mut s = SessionState::restored(
+        SessionStatus::Waiting(WaitKind::Permission),
+        Some(PermissionMode::Plan),
+        Some(t(5)),
+    );
+    assert_eq!(s.status(), SessionStatus::Running);
+    assert_eq!(s.permission_mode, Some(PermissionMode::Plan));
+    s.process_exited(&ProcessExit::Requested, t(6));
+    assert!(s.is_stopped());
+    apply(
+        &mut s,
+        &ev(HookKind::SessionStart {
+            source: Some("resume".into()),
+            model: None,
+        }),
+        t(7),
+    );
+    assert_eq!(s.status(), SessionStatus::Idle);
+}

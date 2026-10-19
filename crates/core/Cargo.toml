@@ -14,11 +14,35 @@ path = "src/lib.rs"
 name = "orchd"
 path = "src/main.rs"
 
+# Faux `claude` pour les tests d'intégration du démon (jamais distribué) :
+# imite la TUI, appelle les hooks du plugin généré et la statusline.
+# Construit seulement avec la fonctionnalité `test-support`, activée pour les
+# tests par la dépendance de développement du paquet sur lui-même (plus bas) :
+# `cargo test` le construit, `cargo build --release` non.
+[[bin]]
+name = "devmaestro-fake-claude"
+path = "tests/support/fake_claude.rs"
+test = false
+doc = false
+required-features = ["test-support"]
+
+[features]
+test-support = []
+
 [dependencies]
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 uuid.workspace = true
+tokio.workspace = true
+portable-pty.workspace = true
+vt100.workspace = true
+rusqlite.workspace = true
+clap.workspace = true
+nix.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Active `test-support` (faux claude) pour les tests seulement.
+devmaestro-core = { path = ".", features = ["test-support"] }
