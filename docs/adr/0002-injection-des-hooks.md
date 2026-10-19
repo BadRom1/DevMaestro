@@ -7,7 +7,7 @@
 
 L'état des sessions vient des hooks de Claude Code et des données reçues par la statusline. L'app doit les brancher sur chaque session qu'elle lance, sans modifier les fichiers de configuration de l'utilisateur.
 
-Claude Code accepte au lancement `--settings <fichier ou JSON>` et `--plugin-dir <dossier>`. La documentation ne dit pas si des hooks passés par `--settings` **s'ajoutent** à ceux de l'utilisateur ou les **remplacent**. Or L'utilisateur utilise peon-ping en hook : s'il était remplacé, toutes les sessions lancées par l'app deviendraient muettes.
+Claude Code accepte au lancement `--settings <fichier ou JSON>` et `--plugin-dir <dossier>`. La documentation ne dit pas si des hooks passés par `--settings` **s'ajoutent** à ceux de l'utilisateur ou les **remplacent**. Or l'utilisateur utilise peon-ping en hook : s'il était remplacé, toutes les sessions lancées par l'app deviendraient muettes.
 
 ## Décision
 
