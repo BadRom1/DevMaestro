@@ -1,0 +1,1361 @@
+<title>Orchestrateur</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout : coque d'app desktop — barre de quotas en haut, arbre projets à gauche, session (terminal/diff/app/run/livraison) à droite ; vue B = kanban par statut. */
+:root{
+  --bg:#0f1218; --panel:#161a22; --panel-2:#1c212b; --sunk:#0b0d12; --line:#272d3a; --line-2:#323949;
+  --fg:#dde2ec; --muted:#8a93a6; --faint:#5f6779;
+  --accent:#86a8ff; --accent-ink:#0f1218;
+  --wait:#f2a93b; --run:#55c4a2; --idle:#8a93a6; --done:#7fb069; --err:#ef6b6b;
+  --add:#55c4a2; --del:#ef6b6b;
+  --add-bg:color-mix(in srgb,var(--add) 13%,transparent); --del-bg:color-mix(in srgb,var(--del) 13%,transparent);
+  --f-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-label:"IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif;
+  --f-mono:"JetBrains Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+  --r:6px;
+  color-scheme:dark;
+}
+@media (prefers-color-scheme: light){ :root:not([data-theme="dark"]){
+  --bg:#eef1f6; --panel:#ffffff; --panel-2:#f3f5f9; --sunk:#f7f8fb; --line:#d9dee8; --line-2:#c9d0dc;
+  --fg:#1a1f2c; --muted:#5b6476; --faint:#8b93a3;
+  --accent:#2f5bd3; --accent-ink:#ffffff;
+  --wait:#b26a00; --run:#11866a; --idle:#6b7385; --done:#3f7d2c; --err:#c33b3b;
+  --add:#11866a; --del:#c33b3b;
+  color-scheme:light;
+}}
+:root[data-theme="light"]{
+  --bg:#eef1f6; --panel:#ffffff; --panel-2:#f3f5f9; --sunk:#f7f8fb; --line:#d9dee8; --line-2:#c9d0dc;
+  --fg:#1a1f2c; --muted:#5b6476; --faint:#8b93a3;
+  --accent:#2f5bd3; --accent-ink:#ffffff;
+  --wait:#b26a00; --run:#11866a; --idle:#6b7385; --done:#3f7d2c; --err:#c33b3b;
+  --add:#11866a; --del:#c33b3b;
+  color-scheme:light;
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:13.5px;line-height:1.45}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.mono{font-family:var(--f-mono);font-size:12.5px}
+.muted{color:var(--muted)}
+.lbl{font-family:var(--f-label);text-transform:uppercase;letter-spacing:.06em;font-size:11px;color:var(--muted);font-weight:600}
+
+.app{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr);gap:12px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:12px}
+
+/* Top bar */
+.top{display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px}
+.brand{display:flex;align-items:baseline;gap:8px}
+.brand b{font-family:var(--f-label);font-size:17px;letter-spacing:.02em}
+.proto{font-size:11px;color:var(--muted);border:1px dashed var(--line-2);border-radius:99px;padding:1px 8px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:var(--panel)}
+.seg button{border:0;background:transparent;padding:5px 12px;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--panel-2);color:var(--fg);box-shadow:inset 0 -2px 0 var(--accent)}
+.quotas{display:flex;flex-wrap:wrap;gap:6px 18px}
+.quota{display:grid;grid-template-columns:auto auto auto;align-items:center;gap:2px 8px;font-size:12px}
+.quota .who{font-family:var(--f-label);font-weight:600;grid-row:span 2}
+.quota .k{color:var(--muted)}
+.quota .v{font-variant-numeric:tabular-nums;color:var(--muted);white-space:nowrap}
+.meter{display:inline-block;width:86px;height:6px;border-radius:3px;background:var(--line);overflow:hidden;vertical-align:middle}
+.meter i{display:block;height:100%;background:var(--accent)}
+.meter i.hot{background:var(--wait)}
+.meter i.crit{background:var(--err)}
+.spacer{flex:1}
+.pill-wait{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--wait);color:var(--wait);background:transparent;border-radius:99px;padding:3px 10px;font-weight:600}
+.btn{border:1px solid var(--line-2);background:var(--panel-2);border-radius:var(--r);padding:5px 11px}
+.btn:hover{border-color:var(--faint)}
+.btn.pri{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600}
+.btn.warn{border-color:var(--wait);color:var(--wait);background:transparent}
+.btn.ghost{background:transparent}
+.btn.sm{padding:2px 8px;font-size:12px}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+
+/* Status glyphs: shape + color */
+.st{display:inline-grid;place-items:center;width:14px;height:14px;flex:none;border-radius:50%;font-size:9px;font-weight:700;line-height:1}
+.st.waiting{background:var(--wait);color:var(--bg);border-radius:3px}
+.st.waiting::after{content:"!"}
+.st.running{border:2px solid var(--run);border-top-color:transparent;animation:spin 1.1s linear infinite}
+.st.idle{border:2px solid var(--idle)}
+.st.done{background:var(--done);color:var(--bg)}
+.st.done::after{content:"✓"}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion: reduce){ .st.running,.cursor{animation:none!important} }
+
+.chip{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line-2);border-radius:99px;padding:0 7px;font-size:11.5px;color:var(--muted);white-space:nowrap}
+.chip.perso{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}
+.chip.boulot{border-color:color-mix(in srgb,var(--done) 55%,var(--line))}
+.chip.wt::before{content:"⑂";font-size:12px}
+.chip.ok{color:var(--done);border-color:var(--done)}
+.chip.bad{color:var(--err);border-color:var(--err)}
+.chip.pend{color:var(--wait);border-color:var(--wait)}
+
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;min-width:0}
+
+/* View A */
+.viewA{display:grid;grid-template-columns:268px minmax(0,1fr);gap:12px;min-height:0}
+.side{overflow:auto;padding:10px 6px 12px}
+.side .cap{padding:2px 10px 8px;display:flex;justify-content:space-between;align-items:center}
+.proj{margin-bottom:6px}
+.proj-h{display:flex;align-items:center;gap:6px;padding:6px 10px 2px}
+.proj-h b{font-weight:600}
+.proj-h .count{margin-left:auto;color:var(--wait);font-size:12px;font-weight:600}
+.proj-path{padding:0 10px 4px;font-family:var(--f-mono);font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.srow{display:flex;align-items:center;gap:8px;width:100%;border:0;background:transparent;text-align:left;padding:5px 10px 5px 16px;border-radius:5px}
+.srow:hover{background:var(--panel-2)}
+.srow[aria-current="true"]{background:var(--panel-2);box-shadow:inset 2px 0 0 var(--accent)}
+.srow .br{font-family:var(--f-mono);font-size:12.5px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.srow .ago{margin-left:auto;font-size:11.5px;color:var(--faint);white-space:nowrap;font-variant-numeric:tabular-nums}
+.srow .clean{margin-left:auto;font-size:11px;color:var(--wait)}
+.old{border-top:1px solid var(--line);margin-top:10px;padding-top:8px}
+.old .srow .br{font-family:var(--f-body)}
+
+.sess{display:grid;grid-template-rows:auto auto minmax(0,1fr);min-height:0;overflow:hidden}
+.sh{padding:12px 14px 10px;border-bottom:1px solid var(--line);display:grid;gap:8px}
+.sh-1{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.sh-1 h2{margin:0;font-size:15px;font-weight:600;font-family:var(--f-mono)}
+.sh-1 h2 span{color:var(--muted)}
+.sh-2{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.sh-2 b{color:var(--fg);font-weight:500}
+.sh .acts{margin-left:auto;display:flex;gap:6px}
+select.mode{background:var(--panel-2);border:1px solid var(--line-2);border-radius:99px;padding:1px 6px;font-size:12px}
+.issue-link{color:var(--accent);text-decoration:none}
+.tabs{display:flex;gap:2px;padding:0 10px;border-bottom:1px solid var(--line);overflow-x:auto}
+.tabs button{border:0;background:transparent;padding:8px 12px;color:var(--muted);border-bottom:2px solid transparent;white-space:nowrap;display:inline-flex;gap:6px;align-items:center}
+.tabs button[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--accent)}
+.badge{font-size:11px;border-radius:99px;padding:0 6px;background:var(--line);color:var(--fg);font-variant-numeric:tabular-nums}
+.badge.bad{background:var(--err);color:var(--bg)}
+.badge.wait{background:var(--wait);color:var(--bg)}
+.content{min-height:0;overflow:auto}
+
+/* Terminal */
+.term{background:var(--sunk);height:100%;display:grid;grid-template-rows:minmax(0,1fr) auto}
+.term-out{overflow:auto;padding:14px 16px;font-family:var(--f-mono);font-size:12.5px;line-height:1.6}
+.tl{white-space:pre-wrap;word-break:break-word}
+.tl.user{background:var(--panel-2);border-left:2px solid var(--faint);padding:4px 10px;margin:10px 0 8px;color:var(--fg)}
+.tl.user::before{content:"> ";color:var(--muted)}
+.tl.claude::before{content:"● ";color:var(--fg)}
+.tl.tool::before{content:"● ";color:var(--run)}
+.tl.tool b{font-weight:500}
+.tl.out{color:var(--muted);padding-left:16px}
+.tl.out::before{content:"⎿  "}
+.tl.sys{color:var(--faint)}
+.tl.ok{color:var(--done)}
+.tl.bad{color:var(--err)}
+.cursor{display:inline-block;width:8px;height:14px;background:var(--fg);vertical-align:-2px;animation:pulse 1s steps(1) infinite}
+.ask{margin:12px 0 4px;border:1px solid var(--wait);border-radius:var(--r);padding:10px 12px;background:color-mix(in srgb,var(--wait) 7%,var(--sunk));font-family:var(--f-body);font-size:13px;display:grid;gap:8px}
+.ask .t{color:var(--wait);font-weight:600}
+.ask code{font-family:var(--f-mono);font-size:12.5px;background:var(--panel-2);padding:2px 6px;border-radius:4px}
+.ask .row{display:flex;flex-wrap:wrap;gap:6px}
+.compose{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line);background:var(--panel)}
+.compose input{flex:1;min-width:0;background:var(--sunk);border:1px solid var(--line-2);border-radius:var(--r);padding:6px 10px;font-family:var(--f-mono);font-size:12.5px}
+
+/* Diff review */
+.diff{display:grid;grid-template-columns:230px minmax(0,1fr);height:100%;min-height:0}
+.files{border-right:1px solid var(--line);overflow:auto;padding:8px 6px;display:flex;flex-direction:column;gap:2px}
+.frow{display:flex;align-items:center;gap:6px;border:0;background:transparent;text-align:left;padding:4px 8px;border-radius:5px;font-family:var(--f-mono);font-size:12px;width:100%}
+.frow:hover{background:var(--panel-2)}
+.frow[aria-current="true"]{background:var(--panel-2)}
+.frow .s{width:12px;color:var(--wait);font-weight:600}
+.frow .s.A{color:var(--run)}
+.frow .n{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.frow .st2{margin-left:auto;white-space:nowrap;font-size:11px}
+.plus{color:var(--add)} .minus{color:var(--del)}
+.frow.seen .n{color:var(--faint);text-decoration:line-through}
+.dmain{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-height:0}
+.dhead{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line)}
+.dhead .path{font-family:var(--f-mono);font-size:12.5px}
+.dhead label{margin-left:auto;font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center}
+.dscroll{overflow:auto}
+table.code{border-collapse:collapse;width:100%;font-family:var(--f-mono);font-size:12.5px}
+table.code td{padding:0 10px;white-space:pre;vertical-align:top}
+table.code td.no{width:1%;color:var(--faint);text-align:right;user-select:none;padding:0 6px;font-variant-numeric:tabular-nums}
+table.code td.cbtn{width:1%;padding:0 2px}
+table.code td.cbtn button{opacity:0;border:0;background:var(--accent);color:var(--accent-ink);border-radius:3px;width:16px;height:16px;line-height:16px;padding:0;font-size:12px}
+table.code tr:hover td.cbtn button,table.code td.cbtn button:focus-visible{opacity:1}
+tr.add td.c{background:var(--add-bg)} tr.add td.c::before{content:"+ ";color:var(--add)}
+tr.del td.c{background:var(--del-bg)} tr.del td.c::before{content:"− ";color:var(--del)}
+tr.ctx td.c::before{content:"  "}
+tr.hunk td{color:var(--accent);background:var(--panel-2);padding-block:2px}
+tr.cm td{padding:6px 12px 8px 60px;white-space:normal}
+.cbox{border:1px solid var(--line-2);border-radius:var(--r);background:var(--panel-2);padding:8px 10px;font-family:var(--f-body);font-size:13px;max-width:640px;display:grid;gap:6px}
+.cbox .who{font-size:11.5px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.cbox textarea{width:100%;min-height:60px;background:var(--sunk);border:1px solid var(--line-2);border-radius:5px;padding:6px 8px;resize:vertical}
+.cbox .row{display:flex;gap:6px;justify-content:flex-end}
+.dfoot{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px;border-top:1px solid var(--line);background:var(--panel)}
+.dfoot input{flex:1;min-width:180px;background:var(--sunk);border:1px solid var(--line-2);border-radius:var(--r);padding:5px 9px}
+
+/* App + Run */
+.pane{padding:14px;display:grid;gap:12px;align-content:start}
+.runners{display:flex;flex-wrap:wrap;gap:8px}
+.runner{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:var(--r);padding:5px 6px 5px 10px;background:var(--panel-2)}
+.runner .nm{font-weight:600}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--idle)}
+.dot.running{background:var(--run)} .dot.ok{background:var(--done)} .dot.failed{background:var(--err)} .dot.pending{background:var(--wait)}
+.note{font-size:12px;color:var(--muted);border-left:2px solid var(--wait);padding-left:8px}
+.browser{border:1px solid var(--line-2);border-radius:8px;overflow:hidden;background:var(--panel)}
+.urlbar{display:flex;gap:8px;align-items:center;padding:6px 8px;background:var(--panel-2);border-bottom:1px solid var(--line)}
+.urlbar .url{flex:1;min-width:0;background:var(--sunk);border:1px solid var(--line);border-radius:5px;padding:3px 9px;font-family:var(--f-mono);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.logs{background:var(--sunk);border:1px solid var(--line);border-radius:var(--r);padding:8px 10px;font-family:var(--f-mono);font-size:12px;color:var(--muted);max-height:150px;overflow:auto;white-space:pre-wrap}
+.empty{padding:28px;text-align:center;color:var(--muted);display:grid;gap:10px;justify-items:center}
+/* the mock web app inside the preview: its own fixed light look */
+.mock{background:#fbfaf7;color:#22251f;font-family:var(--f-body);padding:18px 20px;min-height:260px}
+.mock h3{margin:0 0 2px;font-size:16px}
+.mock .sub{color:#6c6f66;font-size:12px;margin-bottom:14px}
+.mock table{width:100%;border-collapse:collapse;font-size:13px}
+.mock td,.mock th{padding:6px 8px;border-bottom:1px solid #e6e3da;text-align:left}
+.mock th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#6c6f66}
+.mock .bar{height:6px;background:#e6e3da;border-radius:3px;overflow:hidden;width:120px}
+.mock .bar i{display:block;height:100%;background:#4c7a46}
+.mock .late{color:#b5462f;font-weight:600;font-size:12px}
+table.cmds{width:100%;border-collapse:collapse}
+table.cmds td,table.cmds th{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+table.cmds th{font-weight:600}
+.testsum{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+
+/* Livraison */
+.ship{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.card{border:1px solid var(--line);border-radius:8px;padding:12px 14px;background:var(--panel-2);display:grid;gap:8px;align-content:start}
+.card h3{margin:0;font-size:14px}
+.card p{margin:0;color:var(--muted);font-size:12.5px}
+.checks{display:grid;gap:5px;margin:0;padding:0;list-style:none}
+.checks li{display:flex;align-items:center;gap:8px;font-size:12.5px}
+.checks .r{margin-left:auto;color:var(--faint);font-variant-numeric:tabular-nums;font-size:12px}
+.banner{border:1px solid var(--wait);border-radius:8px;padding:10px 12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:color-mix(in srgb,var(--wait) 7%,var(--panel))}
+.banner.ok{border-color:var(--done);background:color-mix(in srgb,var(--done) 8%,var(--panel))}
+
+/* View B : kanban */
+.kanban{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;min-height:0}
+.col{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+.col-h{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line)}
+.col-h b{font-family:var(--f-label);font-size:13px;text-transform:uppercase;letter-spacing:.05em}
+.col-h .n{margin-left:auto;color:var(--muted);font-variant-numeric:tabular-nums}
+.col-b{overflow:auto;padding:10px;display:grid;gap:10px;align-content:start}
+.kc{border:1px solid var(--line);border-radius:var(--r);background:var(--panel-2);padding:10px;display:grid;gap:7px;text-align:left;width:100%}
+.kc:hover{border-color:var(--line-2)}
+.kc.waiting{border-left:3px solid var(--wait)}
+.kc .t{font-family:var(--f-mono);font-size:12.5px;display:flex;gap:6px;align-items:center;min-width:0}
+.kc .t span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kc .q{font-size:12.5px;color:var(--fg)}
+.kc .last{font-size:12px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.kc .meta{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;align-items:center}
+.kc .meter{width:52px}
+.kc .row{display:flex;gap:6px;flex-wrap:wrap}
+
+/* Modal */
+.scrim{position:fixed;inset:0;background:rgba(5,7,12,.55);display:grid;place-items:center;z-index:20;
+  padding:calc(16px + env(safe-area-inset-top,0px)) max(16px,env(safe-area-inset-right,0px)) calc(16px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px))}
+.modal{width:min(820px,100%);max-height:100%;overflow:auto;background:var(--panel);border:1px solid var(--line-2);border-radius:10px;display:grid}
+.mh{display:flex;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line)}
+.mh h2{margin:0;font-size:16px}
+.mh .x{margin-left:auto}
+.mb{padding:14px 16px;display:grid;gap:14px}
+.grid4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.field{display:grid;gap:4px;min-width:0}
+.field select,.field input,.field textarea{background:var(--sunk);border:1px solid var(--line-2);border-radius:var(--r);padding:5px 8px;min-width:0;width:100%}
+.field textarea{min-height:110px;font-family:var(--f-mono);font-size:12.5px;resize:vertical}
+.hint{font-size:11.5px;color:var(--faint)}
+.issues{border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.issues .ih{display:flex;gap:8px;align-items:center;padding:7px 10px;background:var(--panel-2);border-bottom:1px solid var(--line)}
+.issues .ih input{margin-left:auto;background:var(--sunk);border:1px solid var(--line-2);border-radius:5px;padding:3px 8px;width:180px;max-width:50%}
+.irow{display:flex;align-items:center;gap:10px;padding:7px 10px;border-bottom:1px solid var(--line);width:100%;background:transparent;border-left:0;border-right:0;border-top:0;text-align:left}
+.irow:last-child{border-bottom:0}
+.irow:hover{background:var(--panel-2)}
+.irow[aria-pressed="true"]{background:color-mix(in srgb,var(--accent) 12%,var(--panel))}
+.irow .num{font-family:var(--f-mono);color:var(--muted);width:44px;flex:none;font-size:12.5px}
+.irow .ti{min-width:0;flex:1}
+.irow .tag{font-size:11px;border-radius:99px;padding:0 7px;border:1px solid var(--line-2);color:var(--muted)}
+.tag.bug{color:var(--err);border-color:var(--err)} .tag.epic{color:var(--accent);border-color:var(--accent)}
+.subs{padding:4px 10px 8px 64px;display:grid;gap:4px;border-bottom:1px solid var(--line);background:var(--panel-2)}
+.subs label{display:flex;gap:8px;align-items:center;font-size:12.5px}
+.mf{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 16px;border-top:1px solid var(--line)}
+.mf .sum{color:var(--muted);font-size:12.5px;margin-right:auto}
+.radios{display:flex;flex-wrap:wrap;gap:6px}
+.radios button{border:1px solid var(--line-2);background:transparent;border-radius:99px;padding:3px 12px;color:var(--muted)}
+.radios button[aria-pressed="true"]{border-color:var(--accent);color:var(--fg);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+
+/* Toasts */
+.toasts{position:fixed;right:max(16px,env(safe-area-inset-right,0px));bottom:calc(16px + env(safe-area-inset-bottom,0px));display:grid;gap:8px;z-index:30;width:min(340px,calc(100% - 32px))}
+.toast{background:var(--panel-2);border:1px solid var(--line-2);border-left:3px solid var(--accent);border-radius:var(--r);padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,.25);display:grid;gap:6px}
+.toast.wait{border-left-color:var(--wait)}
+.toast .tt{font-weight:600;font-size:13px}
+.toast .tx{font-size:12.5px;color:var(--muted)}
+.toast .row{display:flex;gap:6px;justify-content:flex-end}
+
+/* Fichiers + lecteur Markdown */
+.fpane{display:grid;grid-template-columns:240px minmax(0,1fr) 190px;height:100%;min-height:0}
+.fpane.notoc{grid-template-columns:240px minmax(0,1fr)}
+.ftree{border-right:1px solid var(--line);overflow:auto;padding:8px 6px;display:grid;gap:1px;align-content:start}
+.ftree input{margin:0 2px 6px;background:var(--sunk);border:1px solid var(--line-2);border-radius:5px;padding:4px 8px;font-size:12.5px;min-width:0}
+.trow{display:flex;align-items:center;gap:6px;border:0;background:transparent;text-align:left;padding:3px 8px;border-radius:5px;font-size:12.5px;width:100%;white-space:nowrap;min-width:0}
+.trow:hover{background:var(--panel-2)}
+.trow[aria-current="true"]{background:var(--panel-2);box-shadow:inset 2px 0 0 var(--accent)}
+.trow .ic{width:14px;color:var(--faint);font-family:var(--f-mono);font-size:11px;flex:none;text-align:center}
+.trow .nm{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.trow .mk{margin-left:auto;font-family:var(--f-mono);font-size:11px;font-weight:600;color:var(--wait)}
+.trow .mk.A{color:var(--add)}
+.trow.dir .nm{font-weight:500}
+.fview{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0}
+.fhead{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line)}
+.crumbs{font-family:var(--f-mono);font-size:12.5px;color:var(--muted);min-width:0;overflow-wrap:anywhere}
+.crumbs b{color:var(--fg);font-weight:500}
+.fhead .acts{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+.fbody{overflow:auto;min-height:0}
+.md{max-width:74ch;padding:20px 26px 48px;font-size:14px;line-height:1.62}
+.md h1{font-size:22px;line-height:1.25;margin:0 0 12px;text-wrap:balance}
+.md h2{font-size:17px;margin:26px 0 8px;padding-bottom:4px;border-bottom:1px solid var(--line);text-wrap:balance}
+.md h3{font-size:15px;margin:20px 0 6px}
+.md h4{font-size:13px;margin:16px 0 4px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.md p{margin:0 0 11px}
+.md ul,.md ol{margin:0 0 11px;padding-left:22px}
+.md li{margin:2px 0}
+.md code{font-family:var(--f-mono);font-size:12.5px;background:var(--panel-2);border:1px solid var(--line);border-radius:4px;padding:0 4px}
+.md pre{background:var(--sunk);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px;overflow-x:auto;margin:0 0 12px}
+.md pre code{background:none;border:0;padding:0}
+.md blockquote{margin:0 0 12px;border-left:3px solid var(--accent);padding:2px 12px;color:var(--muted)}
+.md table{border-collapse:collapse;margin:0 0 12px;display:block;overflow-x:auto;max-width:100%}
+.md th,.md td{border:1px solid var(--line);padding:4px 10px;text-align:left}
+.md th{background:var(--panel-2)}
+.md a{color:var(--accent)}
+.toc{border-left:1px solid var(--line);overflow:auto;padding:12px 8px;display:grid;gap:1px;align-content:start}
+.toc .lbl{padding:0 6px 6px}
+.toc button{border:0;background:transparent;text-align:left;color:var(--muted);font-size:12.5px;padding:3px 6px;border-radius:4px}
+.toc button:hover{color:var(--fg);background:var(--panel-2)}
+.toc .l2{padding-left:14px} .toc .l3{padding-left:24px} .toc .l4{padding-left:34px}
+.srcview{margin:0;padding:14px 16px;font-family:var(--f-mono);font-size:12.5px;white-space:pre;background:var(--sunk);min-height:100%;tab-size:4}
+
+/* Dictée */
+.mic{border:1px solid var(--line-2);background:var(--panel-2);border-radius:var(--r);padding:5px 10px;display:inline-flex;align-items:center;color:var(--fg)}
+.mic svg{width:15px;height:15px}
+.mic:hover{border-color:var(--accent);color:var(--accent)}
+kbd{font-family:var(--f-mono);font-size:11px;border:1px solid var(--line-2);border-bottom-width:2px;border-radius:4px;padding:0 5px;background:var(--panel-2);color:var(--muted);white-space:nowrap}
+.rec{display:grid;gap:8px;padding:10px 12px;border-top:1px solid var(--line);background:var(--panel)}
+.rec-top{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
+.rec-dot{width:10px;height:10px;border-radius:50%;background:var(--err);animation:pulse 1.2s steps(1) infinite;flex:none}
+.wave{display:flex;align-items:center;gap:2px;height:22px;flex:1;min-width:60px;overflow:hidden}
+.wave i{display:block;width:3px;height:3px;border-radius:2px;background:var(--accent);flex:none;transition:height .12s}
+.rec-text{background:var(--sunk);border:1px solid var(--line-2);border-radius:var(--r);padding:8px 10px;font-size:13px;max-height:130px;overflow:auto;color:var(--fg);font-family:var(--f-body)}
+.rec-text .partial{color:var(--muted)}
+textarea.rec-text{width:100%;min-height:130px;resize:vertical;max-height:none}
+.ptt{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(20px + env(safe-area-inset-bottom,0px));background:var(--panel-2);border:1px solid var(--err);border-radius:99px;padding:6px 14px;display:flex;gap:10px;align-items:center;z-index:40;box-shadow:0 8px 24px rgba(0,0,0,.25);max-width:calc(100% - 32px)}
+.ptt .wave{width:90px;flex:none}
+@media (prefers-reduced-motion: reduce){ .rec-dot{animation:none} .wave i{transition:none} }
+
+/* Réglages */
+.stabs{display:flex;gap:2px;border-bottom:1px solid var(--line);padding:0 12px}
+.stabs button{border:0;background:transparent;padding:8px 12px;color:var(--muted);border-bottom:2px solid transparent}
+.stabs button[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--accent)}
+.presets{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.preset{border:1px solid var(--line-2);border-radius:8px;padding:9px 10px;background:transparent;text-align:left;display:grid;gap:6px}
+.preset[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.preset small{color:var(--muted);font-size:11.5px}
+.sw{display:flex;gap:3px}
+.sw i{width:16px;height:16px;border-radius:3px;display:block;border:1px solid rgba(127,127,127,.35)}
+.colors{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 18px}
+.crow{display:flex;align-items:center;gap:8px;min-width:0}
+.crow input[type=color]{width:36px;height:24px;padding:0;border:1px solid var(--line-2);border-radius:4px;background:none;flex:none;cursor:pointer}
+.crow .nm{flex:1;min-width:0}
+.crow .hex{font-family:var(--f-mono);font-size:11.5px;color:var(--faint)}
+.preview{border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:grid;gap:8px;background:var(--panel-2)}
+.preview .row{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:12.5px}
+.models{display:grid;gap:6px}
+.model{display:flex;gap:10px;align-items:center;border:1px solid var(--line-2);border-radius:8px;padding:8px 10px;text-align:left;background:transparent;width:100%}
+.model[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.model .d{flex:1;min-width:0;display:grid;gap:2px}
+.model .d small{color:var(--muted);font-size:12px}
+.keyrow{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center}
+.keycap{min-width:170px;text-align:left;font-family:var(--f-mono);font-size:12.5px}
+.keycap.listening{border-color:var(--accent);color:var(--accent)}
+.optrow{display:flex;gap:8px;align-items:flex-start;font-size:13px}
+.optrow input{margin-top:3px}
+.callout{font-size:12.5px;color:var(--muted);border-left:2px solid var(--accent);padding-left:10px}
+
+@media (max-width:1100px){ .fpane,.fpane.notoc{grid-template-columns:200px minmax(0,1fr)} .toc{display:none}.kanban{grid-template-columns:repeat(2,minmax(0,1fr))} .grid4{grid-template-columns:repeat(2,minmax(0,1fr))} }
+@media (max-width:760px){
+  html,body{height:auto}
+  .app{height:auto}
+  .viewA{grid-template-columns:minmax(0,1fr)}
+  .side{max-height:300px}
+  .sess{min-height:640px}
+  .diff{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}
+  .files{border-right:0;border-bottom:1px solid var(--line);max-height:140px}
+  .kanban{grid-template-columns:minmax(0,1fr)}
+  .col-b{max-height:none}
+  .ship{grid-template-columns:minmax(0,1fr)}
+  .grid4{grid-template-columns:minmax(0,1fr)}
+  .meter{width:60px}
+  .presets,.colors{grid-template-columns:minmax(0,1fr)}
+  .fpane,.fpane.notoc{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}
+  .ftree{border-right:0;border-bottom:1px solid var(--line);max-height:200px}
+  .md{padding:16px}
+  .keyrow{grid-template-columns:minmax(0,1fr)}
+  .keycap{min-width:0;width:100%}
+}
+</style>
+
+<div class="app" id="app"></div>
+<div id="modal"></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<div id="ptt" hidden></div>
+
+<script>
+/* ---------- Données d'exemple ---------- */
+const PROFILES = {
+  perso:  {q5:52, r5:'14:30', qw:31, rw:'lun. 09:00'},
+  boulot: {q5:18, r5:'16:05', qw:64, rw:'jeu. 10:00'}
+};
+const MODES = [['default','Par défaut'],['acceptEdits','Accepter les modifs'],['plan','Plan'],['auto','Auto']];
+const STATUS = {waiting:'À répondre', running:'En cours', idle:'Inactive', done:'Terminée'};
+const ORDER = ['waiting','running','idle','done'];
+
+const PROJECTS = {
+  chantier:{name:'chantier', path:'~/code/chantier', profile:'perso', repo:'exemple/chantier', wt:'sibling',
+    runners:[{n:'dev',cmd:'go run ./cmd/chantier',src:'Makefile',kind:'server',port:8080},{n:'test',cmd:'go test ./...',src:'go.mod',kind:'test'},{n:'lint',cmd:'golangci-lint run',src:'.golangci.yml',kind:'task'}], preview:'chantier'},
+  pixelrpg:{name:'pixelrpg', path:'~/code/pixelrpg', profile:'perso', repo:'exemple/pixelrpg', wt:'sibling',
+    runners:[{n:'jouer',cmd:'godot --path .',src:'project.godot',kind:'native'},{n:'test',cmd:'godot --headless -s addons/gut/gut_cmdln.gd',src:'addons/gut',kind:'test'}]},
+  trek:{name:'trek', path:'~/code/trek', profile:'perso', repo:'exemple/voyages', wt:'dotdir',
+    runners:[{n:'dev',cmd:'npm run dev',src:'package.json',kind:'server',port:5173},{n:'test',cmd:'npm test',src:'package.json',kind:'test'},{n:'build',cmd:'npm run build',src:'package.json',kind:'task'}], preview:'trek'},
+  orchestrateur:{name:'orchestrateur', path:'~/DevMaestro', profile:'perso', repo:'exemple/devmaestro', wt:'sibling',
+    runners:[{n:'tauri',cmd:'cargo tauri dev',src:'Cargo.toml',kind:'native'},{n:'test',cmd:'cargo test',src:'Cargo.toml',kind:'test'},{n:'clippy',cmd:'cargo clippy',src:'Cargo.toml',kind:'task'}]},
+  'portail-client':{name:'portail-client', path:'~/travail/portail-client', profile:'boulot', repo:'acme/portail-client', wt:'app',
+    runners:[{n:'start',cmd:'npm start',src:'package.json',kind:'server',port:4200},{n:'test',cmd:'npm test',src:'package.json',kind:'test'},{n:'lint',cmd:'npm run lint',src:'package.json',kind:'task'}], preview:'portail'}
+};
+const WT_MODES = {sibling:'À côté du dépôt', dotdir:'Dans .worktrees/ du dépôt', app:"Dossier géré par l'app"};
+function wtPath(pid, branch){
+  const p = PROJECTS[pid], slug = branch.replace(/\//g,'-'), parent = p.path.replace(/\/[^/]+$/,'');
+  if(p.wt==='sibling') return `${parent}/${p.name}--${slug}`;
+  if(p.wt==='dotdir') return `${p.path}/.worktrees/${slug}`;
+  return `~/.local/share/orchestrateur/worktrees/${p.name}/${slug}`;
+}
+
+const ISSUES = {
+  chantier:[
+    {n:142,t:'Login OAuth cassé après expiration du state',tag:'bug',body:"Après 10 min sur l'écran de connexion, le retour du fournisseur OAuth renvoie une erreur 500."},
+    {n:138,t:'Export PDF du planning',tag:'feature',body:"Pouvoir exporter le planning du chantier en PDF A3 paysage pour l'envoyer aux artisans."},
+    {n:120,t:'Module devis',tag:'epic',body:'Centraliser les devis des artisans et les comparer par lot.',subs:[
+      {n:121,t:'Modèle de données des devis'},{n:122,t:'Import des devis PDF'},{n:123,t:'Comparaison des devis par lot'}]},
+    {n:131,t:'Lenteur de la page chantier',tag:'perf',body:'La page met 3 s à charger au-delà de 200 photos.'}
+  ],
+  pixelrpg:[
+    {n:24,t:'Inventaire : tri par rareté',tag:'feature',body:'Trier les objets de l’inventaire par rareté puis par nom.'},
+    {n:19,t:'Crash au chargement sur Android 15',tag:'bug',body:'Plantage systématique au chargement de la sauvegarde.'}
+  ],
+  trek:[{n:56,t:'Import GPX : gérer les waypoints',tag:'feature',body:'Les waypoints du fichier GPX doivent devenir des lieux du voyage.'}],
+  orchestrateur:[
+    {n:3,t:'Prototype PTY + hooks',tag:'feature',body:'Lancer claude dans un PTY et recevoir les événements des hooks.'},
+    {n:5,t:'Détection automatique des worktrees',tag:'feature',body:'Regrouper les worktrees par dépôt git.'}
+  ],
+  'portail-client':[
+    {n:412,t:'Export CSV des factures',tag:'feature',body:'Exporter les factures filtrées au format CSV.'},
+    {n:405,t:'SSO : boucle de redirection',tag:'bug',body:'Boucle infinie quand le cookie de session a expiré.'}
+  ]
+};
+const OLD = {
+  chantier:[{id:'7f3a2c',t:'Migration SQLite → Postgres',d:'12 oct.',m:84}],
+  trek:[{id:'b91e04',t:'Calendrier ICS des réservations',d:'8 oct.',m:37}],
+  pixelrpg:[{id:'c2d871',t:'Système de quêtes secondaires',d:'2 oct.',m:122}]
+};
+
+const DIFFS = {
+  auth:[
+    {p:'internal/auth/oauth.go',s:'M',lines:[
+      ['h','@@ -36,10 +36,36 @@ func Callback'],
+      ['c',36,36,'func Callback(w http.ResponseWriter, r *http.Request) {'],
+      ['d',37,null,'\ttoken := r.URL.Query().Get("code")'],
+      ['a',null,37,'\tcode, err := parseCode(r, sessions)'],
+      ['a',null,38,'\tif err != nil {'],
+      ['a',null,39,'\t\thttp.Error(w, "connexion expirée, réessaie", http.StatusBadRequest)'],
+      ['a',null,40,'\t\treturn'],
+      ['a',null,41,'\t}'],
+      ['d',38,null,'\ttok, err := provider.Exchange(r.Context(), token)'],
+      ['a',null,42,'\ttok, err := provider.Exchange(r.Context(), code)'],
+      ['c',39,43,'\tif err != nil {'],
+      ['c',40,44,'\t\trenderError(w, err)'],
+      ['h','@@ -88,0 +92,14 @@'],
+      ['a',null,92,'func parseCode(r *http.Request, s SessionStore) (string, error) {'],
+      ['a',null,93,'\tstate := r.URL.Query().Get("state")'],
+      ['a',null,94,'\tif !s.ValidState(state) {'],
+      ['a',null,95,'\t\treturn "", ErrStateExpired'],
+      ['a',null,96,'\t}'],
+      ['a',null,97,'\treturn r.URL.Query().Get("code"), nil'],
+      ['a',null,98,'}']
+    ]},
+    {p:'internal/auth/routes.go',s:'M',lines:[
+      ['h','@@ -12,6 +12,9 @@'],
+      ['c',12,12,'\tmux.HandleFunc("/login", Login)'],
+      ['d',13,null,'\tmux.HandleFunc("/callback", Callback)'],
+      ['a',null,13,'\tmux.HandleFunc("/auth/callback", Callback)'],
+      ['a',null,14,'\t// ancienne route conservée le temps de la migration'],
+      ['a',null,15,'\tmux.HandleFunc("/callback", Callback)']
+    ]},
+    {p:'internal/auth/oauth_test.go',s:'A',lines:[
+      ['h','@@ -0,0 +1,12 @@'],
+      ['a',null,1,'package auth'],
+      ['a',null,2,''],
+      ['a',null,3,'func TestCallbackStateExpire(t *testing.T) {'],
+      ['a',null,4,'\treq := httptest.NewRequest("GET", "/auth/callback?state=vieux&code=x", nil)'],
+      ['a',null,5,'\trec := httptest.NewRecorder()'],
+      ['a',null,6,'\tCallback(rec, req)'],
+      ['a',null,7,'\tif rec.Code != http.StatusBadRequest {'],
+      ['a',null,8,'\t\tt.Fatalf("statut attendu 400, obtenu %d", rec.Code)'],
+      ['a',null,9,'\t}'],
+      ['a',null,10,'}']
+    ]},
+    {p:'go.mod',s:'M',lines:[['h','@@ -5,3 +5,4 @@'],['c',5,5,'require ('],['a',null,6,'\tgolang.org/x/oauth2 v0.0.0 // version vérifiée au moment du go get'],['c',6,7,')']]}
+  ],
+  planning:[
+    {p:'internal/planning/retard.go',s:'M',lines:[
+      ['h','@@ -14,8 +14,19 @@ func Retard'],
+      ['c',14,14,'func Retard(lot Lot, auj time.Time) int {'],
+      ['d',15,null,'\treturn int(auj.Sub(lot.FinPrevue).Hours() / 24)'],
+      ['a',null,15,'\tjours := 0'],
+      ['a',null,16,'\tfor d := lot.FinPrevue; d.Before(auj); d = d.AddDate(0, 0, 1) {'],
+      ['a',null,17,'\t\tif ouvre(d) && !feries.Contient(d) {'],
+      ['a',null,18,'\t\t\tjours++'],
+      ['a',null,19,'\t\t}'],
+      ['a',null,20,'\t}'],
+      ['a',null,21,'\treturn jours'],
+      ['c',16,22,'}']
+    ]},
+    {p:'internal/planning/feries.go',s:'A',lines:[['h','@@ -0,0 +1,4 @@'],['a',null,1,'package planning'],['a',null,2,''],['a',null,3,'// Jours fériés français, Pâques calculé (algorithme de Meeus)'],['a',null,4,'var feries = NouveauCalendrier("FR")']]}
+  ],
+  inventaire:[
+    {p:'scenes/ui/inventaire.gd',s:'A',lines:[['h','@@ -0,0 +1,6 @@'],['a',null,1,'extends Control'],['a',null,2,''],['a',null,3,'@onready var grille: GridContainer = $Grille'],['a',null,4,''],['a',null,5,'func _ready() -> void:'],['a',null,6,'\tremplir(Inventaire.objets())']]},
+    {p:'project.godot',s:'M',lines:[['h','@@ -40,2 +40,3 @@'],['c',40,40,'[input]'],['a',null,41,'ui_inventory={"events":[KEY_I]}']]}
+  ],
+  save:[
+    {p:'scripts/sauvegarde.gd',s:'M',lines:[['h','@@ -22,3 +22,4 @@'],['c',22,22,'func ecrire(data: Dictionary) -> void:'],['d',23,null,'\tvar f = FileAccess.open(CHEMIN, FileAccess.WRITE)'],['a',null,23,'\tvar f = FileAccess.open(CHEMIN + ".tmp", FileAccess.WRITE)'],['a',null,24,'\t# écriture atomique : on renomme une fois le fichier complet']]}
+  ],
+  csv:[
+    {p:'src/app/factures/export-csv.service.ts',s:'A',lines:[['h','@@ -0,0 +1,4 @@'],['a',null,1,"@Injectable({ providedIn: 'root' })"],['a',null,2,'export class ExportCsvService {'],['a',null,3,'  exporter(factures: Facture[]): Blob { /* … */ }'],['a',null,4,'}']]}
+  ]
+};
+
+let SESSIONS = [
+  {id:'s1',project:'chantier',branch:'main',wt:false,model:'Opus 5.5',mode:'acceptEdits',status:'waiting',ctx:68,ctxMax:200,cost:2.10,tokens:'182k',last:2,issue:null,diff:'planning',
+    pending:{type:'perm',tool:'Bash',cmd:'go test ./...'},
+    run:{dev:'running',test:'idle',lint:'ok'},port:8080,
+    term:[['user',"Refactorise le calcul des retards du planning pour ignorer les week-ends et les jours fériés"],
+      ['claude',"Le calcul actuel compte les jours calendaires. Je le remplace par un décompte des jours ouvrés et j'ajoute le calendrier des jours fériés français."],
+      ['tool','<b>Update</b>(internal/planning/retard.go)'],['out','+11 −1'],
+      ['tool','<b>Write</b>(internal/planning/feries.go)'],['out','4 lignes'],
+      ['claude','Je lance la suite de tests pour vérifier.']]},
+  {id:'s2',project:'chantier',branch:'fix/142-login-oauth',wt:true,model:'Opus 5.5',mode:'auto',status:'running',ctx:122,ctxMax:200,cost:12.40,tokens:'1,1M',last:0,issue:142,diff:'auth',
+    run:{dev:'running',test:'failed',lint:'idle'},port:8081,portNote:'Le port 8080 est pris par chantier · main : cette session utilise 8081.',
+    comments:[{f:'internal/auth/oauth.go',i:3,txt:'Distingue state expiré et state inconnu : deux messages différents pour l’utilisateur.'}],
+    term:[['user',"Traite l'issue #142 « Login OAuth cassé après expiration du state »"],
+      ['claude',"Le callback lit le code sans vérifier le paramètre state. J'ajoute parseCode qui valide le state avant l'échange du code."],
+      ['tool','<b>Read</b>(internal/auth/oauth.go)'],['out','118 lignes'],
+      ['tool','<b>Update</b>(internal/auth/oauth.go)'],['out','+20 −2'],
+      ['tool','<b>Write</b>(internal/auth/oauth_test.go)'],['out','10 lignes'],
+      ['claude',"J'écris le test du cas « state inconnu »…"]]},
+  {id:'s3',project:'pixelrpg',branch:'feat/ui-inventaire',wt:true,model:'Sonnet 5.5',mode:'default',status:'waiting',ctx:41,ctxMax:200,cost:1.35,tokens:'96k',last:6,issue:24,diff:'inventaire',
+    pending:{type:'question',text:"Pour l'écran d'inventaire, je pars sur une grille 6×4 avec icônes, ou une liste filtrable avec le détail de chaque objet ?",opts:['Grille 6×4','Liste filtrable']},
+    run:{jouer:'idle',test:'ok'},
+    term:[['user',"Ajoute un écran d'inventaire accessible depuis le menu pause"],
+      ['claude',"J'ai créé la scène et branché l'action ui_inventory sur la touche I."],
+      ['tool','<b>Write</b>(scenes/ui/inventaire.gd)'],['out','6 lignes'],
+      ['tool','<b>Update</b>(project.godot)'],['out','+1']]},
+  {id:'s4',project:'pixelrpg',branch:'fix/sauvegarde',wt:true,model:'Sonnet 5.5',mode:'acceptEdits',status:'done',ctx:58,ctxMax:200,cost:3.80,tokens:'240k',last:45,issue:null,diff:'save',
+    run:{jouer:'idle',test:'ok'},ship:{state:'merged',how:'main',ago:'il y a 40 min'},
+    term:[['user','La sauvegarde est corrompue si le jeu est tué pendant l’écriture'],
+      ['claude','J’écris dans un fichier temporaire puis je le renomme : l’écriture devient atomique.'],
+      ['tool','<b>Update</b>(scripts/sauvegarde.gd)'],['out','+2 −1'],
+      ['tool','<b>Bash</b>(git rebase main && git push origin HEAD:main)'],['out','main mis à jour (fast-forward)'],
+      ['sys','✓ Terminé · mergée dans main']]},
+  {id:'s5',project:'trek',branch:'feat/import-gpx',wt:true,model:'Opus 5.5',mode:'plan',status:'idle',ctx:176,ctxMax:200,cost:6.90,tokens:'720k',last:190,issue:56,diff:null,
+    run:{dev:'idle',test:'idle',build:'idle'},
+    term:[['user','Importe un fichier GPX dans un voyage'],
+      ['claude','Import fonctionnel pour les traces simples. Veux-tu que je gère aussi les waypoints, ou on s’arrête là pour cette branche ?']]},
+  {id:'s6',project:'orchestrateur',branch:'main',wt:false,model:'Opus 5.5',mode:'auto',status:'running',ctx:30,ctxMax:200,cost:0.90,tokens:'61k',last:1,issue:3,diff:null,
+    run:{tauri:'idle',test:'idle',clippy:'idle'},
+    term:[['user','Prototype : lancer claude dans un PTY avec portable-pty et lire les événements des hooks sur un socket Unix'],
+      ['claude','Je crée le crate pty-host et un petit binaire de test…'],
+      ['tool','<b>Bash</b>(cargo new crates/pty-host --lib)'],['out','Created library `pty-host` package']]},
+  {id:'s7',project:'portail-client',branch:'feat/412-export-csv',wt:true,model:'Sonnet 5.5',mode:'acceptEdits',status:'running',ctx:88,ctxMax:200,cost:4.20,tokens:'350k',last:4,issue:412,diff:'csv',
+    run:{start:'running',test:'idle',lint:'idle'},port:4200,
+    term:[['user',"Traite l'issue #412 « Export CSV des factures »"],['claude','Je crée ExportCsvService et j’ajoute le bouton dans la liste des factures.'],['tool','<b>Write</b>(src/app/factures/export-csv.service.ts)'],['out','4 lignes']]},
+  {id:'s8',project:'portail-client',branch:'fix/405-sso-boucle',wt:true,model:'Sonnet 5.5',mode:'default',status:'done',ctx:64,ctxMax:200,cost:2.75,tokens:'210k',last:1440,issue:405,diff:null,
+    run:{start:'idle',test:'ok',lint:'ok'},ship:{state:'pr',pr:57,ci:[['build','ok','1 min 12 s'],['test','running','en cours'],['lint','ok','24 s'],['e2e','pending','en attente']],autofix:true},
+    term:[['user',"Traite l'issue #405 « SSO : boucle de redirection »"],['claude','Corrigé : le guard ne redirige plus si le cookie est expiré, il purge la session d’abord.'],['tool','<b>Bash</b>(gh pr create --fill)'],['out','https://github.com/acme/portail-client/pull/57'],['sys','✓ Terminé · PR #57 ouverte']]}
+];
+
+const TEST_OUT = {
+  s2:{ok:false,sum:'2 échecs · 31 réussis · 0,6 s',lines:[
+    '=== RUN   TestCallbackStateExpire','    oauth_test.go:8: statut attendu 400, obtenu 500','--- FAIL: TestCallbackStateExpire (0.00s)',
+    '=== RUN   TestCallbackStateInconnu','    oauth_test.go:21: message attendu « state inconnu », obtenu « connexion expirée »','--- FAIL: TestCallbackStateInconnu (0.00s)',
+    'FAIL\tchantier/internal/auth\t0.214s','ok  \tchantier/internal/planning\t0.402s']}
+};
+
+/* ---------- État d'interface ---------- */
+const S = {view:'projet', sel:'s2', tab:'terminal', file:{}, commenting:null, modal:null, notified:false, draft:{}, rec:null, settings:null, capture:null};
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sess = id => SESSIONS.find(s => s.id === id);
+const cur = () => sess(S.sel);
+const prof = s => s.profile || PROJECTS[s.project].profile;
+const money = n => n.toFixed(2).replace('.', ',') + ' $';
+const ago = m => m < 1 ? "à l'instant" : m < 60 ? `il y a ${m} min` : m < 1440 ? `il y a ${Math.round(m/60)} h` : 'hier';
+const pct = s => Math.round(s.ctx / s.ctxMax * 100);
+const meter = (p, w) => `<span class="meter"${w?` style="width:${w}px"`:''}><i class="${p>=90?'crit':p>=75?'hot':''}" style="width:${p}%"></i></span>`;
+const st = s => `<span class="st ${s}" aria-hidden="true"></span>`;
+const diffStat = s => { const f = DIFFS[s.diff] || []; let a=0,d=0; f.forEach(x => x.lines.forEach(l => { if(l[0]==='a')a++; if(l[0]==='d')d++; })); return {n:f.length,a,d}; };
+const issueOf = s => s.issue && (ISSUES[s.project]||[]).flatMap(i => [i, ...(i.subs||[])]).find(i => i.n === s.issue);
+const lastLine = s => { const t = [...s.term].reverse().find(l => l[0]==='claude' || l[0]==='sys'); return t ? t[1] : ''; };
+const failedCount = s => Object.values(s.run).filter(v => v==='failed').length;
+const sessionsOnIssue = (pid, n) => SESSIONS.filter(s => s.project===pid && s.issue===n);
+
+/* ---------- Rendu ---------- */
+function render(){
+  const waiting = SESSIONS.filter(s => s.status==='waiting');
+  $('#app').innerHTML = `
+  <header class="top">
+    <div class="brand"><b>Orchestrateur</b><span class="proto">prototype · données d'exemple</span></div>
+    <div class="seg" role="group" aria-label="Vue">
+      <button data-act="view" data-v="projet" aria-pressed="${S.view==='projet'}">Par projet</button>
+      <button data-act="view" data-v="statut" aria-pressed="${S.view==='statut'}">Par statut</button>
+    </div>
+    <div class="quotas">${Object.entries(PROFILES).map(([k,q]) => `
+      <div class="quota" title="Forfait du compte ${k}">
+        <span class="who chip ${k}">${k}</span>
+        <span class="k">5 h</span><span class="v">${meter(q.q5)} ${q.q5} % · reset ${q.r5}</span>
+        <span class="k">hebdo</span><span class="v">${meter(q.qw)} ${q.qw} % · reset ${q.rw}</span>
+      </div>`).join('')}
+    </div>
+    <span class="spacer"></span>
+    ${waiting.length ? `<button class="pill-wait" data-act="next-wait">${st('waiting')} ${waiting.length} à répondre</button>` : ''}
+    <div class="seg" role="group" aria-label="Thème">${[['light','Clair'],['dark','Sombre'],['system','Auto']].map(([k,l]) => `<button data-act="theme-mode" data-m="${k}" aria-pressed="${THEME.mode===k}">${l}</button>`).join('')}</div>
+    <button class="btn" data-act="settings" data-t="apparence">Réglages</button>
+    <button class="btn pri" data-act="new">+ Nouvelle session</button>
+  </header>
+  ${S.view==='projet' ? viewA() : viewB()}`;
+  const out = document.querySelector('.term-out'); if(out) out.scrollTop = out.scrollHeight;
+}
+
+function viewA(){
+  const byProj = {};
+  SESSIONS.forEach(s => (byProj[s.project] ||= []).push(s));
+  const side = Object.keys(PROJECTS).filter(p => byProj[p]).map(pid => {
+    const p = PROJECTS[pid], list = byProj[pid].sort((a,b) => ORDER.indexOf(a.status)-ORDER.indexOf(b.status));
+    const w = list.filter(s => s.status==='waiting').length;
+    return `<div class="proj">
+      <div class="proj-h"><b>${esc(p.name)}</b><span class="chip ${p.profile}">${p.profile}</span>${w?`<span class="count">${w} ⚠</span>`:''}</div>
+      <div class="proj-path" title="${esc(p.path)}">${esc(p.path)}</div>
+      ${list.map(s => `<button class="srow" data-act="sel" data-id="${s.id}" aria-current="${s.id===S.sel}">
+        ${st(s.status)}<span class="br">${esc(s.branch)}</span>${s.wt?'<span class="chip wt" title="worktree"></span>':''}
+        ${s.ship && s.ship.state==='merged' ? '<span class="clean">à nettoyer</span>' : `<span class="ago">${ago(s.last).replace('il y a ','')}</span>`}
+      </button>`).join('')}
+    </div>`;
+  }).join('');
+  const olds = Object.entries(OLD).flatMap(([pid, l]) => l.map(o => `<button class="srow" data-act="resume" data-p="${pid}" data-id="${o.id}">
+      <span class="st idle" aria-hidden="true" style="border-style:dashed"></span><span class="br">${esc(PROJECTS[pid].name)} · ${esc(o.t)}</span><span class="ago">${o.d}</span></button>`)).join('');
+  return `<main class="viewA">
+    <nav class="panel side" aria-label="Projets et sessions">
+      <div class="cap"><span class="lbl">Projets</span><span class="hint">regroupés par dépôt git</span></div>
+      ${side}
+      <div class="old"><div class="cap"><span class="lbl">Anciennes sessions</span><span class="hint">à reprendre</span></div>${olds}</div>
+    </nav>
+    ${sessionPane(cur())}
+  </main>`;
+}
+
+function sessionPane(s){
+  const p = PROJECTS[s.project], ds = diffStat(s), iss = issueOf(s), fc = failedCount(s);
+  const ncom = (s.comments||[]).length;
+  const tabs = [['terminal','Terminal', s.status==='waiting' ? '<span class="badge wait">1</span>' : ''],
+    ['files','Fichiers',''],
+    ['diff','Diff', ds.n ? `<span class="badge">${ds.n}</span>` : ''],
+    ['app','App',''],
+    ['run','Run / Tests', fc ? `<span class="badge bad">${fc}</span>` : ''],
+    ['ship','Livraison', s.ship && s.ship.state==='pr' ? '<span class="badge">PR</span>' : '']];
+  const body = {terminal:termView, files:filesView, diff:diffView, app:appView, run:runView, ship:shipView}[S.tab](s);
+  return `<section class="panel sess" aria-label="Session ${esc(p.name)} ${esc(s.branch)}">
+    <div class="sh">
+      <div class="sh-1">
+        ${st(s.status)}<h2>${esc(p.name)} <span>/</span> ${esc(s.branch)}</h2>
+        ${s.wt ? `<span class="chip wt" title="${esc(wtPath(s.project, s.branch))}">worktree</span>` : '<span class="chip">dépôt principal</span>'}
+        <span class="chip ${prof(s)}">${prof(s)}</span>
+        <span class="chip">${esc(s.model)}</span>
+        <label class="chip" style="padding-right:2px">mode
+          <select class="mode" id="mode-${s.id}" data-act="mode" aria-label="Mode de la session">${MODES.map(([v,l]) => `<option value="${v}"${v===s.mode?' selected':''}>${l}</option>`).join('')}</select></label>
+        <div class="acts">
+          ${s.status==='running' ? '<button class="btn sm ghost" data-act="interrupt" title="Échap">Interrompre</button>' : ''}
+          ${s.status==='done' || s.status==='idle' ? '' : '<button class="btn sm ghost" data-act="stop">Arrêter</button>'}
+        </div>
+      </div>
+      <div class="sh-2">
+        <span title="Fenêtre de contexte">contexte ${meter(pct(s))} <b>${pct(s)} %</b> · ${s.ctx}k / ${s.ctxMax}k</span>
+        <span>coût <b>${money(s.cost)}</b> · ${s.tokens} tokens</span>
+        <span>${s.status==='running' ? 'actif ' : 'dernière activité '}<b>${ago(s.last)}</b></span>
+        ${ds.n ? `<span><span class="plus">+${ds.a}</span> <span class="minus">−${ds.d}</span> · ${ds.n} fichiers</span>` : ''}
+        ${iss ? `<a class="issue-link" href="https://github.com/${p.repo}/issues/${iss.n}" target="_blank" rel="noopener">#${iss.n} ${esc(iss.t)}</a>` : ''}
+      </div>
+    </div>
+    <div class="tabs" role="tablist">${tabs.map(([k,l,b]) => `<button role="tab" data-act="tab" data-t="${k}" aria-selected="${S.tab===k}">${l}${b}</button>`).join('')}</div>
+    <div class="content">${body}</div>
+  </section>`;
+}
+
+function termView(s){
+  const lines = s.term.map(([k,t]) => `<div class="tl ${k}">${k==='tool' ? t : esc(t)}</div>`).join('');
+  let ask = '';
+  if(s.status==='waiting' && s.pending){
+    const pd = s.pending;
+    ask = pd.type==='perm' ? `<div class="ask"><span class="t">Permission demandée</span>
+        <div>${esc(pd.tool)} : <code>${esc(pd.cmd)}</code></div>
+        <div class="row"><button class="btn pri" data-act="allow">Autoriser</button><button class="btn" data-act="always">Toujours pour ce projet</button><button class="btn" data-act="deny">Refuser</button><button class="btn ghost" data-act="focus-compose">Répondre autre chose…</button></div></div>`
+      : `<div class="ask"><span class="t">Claude te pose une question</span><div>${esc(pd.text)}</div>
+        <div class="row">${pd.opts.map((o,i) => `<button class="btn${i?'':' pri'}" data-act="answer" data-a="${esc(o)}">${esc(o)}</button>`).join('')}<button class="btn ghost" data-act="focus-compose">Répondre librement…</button></div></div>`;
+  }
+  return `<div class="term">
+    <div class="term-out">${lines}${ask}${s.status==='running' ? '<div class="tl sys"><span class="cursor"></span></div>' : ''}</div>
+    ${S.rec && S.rec.sid===s.id && S.rec.kind==='long' ? recView(S.rec) : `<form class="compose" data-form="compose"><input id="compose-${s.id}" value="${esc(S.draft[s.id]||'')}" placeholder="Envoyer un message à Claude… (dictée : ${VOICE.pttMode==='hold' ? 'maintenir' : 'appuyer sur'} ${esc(VOICE.ptt)})" aria-label="Message">
+      <button type="button" class="mic" data-act="mic" title="Longue dictée (${esc(VOICE.long)}) · dictée rapide : maintenir ${esc(VOICE.ptt)}" aria-label="Démarrer une longue dictée">${MIC}</button><button class="btn pri">Envoyer</button></form>`}
+  </div>`;
+}
+
+function diffView(s){
+  const files = DIFFS[s.diff];
+  if(!files) return `<div class="empty"><b>Aucune modification</b><span>La branche ${esc(s.branch)} est identique à main.</span></div>`;
+  s.viewed ||= {}; s.comments ||= [];
+  const fi = S.file[s.id] || 0, f = files[fi];
+  const rows = f.lines.map((l, i) => {
+    const cms = s.comments.filter(c => c.f===f.p && c.i===i);
+    const cmHtml = cms.map((c, ci) => `<tr class="cm"><td colspan="5"><div class="cbox"><div class="who"><span>Toi · commentaire en attente</span><button class="btn sm ghost" data-act="del-comment" data-i="${s.comments.indexOf(c)}" aria-label="Supprimer le commentaire">×</button></div>${esc(c.txt)}</div></td></tr>`).join('');
+    const editing = S.commenting && S.commenting.f===f.p && S.commenting.i===i;
+    const form = editing ? `<tr class="cm"><td colspan="5"><form class="cbox" data-form="comment"><textarea id="cm-text" placeholder="Ton commentaire sur cette ligne…" aria-label="Commentaire"></textarea><div class="row"><button type="button" class="btn sm ghost" data-act="cancel-comment">Annuler</button><button class="btn sm pri">Ajouter à la revue</button></div></form></td></tr>` : '';
+    if(l[0]==='h') return `<tr class="hunk"><td class="cbtn"></td><td class="no"></td><td class="no"></td><td class="c" colspan="2">${esc(l[1])}</td></tr>`;
+    const cls = {a:'add', d:'del', c:'ctx'}[l[0]];
+    return `<tr class="${cls}"><td class="cbtn"><button data-act="comment" data-i="${i}" aria-label="Commenter la ligne">+</button></td><td class="no">${l[1]??''}</td><td class="no">${l[2]??''}</td><td class="c">${esc(l[3])}</td><td></td></tr>${cmHtml}${form}`;
+  }).join('');
+  const seen = files.filter(x => s.viewed[x.p]).length, n = s.comments.length;
+  return `<div class="diff">
+    <div class="files" role="list">
+      <div class="lbl" style="padding:2px 8px 6px">${seen}/${files.length} fichiers vus</div>
+      ${files.map((x, i) => { let a=0,d=0; x.lines.forEach(l => {if(l[0]==='a')a++; if(l[0]==='d')d++;}); const c = s.comments.filter(k => k.f===x.p).length;
+        return `<button class="frow${s.viewed[x.p]?' seen':''}" data-act="file" data-i="${i}" aria-current="${i===fi}"><span class="s ${x.s}">${x.s}</span><span class="n" title="${esc(x.p)}">${esc(x.p.split('/').pop())}</span><span class="st2">${c?`💬${c} `:''}<span class="plus">+${a}</span> <span class="minus">−${d}</span></span></button>`; }).join('')}
+    </div>
+    <div class="dmain">
+      <div class="dhead"><span class="path">${esc(f.p)}</span><span class="hint">survole une ligne et clique sur + pour commenter</span>
+        <label><input type="checkbox" id="seen-${s.id}-${fi}" data-act="seen" ${s.viewed[f.p]?'checked':''}> Vu</label></div>
+      <div class="dscroll"><table class="code">${rows}</table></div>
+      <form class="dfoot" data-form="review">
+        <input id="review-${s.id}" placeholder="Commentaire général (facultatif)" aria-label="Commentaire général">
+        <button class="btn pri" ${n?'':'disabled'}>Envoyer la revue à Claude${n?` (${n})`:''}</button>
+      </form>
+    </div>
+  </div>`;
+}
+
+function previewHtml(kind, port){
+  if(kind==='chantier') return `<div class="mock"><h3>Planning du chantier</h3><div class="sub">Projet de démonstration · semaine 42 · retards en jours ouvrés</div>
+    <table><tr><th>Lot</th><th>Artisan</th><th>Avancement</th><th>Fin prévue</th></tr>
+    <tr><td>Terrassement</td><td>TP Durand</td><td><div class="bar"><i style="width:100%"></i></div></td><td>12 sept.</td></tr>
+    <tr><td>Gros œuvre</td><td>Maçonnerie Leroux</td><td><div class="bar"><i style="width:72%"></i></div></td><td>31 oct.</td></tr>
+    <tr><td>Charpente</td><td>Bois & Co</td><td><div class="bar"><i style="width:30%"></i></div></td><td>14 oct. <span class="late">+4 j</span></td></tr>
+    <tr><td>Électricité</td><td>—</td><td><div class="bar"><i style="width:0%"></i></div></td><td>28 nov.</td></tr></table></div>`;
+  if(kind==='trek') return `<div class="mock"><h3>Écosse · juin 2027</h3><div class="sub">Import GPX : 3 traces, 0 waypoint</div><table><tr><th>Jour</th><th>Étape</th><th>Distance</th></tr><tr><td>J1</td><td>Fort William → Kinlochleven</td><td>24 km</td></tr><tr><td>J2</td><td>Kinlochleven → Glencoe</td><td>18 km</td></tr></table></div>`;
+  return `<div class="mock"><h3>Factures</h3><div class="sub">23 factures · filtre : octobre 2026</div><table><tr><th>N°</th><th>Client</th><th>Montant</th></tr><tr><td>F-2026-1042</td><td>Garage Morel</td><td>1 240,00 €</td></tr><tr><td>F-2026-1043</td><td>Boulangerie Petit</td><td>380,50 €</td></tr></table><div style="margin-top:12px"><span style="border:1px solid #c9c4b6;border-radius:5px;padding:4px 10px;font-size:12px">Exporter en CSV</span></div></div>`;
+}
+
+function runnerChip(s, r){
+  const v = s.run[r.n] || 'idle';
+  const lab = {running: r.kind==='server' ? `● :${s.port||r.port}` : 'en cours…', ok:'✓ OK', failed:'✗ échec', idle:'arrêté'}[v];
+  const btn = r.kind==='server' || r.kind==='native'
+    ? (v==='running' ? `<button class="btn sm" data-act="run" data-n="${r.n}">Arrêter</button>` : `<button class="btn sm" data-act="run" data-n="${r.n}">Lancer</button>`)
+    : `<button class="btn sm" data-act="run" data-n="${r.n}" ${v==='running'?'disabled':''}>${v==='idle'?'Lancer':'Relancer'}</button>`;
+  return `<div class="runner"><span class="dot ${v}"></span><span class="nm">${r.n}</span><span class="muted mono">${lab}</span>${btn}</div>`;
+}
+
+function appView(s){
+  const p = PROJECTS[s.project], srv = p.runners.find(r => r.kind==='server');
+  if(!srv) return `<div class="pane"><div class="runners">${p.runners.filter(r => r.kind!=='test').map(r => runnerChip(s, r)).join('')}</div>
+    <div class="empty"><b>Pas d'aperçu web pour ce projet</b><span>${esc(p.runners[0].cmd)} ouvre une fenêtre native. L'aperçu intégré est réservé aux applications web.</span></div></div>`;
+  const on = s.run[srv.n]==='running', port = s.port || srv.port;
+  return `<div class="pane">
+    <div class="runners">${p.runners.map(r => runnerChip(s, r)).join('')}</div>
+    ${s.portNote ? `<div class="note">${esc(s.portNote)}</div>` : ''}
+    ${on ? `<div class="browser"><div class="urlbar"><span class="url">http://localhost:${port}${p.preview==='chantier'?'/planning':'/'}</span><button class="btn sm" data-act="toast" data-m="Aperçu rechargé">↻</button><button class="btn sm" data-act="toast" data-m="Ouverture dans Firefox">Ouvrir dans Firefox</button></div>${previewHtml(p.preview, port)}</div>
+      <div class="logs">${p.preview==='chantier' ? `10:42:01 chantier écoute sur :${port}\n10:42:07 GET /planning 200 12ms\n10:42:07 GET /static/app.css 200 1ms` : `  ➜  Local:   http://localhost:${port}/\n  ready in 812 ms`}</div>`
+      : `<div class="empty"><b>Le serveur de dev n'est pas lancé</b><span class="mono">${esc(srv.cmd)} · détecté dans ${esc(srv.src)}</span><button class="btn pri" data-act="run" data-n="${srv.n}">Lancer ${srv.n}</button></div>`}
+  </div>`;
+}
+
+function runView(s){
+  const p = PROJECTS[s.project], o = TEST_OUT[s.id] && s.run.test==='failed' ? TEST_OUT[s.id] : null;
+  return `<div class="pane">
+    <div><span class="lbl">Commandes détectées</span> <span class="hint">· lues dans ${[...new Set(p.runners.map(r => r.src))].join(', ')}</span></div>
+    <div style="overflow-x:auto"><table class="cmds"><tr><th>Nom</th><th>Commande</th><th>Source</th><th>État</th><th></th></tr>
+      ${p.runners.map(r => { const v = s.run[r.n] || 'idle'; return `<tr><td><b>${r.n}</b></td><td class="mono">${esc(r.cmd)}</td><td class="muted">${esc(r.src)}</td>
+        <td><span class="dot ${v}" style="display:inline-block"></span> ${{running:'en cours', ok:'réussi', failed:'échec', idle:'—'}[v]}</td>
+        <td>${runnerChip(s, r).match(/<button[\s\S]*<\/button>/)[0]}</td></tr>`; }).join('')}
+    </table></div>
+    ${o ? `<div class="testsum"><span class="chip bad">✗ ${o.sum}</span><span class="spacer"></span><button class="btn warn" data-act="send-fail">Envoyer les échecs à Claude</button></div><div class="logs" style="max-height:none">${o.lines.map(esc).join('\n')}</div>`
+       : s.run.test==='ok' ? '<div class="testsum"><span class="chip ok">✓ Tous les tests passent</span></div>' : ''}
+  </div>`;
+}
+
+function shipView(s){
+  const ds = diffStat(s), iss = issueOf(s), p = PROJECTS[s.project], sh = s.ship;
+  if(sh && sh.state==='merged') return `<div class="pane">
+    <div class="banner ok"><b>✓ Mergée dans main ${sh.ago}</b><span class="muted">rebase + fast-forward</span></div>
+    <div class="banner"><span>La branche <b class="mono">${esc(s.branch)}</b> est mergée. Le worktree <span class="mono">${esc(wtPath(s.project, s.branch))}</span> peut être supprimé.</span><span class="spacer"></span>
+      <button class="btn warn" data-act="cleanup">Supprimer le worktree et la branche</button><button class="btn ghost" data-act="toast" data-m="Worktree conservé">Garder</button></div></div>`;
+  if(sh && sh.state==='pr'){
+    const allOk = sh.ci.every(c => c[1]==='ok');
+    return `<div class="pane">
+      <div class="banner" style="border-color:var(--accent);background:var(--panel-2)"><b>PR #${sh.pr} ouverte</b><a class="issue-link" href="https://github.com/${p.repo}/pull/${sh.pr}" target="_blank" rel="noopener">voir sur GitHub</a>${iss?`<span class="muted">ferme #${iss.n}</span>`:''}</div>
+      <div class="ship">
+        <div class="card"><h3>CI</h3><ul class="checks">${sh.ci.map(c => `<li><span class="dot ${c[1]}" style="display:inline-block"></span>${c[0]}<span class="r">${c[2]}</span></li>`).join('')}</ul>
+          <label style="display:flex;gap:8px;align-items:center;font-size:12.5px"><input type="checkbox" id="autofix-${s.id}" data-act="autofix" ${sh.autofix?'checked':''}> Si la CI échoue, Claude corrige dans cette session</label></div>
+        <div class="card"><h3>Merger la PR</h3><p>${allOk ? 'Tous les checks sont verts.' : 'Le merge sera possible quand la CI sera verte.'}</p>
+          <div class="row" style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn pri" ${allOk?'':'disabled'} data-act="merge-pr">Squash & merge</button><button class="btn" data-act="toast" data-m="Merge automatique activé : la PR sera mergée quand la CI sera verte">Merger dès que la CI est verte</button></div></div>
+      </div></div>`;
+  }
+  const n = (s.comments||[]).length, testOk = s.run.test==='ok', seen = DIFFS[s.diff] ? DIFFS[s.diff].filter(x => (s.viewed||{})[x.p]).length : 0;
+  if(!ds.n) return `<div class="empty"><b>Rien à livrer pour l'instant</b><span>Aucune modification sur ${esc(s.branch)}.</span></div>`;
+  return `<div class="pane">
+    <div><span class="lbl">Avant de livrer</span></div>
+    <ul class="checks">
+      <li>${testOk ? '<span class="chip ok">✓</span> Tests au vert' : s.run.test==='failed' ? '<span class="chip bad">✗</span> Tests en échec' : '<span class="chip pend">?</span> Tests pas encore lancés'}<span class="r">${testOk?'':'<button class="btn sm" data-act="run" data-n="test">Lancer les tests</button>'}</span></li>
+      <li>${seen===ds.n ? '<span class="chip ok">✓</span>' : '<span class="chip pend">'+seen+'/'+ds.n+'</span>'} Fichiers relus<span class="r"><button class="btn sm ghost" data-act="tab" data-t="diff">Ouvrir le diff</button></span></li>
+      <li>${n ? `<span class="chip pend">${n}</span> commentaire${n>1?'s':''} de revue pas encore envoyé${n>1?'s':''}` : '<span class="chip ok">✓</span> Aucun commentaire en attente'}</li>
+    </ul>
+    <div class="ship">
+      <div class="card"><h3>Ouvrir une Pull Request</h3><p>Claude rédige le titre et la description à partir du diff${iss?` et lie l'issue (Closes #${iss.n})`:''}, pousse la branche et ouvre la PR. L'app suit ensuite la CI.</p>
+        <div><button class="btn pri" data-act="make-pr">Demander à Claude d'ouvrir la PR</button></div></div>
+      <div class="card"><h3>Merger directement dans main</h3><p>Trunk-based : rebase sur main, tests en local, puis fast-forward et push. L'app suit la CI de main.</p>
+        <div><button class="btn" data-act="merge-main" ${s.wt||s.branch!=='main'?'':'disabled'}>Rebase & merger dans main</button></div></div>
+    </div></div>`;
+}
+
+function viewB(){
+  return `<main class="kanban">${ORDER.map(k => {
+    const list = SESSIONS.filter(s => s.status===k);
+    return `<section class="col" aria-label="${STATUS[k]}"><div class="col-h">${st(k)}<b>${STATUS[k]}</b><span class="n">${list.length}</span></div>
+      <div class="col-b">${list.map(card).join('') || '<div class="hint" style="padding:8px">Aucune session</div>'}</div></section>`;
+  }).join('')}</main>`;
+}
+function card(s){
+  const p = PROJECTS[s.project], ds = diffStat(s), iss = issueOf(s);
+  const q = s.status==='waiting' && s.pending ? `<div class="q">${s.pending.type==='perm' ? `${esc(s.pending.tool)} : <span class="mono">${esc(s.pending.cmd)}</span> ?` : esc(s.pending.text)}</div>` : `<div class="last">${esc(lastLine(s))}</div>`;
+  const act = {waiting:'Répondre', running:'Ouvrir', idle:'Reprendre', done: s.ship && s.ship.state==='merged' ? 'Nettoyer' : 'Voir la livraison'}[s.status];
+  return `<button class="kc ${s.status}" data-act="open" data-id="${s.id}">
+    <div class="t"><span>${esc(p.name)} · ${esc(s.branch)}</span></div>
+    ${q}
+    <div class="meta"><span class="chip ${prof(s)}">${prof(s)}</span><span>${meter(pct(s), 52)} ${pct(s)} %</span><span>${money(s.cost)}</span>${ds.n?`<span><span class="plus">+${ds.a}</span> <span class="minus">−${ds.d}</span></span>`:''}<span>${ago(s.last)}</span></div>
+    ${iss ? `<div class="meta">#${iss.n} ${esc(iss.t)}</div>` : ''}
+    ${s.ship && s.ship.state==='pr' ? `<div class="meta"><span class="chip pend">PR #${s.ship.pr} · CI en cours</span></div>` : ''}
+    <div class="row"><span class="btn sm${s.status==='waiting'?' pri':''}">${act}</span></div>
+  </button>`;
+}
+
+/* ---------- Modale nouvelle session ---------- */
+function slug(t){ return t.normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,36).replace(/-$/,''); }
+function branchFor(i){ const pre = {bug:'fix', perf:'perf', epic:'feat'}[i.tag] || 'feat'; return `${pre}/${i.n}-${slug(i.t)}`; }
+function openModal(opts={}){
+  const pid = opts.project || cur().project;
+  S.modal = {project:pid, profile:PROJECTS[pid].profile, model:'Opus 5.5', mode:'auto', src:opts.src||'issue', issue:null, subs:[], wt:true, wtMode:PROJECTS[pid].wt, branch:'', prompt:'', filter:'', resume:opts.resume||null};
+  renderModal();
+}
+function renderModal(){
+  const m = S.modal; if(!m){ $('#modal').innerHTML=''; return; }
+  const p = PROJECTS[m.project];
+  const issues = (ISSUES[m.project]||[]).filter(i => !m.filter || (i.t+' '+i.n).toLowerCase().includes(m.filter.toLowerCase()));
+  const sel = (ISSUES[m.project]||[]).find(i => i.n===m.issue);
+  const count = sel && sel.subs && m.subs.length ? m.subs.length : 1;
+  let srcBody = '';
+  if(m.src==='issue') srcBody = `<div class="issues">
+      <div class="ih"><span class="lbl">Issues ouvertes · github.com/${esc(p.repo)}</span><input id="issue-filter" placeholder="Filtrer…" value="${esc(m.filter)}" aria-label="Filtrer les issues"></div>
+      <div id="issue-list">${issueList(issues)}</div></div>`;
+  else if(m.src==='resume') srcBody = `<div class="issues"><div class="ih"><span class="lbl">Sessions précédentes · ${esc(p.name)}</span></div>
+      ${(OLD[m.project]||[]).map(o => `<button class="irow" data-act="pick-resume" data-id="${o.id}" aria-pressed="${m.resume===o.id}"><span class="num">${o.id}</span><span class="ti">${esc(o.t)}</span><span class="hint">${o.d} · ${o.m} messages</span></button>`).join('') || '<div class="empty">Aucune ancienne session pour ce projet.</div>'}</div>
+      <div class="hint">Lance <span class="mono">claude --resume &lt;id&gt;</span> dans le dossier du projet, avec le profil choisi.</div>`;
+  const wtBlock = m.src==='resume' ? '' : `<div class="grid4" style="grid-template-columns:auto minmax(0,1fr) minmax(0,1fr)">
+      <label class="field" style="align-content:end"><span><input type="checkbox" id="m-wt" data-act="m-wt" ${m.wt?'checked':''}> Nouveau worktree</span></label>
+      <label class="field"><span class="lbl">Branche</span><input id="m-branch" value="${esc(sel && count>1 ? '(une branche par sous-issue)' : m.branch)}" ${sel&&count>1?'disabled':''} placeholder="feat/ma-branche"></label>
+      <label class="field"><span class="lbl">Emplacement du worktree</span><select id="m-wtmode" ${m.wt?'':'disabled'}>${Object.entries(WT_MODES).map(([k,l]) => `<option value="${k}"${k===m.wtMode?' selected':''}>${l}</option>`).join('')}</select></label>
+    </div>
+    ${m.wt && m.branch && count===1 ? `<div class="hint mono">${esc(wtPathM(m))}</div>` : ''}
+    <label class="field"><span class="lbl">Prompt initial</span><textarea id="m-prompt" placeholder="Décris la tâche…">${esc(m.prompt)}</textarea>
+      ${m.src==='issue' ? '<span class="hint">Pré-rempli avec le titre, la description et les commentaires de l\'issue.</span>' : ''}</label>`;
+  const canGo = m.src==='resume' ? !!m.resume : m.src==='issue' ? !!m.issue : true;
+  $('#modal').innerHTML = `<div class="scrim" data-act="close-scrim"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="mt">
+    <div class="mh"><h2 id="mt">Nouvelle session</h2><button class="btn ghost x" data-act="close" aria-label="Fermer">×</button></div>
+    <div class="mb">
+      <div class="grid4">
+        <label class="field"><span class="lbl">Projet</span><select id="m-project">${Object.values(PROJECTS).map(x => `<option${x.name===m.project?' selected':''}>${x.name}</option>`).join('')}</select></label>
+        <label class="field"><span class="lbl">Profil</span><select id="m-profile">${Object.keys(PROFILES).map(k => `<option${k===m.profile?' selected':''}>${k}</option>`).join('')}</select>
+          <span class="hint">${m.profile===p.profile ? 'profil par défaut du projet' : 'remplace le défaut ('+p.profile+')'}</span></label>
+        <label class="field"><span class="lbl">Modèle</span><select id="m-model">${['Opus 5.5','Sonnet 5.5','Haiku 5.5','Fable 5.1'].map(x => `<option${x===m.model?' selected':''}>${x}</option>`).join('')}</select></label>
+        <label class="field"><span class="lbl">Mode</span><select id="m-mode">${MODES.map(([v,l]) => `<option value="${v}"${v===m.mode?' selected':''}>${l}</option>`).join('')}</select></label>
+      </div>
+      <div class="field"><span class="lbl">Partir de</span><div class="radios">
+        ${[['issue','Une issue GitHub'],['free','Un prompt libre'],['resume','Une session précédente']].map(([k,l]) => `<button data-act="m-src" data-s="${k}" aria-pressed="${m.src===k}">${l}</button>`).join('')}</div></div>
+      ${srcBody}
+      ${wtBlock}
+    </div>
+    <div class="mf"><span class="sum">${m.src==='issue' && sel ? (count>1 ? `${count} sessions, une par sous-issue, chacune dans son worktree` : `1 session sur #${sel.n}${sessionsOnIssue(m.project, sel.n).length ? ' · une autre session travaille déjà dessus' : ''}`) : ''}</span>
+      <button class="btn ghost" data-act="close">Annuler</button>
+      <button class="btn pri" data-act="launch" ${canGo?'':'disabled'}>${m.src==='resume' ? 'Reprendre ▶' : count>1 ? `Lancer ${count} sessions ▶` : 'Lancer ▶'}</button></div>
+  </div></div>`;
+}
+function wtPathM(m){ const save = PROJECTS[m.project].wt; PROJECTS[m.project].wt = m.wtMode; const r = wtPath(m.project, m.branch); PROJECTS[m.project].wt = save; return r; }
+function issueList(issues){
+  const m = S.modal;
+  if(!issues.length) return '<div class="empty">Aucune issue ne correspond.</div>';
+  return issues.map(i => {
+    const on = sessionsOnIssue(m.project, i.n).length;
+    let h = `<button class="irow" data-act="pick-issue" data-n="${i.n}" aria-pressed="${m.issue===i.n}"><span class="num">#${i.n}</span><span class="ti">${esc(i.t)}</span>
+      ${on ? `<span class="chip">${st('running')} ${on} session${on>1?'s':''}</span>` : ''}<span class="tag ${i.tag}">${i.tag==='epic'?`épique · ${i.subs.length}`:i.tag}</span></button>`;
+    if(i.subs && m.issue===i.n) h += `<div class="subs"><span class="hint">Coche les sous-issues à lancer en parallèle (une session chacune) :</span>${i.subs.map(x => `<label><input type="checkbox" id="sub-${x.n}" data-act="pick-sub" data-n="${x.n}" ${m.subs.includes(x.n)?'checked':''}> <span class="mono muted">#${x.n}</span> ${esc(x.t)}</label>`).join('')}</div>`;
+    return h;
+  }).join('');
+}
+function syncModalFields(){
+  const m = S.modal; if(!m) return;
+  const g = id => document.getElementById(id);
+  if(g('m-profile')) m.profile = g('m-profile').value;
+  if(g('m-model')) m.model = g('m-model').value;
+  if(g('m-mode')) m.mode = g('m-mode').value;
+  if(g('m-branch') && !g('m-branch').disabled) m.branch = g('m-branch').value;
+  if(g('m-prompt')) m.prompt = g('m-prompt').value;
+  if(g('m-wtmode')) m.wtMode = g('m-wtmode').value;
+}
+function promptFor(i, p){ return `Traite l'issue #${i.n} « ${i.t} ».\n\n${i.body || ''}\n\nhttps://github.com/${p.repo}/issues/${i.n}`; }
+
+function launch(){
+  syncModalFields();
+  const m = S.modal, p = PROJECTS[m.project];
+  let created = [];
+  const mk = (branch, issue, prompt, extra=[]) => {
+    const id = 's' + (SESSIONS.length + 1) + Math.random().toString(36).slice(2,5);
+    const wt = m.src!=='resume' && m.wt;
+    const term = [];
+    if(wt) term.push(['tool', `<b>Bash</b>(git worktree add ${esc(wtPathM({...m, branch}))} -b ${esc(branch)})`], ['out', 'worktree prêt']);
+    term.push(...extra, ['user', prompt || '(session ouverte)'], ['claude', "Je lis le contexte et j'explore le code concerné…"]);
+    SESSIONS.push({id, project:m.project, profile:m.profile, branch, wt, model:m.model, mode:m.mode, status:'running', ctx:4, ctxMax:200, cost:0, tokens:'8k', last:0, issue, diff:null, run:Object.fromEntries(p.runners.map(r => [r.n,'idle'])), term});
+    created.push(id);
+  };
+  if(m.src==='resume'){
+    const o = (OLD[m.project]||[]).find(x => x.id===m.resume);
+    mk('main', null, null, [['sys', `$ claude --resume ${o.id}`], ['sys', `Reprise de « ${o.t} » · ${o.m} messages`]]);
+    SESSIONS[SESSIONS.length-1].term.splice(-2, 2, ['claude', 'Session reprise. Où en étions-nous : on finit la migration ou on passe aux tests ?']);
+    SESSIONS[SESSIONS.length-1].status = 'idle';
+  } else if(m.src==='issue'){
+    const i = (ISSUES[m.project]||[]).find(x => x.n===m.issue);
+    if(i.subs && m.subs.length) i.subs.filter(x => m.subs.includes(x.n)).forEach(x => mk(branchFor({...x, tag:'feature'}), x.n, promptFor({...x, body:`Sous-issue de l'épique #${i.n} « ${i.t} ».`}, p)));
+    else mk(m.branch || branchFor(i), i.n, m.prompt);
+  } else mk(m.branch || 'feat/session-' + Math.random().toString(36).slice(2,6), null, m.prompt);
+  S.modal = null; renderModal();
+  S.view = 'projet'; S.sel = created[0]; S.tab = 'terminal'; render();
+  toast(created.length>1 ? `${created.length} sessions lancées` : 'Session lancée', `${p.name} · ${sess(created[0]).branch}`);
+}
+
+/* ---------- Fichiers ---------- */
+const FENCE = '`'.repeat(3);
+const PFILES = {
+  chantier:{
+    'README.md':['# Chantier','','Suivi de chantier (projet de démonstration) : planning des lots, artisans, devis et photos. Application Go auto-hébergée, sous AGPL.','','## Démarrer','',FENCE+'bash','make dev',FENCE,'','Le serveur écoute sur `:8080`. Les worktrees prennent le port suivant libre.','','## Organisation du code','','- `cmd/chantier` : point d’entrée','- `internal/planning` : lots, retards, jours fériés','- `internal/auth` : connexion OAuth','','Le détail est dans [l’architecture](docs/architecture.md) et les décisions dans [l’ADR 0001](docs/adr/0001-go-sqlite.md).','','## Tests','','| Commande | Rôle |','|---|---|','| `go test ./...` | tests unitaires et d’intégration |','| `golangci-lint run` | lint |','','> Les retards sont comptés en **jours ouvrés**, jours fériés français exclus.'].join('\n'),
+    'CLAUDE.md':['# Consignes pour Claude','','## Avant de rendre la main','','1. `go test ./...` passe','2. `golangci-lint run` ne remonte rien','3. Le diff est relu fichier par fichier','','## Conventions','','- Messages d’erreur en français, adressés à l’utilisateur','- Un domaine = un package sous `internal/`','- Pas de dépendance ajoutée sans vérifier sa dernière version'].join('\n'),
+    'docs/architecture.md':['# Architecture','','## Vue d’ensemble','','Monolithe Go découpé en domaines, avec des ports pour tout ce qui touche l’extérieur.','','## Domaines','','### Planning','','Lots, dates prévues et réelles, calcul des retards en jours ouvrés.','','### Devis','','Import des PDF d’artisans, comparaison par lot.','','## Adaptateurs','','- Stockage : SQLite','- Authentification : OAuth','- Photos : système de fichiers local','','Retour au [README](../README.md).'].join('\n'),
+    'docs/adr/0001-go-sqlite.md':['# ADR 0001 : Go et SQLite','','## Contexte','','Un seul chantier, quelques utilisateurs, hébergement sur un petit serveur.','','## Décision','','Go pour le binaire unique, SQLite pour éviter un serveur de base de données.','','## Conséquences','','- Sauvegarde = copie d’un fichier','- Migration vers Postgres possible si l’app est partagée plus largement'].join('\n'),
+    'cmd/chantier/main.go':null, 'internal/auth/oauth.go':null, 'internal/auth/routes.go':null, 'internal/planning/retard.go':null, 'go.mod':null, 'Makefile':null
+  }
+};
+function filesOf(s){
+  const name = PROJECTS[s.project].name;
+  const all = {...(PFILES[s.project] || {'README.md':`# ${name}\n\nREADME d'exemple pour ce prototype.\n\n## Démarrer\n\nVoir les commandes détectées dans l'onglet Run / Tests.`, 'CLAUDE.md':'# Consignes pour Claude\n\n- Lancer les tests avant de rendre la main.'})};
+  (DIFFS[s.diff] || []).forEach(f => { if(!(f.p in all)) all[f.p] = null; });
+  return all;
+}
+const changeOf = (s, p) => ((DIFFS[s.diff] || []).find(x => x.p===p) || {}).s || null;
+function ftOf(s){
+  S.ft ||= {};
+  if(!S.ft[s.id]){
+    const open = new Set(['docs']);
+    (DIFFS[s.diff] || []).forEach(f => { const parts = f.p.split('/'); for(let i = 1; i < parts.length; i++) open.add(parts.slice(0, i).join('/')); });
+    S.ft[s.id] = {open, file:'README.md', raw:false, filter:''};
+  }
+  return S.ft[s.id];
+}
+function fileContent(s, p){
+  const v = filesOf(s)[p]; if(v != null) return v;
+  const f = (DIFFS[s.diff] || []).find(x => x.p===p);
+  if(f) return f.lines.filter(l => l[0]==='a' || l[0]==='c').map(l => l[3]).join('\n') + '\n\n// … (extrait : seules les lignes du diff sont connues du prototype)';
+  return `// ${p}\n// Contenu d'exemple : le vrai fichier est lu depuis le worktree.`;
+}
+const icon = p => p.endsWith('.md') ? '¶' : p.endsWith('.go') ? 'go' : p.endsWith('.ts') ? 'ts' : p.endsWith('.gd') ? 'gd' : '·';
+function treeList(s){
+  const f = ftOf(s), paths = Object.keys(filesOf(s)).sort();
+  const row = (p, depth, label) => { const c = changeOf(s, p); return `<button class="trow" data-act="fopen" data-p="${esc(p)}" aria-current="${f.file===p}" style="padding-left:${8 + depth*12}px"><span class="ic">${icon(p)}</span><span class="nm">${esc(label)}</span>${c ? `<span class="mk ${c}">${c}</span>` : ''}</button>`; };
+  if(f.filter) return paths.filter(p => p.toLowerCase().includes(f.filter.toLowerCase())).map(p => row(p, 0, p)).join('') || '<span class="hint" style="padding:6px 8px">Aucun fichier</span>';
+  const root = {d:{}, f:[]};
+  paths.forEach(p => { const parts = p.split('/'); let n = root; parts.slice(0, -1).forEach(x => { n = n.d[x] ||= {d:{}, f:[]}; }); n.f.push(p); });
+  const walk = (n, prefix, depth) => Object.keys(n.d).sort().map(k => {
+      const p = prefix ? prefix + '/' + k : k, open = f.open.has(p), changed = paths.some(x => x.startsWith(p + '/') && changeOf(s, x));
+      return `<button class="trow dir" data-act="fdir" data-p="${esc(p)}" aria-expanded="${open}" style="padding-left:${8 + depth*12}px"><span class="ic">${open ? '▾' : '▸'}</span><span class="nm">${esc(k)}</span>${changed ? '<span class="mk">•</span>' : ''}</button>` + (open ? walk(n.d[k], p, depth + 1) : '');
+    }).join('') + n.f.map(p => row(p, depth, p.split('/').pop())).join('');
+  return walk(root, '', 0);
+}
+function resolveLink(from, href){ const dir = from.split('/').slice(0, -1); href.split('/').forEach(x => { if(x==='..') dir.pop(); else if(x !== '.') dir.push(x); }); return dir.join('/'); }
+function md(src, from){
+  const toc = [], out = [];
+  const inline = t => esc(t).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, l, h) => /^https?:/.test(h) ? `<a href="${h}" target="_blank" rel="noopener">${l}</a>` : `<a href="#" data-act="fopen" data-p="${resolveLink(from, h)}">${l}</a>`);
+  const L = src.split('\n'); let i = 0, para = [];
+  const flush = () => { if(para.length){ out.push(`<p>${inline(para.join(' '))}</p>`); para = []; } };
+  while(i < L.length){
+    const l = L[i];
+    if(l.startsWith(FENCE)){ flush(); const code = []; i++; while(i < L.length && !L[i].startsWith(FENCE)) code.push(L[i++]); i++; out.push(`<pre><code>${esc(code.join('\n'))}</code></pre>`); continue; }
+    let m = l.match(/^(#{1,4})\s+(.*)/);
+    if(m){ flush(); const id = 'h-' + slug(m[2]) + '-' + i; toc.push([m[1].length, m[2], id]); out.push(`<h${m[1].length} id="${id}">${inline(m[2])}</h${m[1].length}>`); i++; continue; }
+    if(/^\s*[-*]\s+/.test(l) || /^\s*\d+\.\s+/.test(l)){ flush(); const ol = /^\s*\d+\./.test(l), items = [];
+      while(i < L.length && (ol ? /^\s*\d+\.\s+/ : /^\s*[-*]\s+/).test(L[i])) items.push(L[i++].replace(/^\s*([-*]|\d+\.)\s+/, ''));
+      out.push(`<${ol?'ol':'ul'}>${items.map(x => `<li>${inline(x)}</li>`).join('')}</${ol?'ol':'ul'}>`); continue; }
+    if(l.startsWith('>')){ flush(); const q = []; while(i < L.length && L[i].startsWith('>')) q.push(L[i++].replace(/^>\s?/, '')); out.push(`<blockquote><p>${inline(q.join(' '))}</p></blockquote>`); continue; }
+    if(l.startsWith('|')){ flush(); const rows = []; while(i < L.length && L[i].startsWith('|')) rows.push(L[i++]);
+      const cells = r => r.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+      out.push(`<table><tr>${cells(rows[0]).map(c => `<th>${inline(c)}</th>`).join('')}</tr>${rows.slice(2).map(r => `<tr>${cells(r).map(c => `<td>${inline(c)}</td>`).join('')}</tr>`).join('')}</table>`); continue; }
+    if(!l.trim()){ flush(); i++; continue; }
+    para.push(l.trim()); i++;
+  }
+  flush();
+  return {html: out.join(''), toc};
+}
+function filesView(s){
+  const f = ftOf(s), p = f.file, isMd = p.endsWith('.md'), c = changeOf(s, p);
+  const r = isMd && !f.raw ? md(fileContent(s, p), p) : null;
+  const root = s.wt ? wtPath(s.project, s.branch) : PROJECTS[s.project].path;
+  return `<div class="fpane${r && r.toc.length > 1 ? '' : ' notoc'}">
+    <nav class="ftree" aria-label="Fichiers du ${s.wt ? 'worktree' : 'dépôt'}">
+      <input id="ffilter-${s.id}" placeholder="Filtrer les fichiers…" value="${esc(f.filter)}" aria-label="Filtrer les fichiers">
+      <div id="ftree-list" style="display:grid;gap:1px">${treeList(s)}</div>
+    </nav>
+    <div class="fview">
+      <div class="fhead"><span class="crumbs" title="${esc(root)}">${esc(root.split('/').pop())} / ${p.split('/').map((x, i, a) => i===a.length-1 ? `<b>${esc(x)}</b>` : esc(x)).join(' / ')}</span>
+        ${c ? `<span class="chip ${c==='A'?'ok':'pend'}">${c==='A'?'ajouté':'modifié'} dans la branche</span>` : ''}
+        <span class="acts">${isMd ? `<div class="seg"><button data-act="fraw" data-v="0" aria-pressed="${!f.raw}">Rendu</button><button data-act="fraw" data-v="1" aria-pressed="${f.raw}">Source</button></div>` : ''}
+          ${c ? '<button class="btn sm" data-act="tab" data-t="diff">Voir le diff</button>' : ''}
+          <button class="btn sm" data-act="fmention" title="Ajoute @fichier au message de la session">Mentionner à Claude</button>
+          <button class="btn sm ghost" data-act="fedit">Ouvrir dans l'éditeur</button></span></div>
+      <div class="fbody">${r ? `<article class="md">${r.html}</article>` : `<pre class="srcview">${esc(fileContent(s, p))}</pre>`}</div>
+    </div>
+    ${r && r.toc.length > 1 ? `<nav class="toc" aria-label="Sommaire"><span class="lbl">Sur cette page</span>${r.toc.map(([lv, t, id]) => `<button class="l${lv}" data-act="ftoc" data-h="${id}">${esc(t)}</button>`).join('')}</nav>` : ''}
+  </div>`;
+}
+
+/* ---------- Thèmes ---------- */
+const store = {
+  get(k, d){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch(_) { return d; } },
+  set(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(_) {} }
+};
+const TOKENS = [['accent','Accent (sélection, liens)'],['wait','En attente de réponse'],['run','En cours'],['done','Terminée / succès'],['err','Erreur / échec'],['add','Diff : lignes ajoutées'],['del','Diff : lignes supprimées']];
+const NEUTRALS = ['bg','panel','panel-2','sunk','line','line-2','fg','muted','faint','accent-ink'];
+const DEF = {
+  light:{accent:'#2f5bd3',wait:'#b26a00',run:'#11866a',done:'#3f7d2c',err:'#c33b3b',add:'#11866a',del:'#c33b3b'},
+  dark:{accent:'#86a8ff',wait:'#f2a93b',run:'#55c4a2',done:'#7fb069',err:'#ef6b6b',add:'#55c4a2',del:'#ef6b6b'}
+};
+const PRESETS = {
+  defaut:{nom:'Orchestrateur', desc:'Palette par défaut', light:{}, dark:{}},
+  okabe:{nom:'Okabe-Ito', desc:'Sûre pour les daltonismes rouge-vert : plus d’opposition rouge/vert',
+    light:{accent:'#a24f86',wait:'#a86f00',run:'#00785a',done:'#0072b2',err:'#c04f00',add:'#0072b2',del:'#c04f00'},
+    dark:{accent:'#cc79a7',wait:'#e69f00',run:'#1fb58a',done:'#56b4e9',err:'#e0702a',add:'#56b4e9',del:'#e0702a'}},
+  contraste:{nom:'Contraste élevé', desc:'Fonds purs, bordures marquées, texte au maximum',
+    light:{bg:'#ffffff',panel:'#ffffff','panel-2':'#f0f0f0',sunk:'#ffffff',line:'#5a5a5a','line-2':'#333333',fg:'#000000',muted:'#262626',faint:'#444444',accent:'#0033cc','accent-ink':'#ffffff',wait:'#8a4b00',run:'#005f46',done:'#003f8a',err:'#b00000',add:'#005f46',del:'#b00000'},
+    dark:{bg:'#000000',panel:'#0a0a0a','panel-2':'#161616',sunk:'#000000',line:'#7a7a7a','line-2':'#a0a0a0',fg:'#ffffff',muted:'#dedede',faint:'#b8b8b8',accent:'#ffd400','accent-ink':'#000000',wait:'#ffb000',run:'#00e0a0',done:'#7fd4ff',err:'#ff7070',add:'#7fd4ff',del:'#ff7070'}}
+};
+const THEME = store.get('orch-theme', {mode:'system', preset:'defaut', custom:{light:{}, dark:{}}});
+const mq = window.matchMedia('(prefers-color-scheme: dark)');
+const resolved = () => THEME.mode==='system' ? (mq.matches ? 'dark' : 'light') : THEME.mode;
+const tokenValue = (k, m=resolved()) => ({...DEF[m], ...PRESETS[THEME.preset][m], ...THEME.custom[m]})[k];
+function applyTheme(){
+  const r = document.documentElement, m = resolved();
+  r.dataset.theme = m;
+  [...NEUTRALS, ...TOKENS.map(t => t[0])].forEach(k => r.style.removeProperty('--' + k));
+  const v = {...PRESETS[THEME.preset][m], ...THEME.custom[m]};
+  for(const k in v) r.style.setProperty('--' + k, v[k]);
+  store.set('orch-theme', THEME);
+}
+mq.addEventListener?.('change', () => { if(THEME.mode==='system'){ applyTheme(); render(); if(S.settings) renderSettings(); } });
+
+/* ---------- Voix ---------- */
+const MIC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>';
+const MODELS = {
+  parakeet:{nom:'Parakeet TDT 0.6B v3', by:'NVIDIA', d:'600 M paramètres · 25 langues européennes dont le français · langue détectée automatiquement', tag:'Recommandé'},
+  'whisper-turbo':{nom:'Whisper large-v3-turbo', by:'OpenAI', d:'≈ 100 langues · plus lourd, GPU conseillé'},
+  'whisper-small':{nom:'Whisper small', by:'OpenAI', d:'Léger, tourne sur CPU · moins précis sur le vocabulaire technique'}
+};
+const VOICE = store.get('orch-voice', {model:'parakeet', installed:['parakeet'], ptt:'Ctrl+Espace', pttMode:'hold', long:'Ctrl+Maj+Espace', after:'review', preamble:true, keepAudio:false});
+const PREAMBLE = "Transcription vocale brute d'une longue dictée : elle peut contenir des erreurs de reconnaissance et partir dans tous les sens. Reconstruis l'intention, puis pose-moi les questions qui manquent.";
+const PTT_TEXT = "Lance les tests d'intégration et dis-moi ce qui casse.";
+const RAMBLE = ["Bon alors pour l'export PDF du planning,", "en fait ce que je veux c'est un A3 paysage", "avec les lots en lignes et les semaines en colonnes,", "euh et les retards en rouge mais pas que en rouge,", "il faut un motif hachuré aussi parce qu'il y a un daltonien dans l'équipe,", "et puis les artisans l'impriment souvent en noir et blanc", "donc il faut que ça reste lisible,", "ah et le logo du projet en haut à gauche si on en a un,", "sinon rien, pas de placeholder moche,", "et en pied de page la date d'édition et le numéro de version du planning."];
+const saveVoice = () => store.set('orch-voice', VOICE);
+const fmtT = s => `${String(Math.floor(s/60)).padStart(2,'0')}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+const mo = kb => (kb/1024).toFixed(1).replace('.', ',') + ' Mo';
+
+function recText(r){ return r.text.length ? esc(r.text.join(' ')) + ' <span class="partial">…</span>' : '<span class="partial">Parle, la transcription s’affiche au fur et à mesure…</span>'; }
+function recView(r){
+  if(r.review) return `<form class="rec" data-form="rec-send">
+    <div class="rec-top"><b>Relire la transcription</b><span class="muted">${fmtT(r.secs)} de dictée · ${esc(MODELS[VOICE.model].nom)}</span></div>
+    <textarea id="rec-edit" class="rec-text" aria-label="Transcription">${esc(r.text.join(' '))}</textarea>
+    <label class="optrow"><input type="checkbox" id="rec-pre" ${VOICE.preamble?'checked':''}><span>Préfixer par le préambule <span class="muted">« ${esc(PREAMBLE)} »</span></span></label>
+    <div class="rec-top"><span class="spacer"></span><button type="button" class="btn ghost" data-act="rec-cancel">Jeter</button><button class="btn pri">Envoyer à Claude</button></div></form>`;
+  return `<div class="rec">
+    <div class="rec-top"><span class="rec-dot" aria-hidden="true"></span><b>Longue dictée</b><span class="mono" id="rec-time">${fmtT(r.secs||0)}</span><span class="wave" id="rec-wave">${'<i></i>'.repeat(60)}</span><span class="hint" id="rec-size"></span></div>
+    <div class="rec-text" id="rec-text" aria-live="polite">${recText(r)}</div>
+    <div class="rec-top"><span class="hint">${esc(MODELS[VOICE.model].nom)} · 100 % local · <kbd>${esc(VOICE.long)}</kbd> pour terminer · simulation</span><span class="spacer"></span>
+      <button class="btn ghost" data-act="rec-cancel">Annuler</button><button class="btn" data-act="rec-review">Terminer et relire</button><button class="btn pri" data-act="rec-send">Terminer et envoyer</button></div></div>`;
+}
+function startRec(kind){
+  if(S.rec) return;
+  if(S.view!=='projet' || S.tab!=='terminal'){ S.view = 'projet'; S.tab = 'terminal'; }
+  S.rec = {sid:S.sel, kind, t0:Date.now(), secs:0, text:[], i:0, lastChunk:Date.now()};
+  if(kind==='ptt'){ const p = $('#ptt'); p.hidden = false; p.innerHTML = `<div class="ptt" role="status"><span class="rec-dot" aria-hidden="true"></span><b>Dictée</b><span class="mono" id="ptt-time">00:00</span><span class="wave" id="ptt-wave">${'<i></i>'.repeat(22)}</span><span class="hint">${VOICE.pttMode==='hold' ? 'relâche' : 'rappuie sur'} <kbd>${esc(VOICE.ptt)}</kbd> pour insérer</span></div>`; }
+  render();
+}
+function stopPtt(){
+  const r = S.rec; if(!r || r.kind!=='ptt') return;
+  S.rec = null; $('#ptt').hidden = true;
+  S.draft[r.sid] = ((S.draft[r.sid]||'') + ' ' + PTT_TEXT).trim();
+  render(); const inp = document.getElementById('compose-' + r.sid); if(inp){ inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+}
+function finishLong(send){
+  const r = S.rec; if(!r || r.kind!=='long') return;
+  if(!r.text.length) r.text.push(RAMBLE[0]);
+  if(!send){ r.review = true; render(); return; }
+  sendDictation(r.text.join(' '), VOICE.preamble);
+}
+function sendDictation(txt, pre){
+  const s = sess(S.rec.sid); S.rec = null;
+  push(s, ['user', (pre ? PREAMBLE + '\n\n' : '') + txt]); s.pending = null; s.status = 'running'; render();
+  later(() => push(s, ['claude', "Si je reformule : export PDF du planning en A3 paysage, lots en lignes et semaines en colonnes, retards signalés par la couleur ET un motif hachuré, lisible imprimé en noir et blanc, logo seulement s'il existe, date d'édition et version en pied de page. Deux questions : une page par mois ou tout le chantier sur une page ? Et les lots terminés, on les garde ?"]), 1400);
+}
+setInterval(() => {
+  const r = S.rec; if(!r || r.review) return;
+  r.secs = (Date.now() - r.t0) / 1000;
+  if(r.kind==='long' && Date.now() - r.lastChunk > 1100 && r.i < RAMBLE.length){ r.text.push(RAMBLE[r.i++]); r.lastChunk = Date.now(); const t = $('#rec-text'); if(t){ t.innerHTML = recText(r); t.scrollTop = t.scrollHeight; } }
+  const pre = r.kind==='long' ? 'rec' : 'ptt';
+  const tm = document.getElementById(pre + '-time'); if(tm) tm.textContent = fmtT(r.secs);
+  const sz = document.getElementById('rec-size'); if(sz) sz.textContent = `Opus 24 kb/s · ${mo(r.secs*3)} (en WAV : ${mo(r.secs*32)})`;
+  document.querySelectorAll(`#${pre}-wave i`).forEach(i => { i.style.height = (3 + Math.random() * 18 * (0.4 + Math.random())) + 'px'; });
+}, 140);
+
+/* ---------- Raccourcis ---------- */
+function comboOf(e){
+  const k = [];
+  if(e.ctrlKey) k.push('Ctrl'); if(e.altKey) k.push('Alt'); if(e.shiftKey) k.push('Maj'); if(e.metaKey) k.push('Super');
+  if(!['Control','Alt','Shift','Meta','AltGraph'].includes(e.key)) k.push(e.code==='Space' ? 'Espace' : e.key.length===1 ? e.key.toUpperCase() : e.key);
+  return k.join('+');
+}
+
+/* ---------- Modale réglages ---------- */
+function renderSettings(){
+  const t = S.settings.tab, m = resolved();
+  const body = t==='apparence' ? `
+    <div class="field"><span class="lbl">Mode</span><div class="radios">${[['light','Clair'],['dark','Sombre'],['system','Suivre le système']].map(([k,l]) => `<button data-act="theme-mode" data-m="${k}" aria-pressed="${THEME.mode===k}">${l}</button>`).join('')}</div></div>
+    <div class="field"><span class="lbl">Palette</span><div class="presets">${Object.entries(PRESETS).map(([k,p]) => `
+      <button class="preset" data-act="preset" data-p="${k}" aria-pressed="${THEME.preset===k}"><b>${p.nom}</b>
+        <span class="sw">${['accent','wait','run','done','err'].map(x => `<i style="background:${({...DEF[m], ...p[m]})[x]}"></i>`).join('')}</span><small>${p.desc}</small></button>`).join('')}</div></div>
+    <div class="field"><span class="lbl">Couleurs du mode ${m==='dark'?'sombre':'clair'}</span>
+      <span class="hint">Chaque mode garde ses propres réglages. Tes changements s’ajoutent à la palette choisie.${Object.keys(THEME.custom[m]).length ? ` · <b>${Object.keys(THEME.custom[m]).length} personnalisée(s)</b>` : ''}</span>
+      <div class="colors">${TOKENS.map(([k,l]) => `<label class="crow"><input type="color" id="tok-${k}" data-tok="${k}" value="${tokenValue(k)}"><span class="nm">${l}</span><span class="hex">${tokenValue(k)}</span></label>`).join('')}</div></div>
+    <div class="preview" aria-label="Aperçu">
+      <div class="row">${ORDER.map(k => `<span style="display:inline-flex;gap:6px;align-items:center">${st(k)} ${STATUS[k]}</span>`).join('')}<span style="display:inline-flex;gap:6px;align-items:center"><span class="dot failed" style="display:inline-block"></span>Échec</span></div>
+      <table class="code"><tr class="del"><td class="no">41</td><td class="c">token := r.URL.Query().Get("code")</td></tr><tr class="add"><td class="no">41</td><td class="c">code, err := parseCode(r, sessions)</td></tr></table>
+      <div class="row"><span>contexte ${meter(45)} 45 %</span><span>${meter(80)} 80 %</span><span>${meter(95)} 95 %</span><span class="chip ok">✓ tests</span><span class="chip bad">✗ 2 échecs</span><button class="btn pri sm" type="button">Bouton principal</button></div>
+    </div>
+    <p class="callout">Les statuts ne reposent jamais sur la couleur seule : chacun a sa forme (carré « ! », anneau qui tourne, cercle vide, coche), et les lignes de diff gardent leurs signes + et −.</p>`
+  : `
+    <div class="field"><span class="lbl">Modèle de transcription (local)</span><div class="models">${Object.entries(MODELS).map(([k,x]) => { const inst = VOICE.installed.includes(k);
+      return `<button class="model" data-act="model" data-k="${k}" aria-pressed="${VOICE.model===k}"><span class="d"><b>${x.nom} <span class="muted" style="font-weight:400">· ${x.by}</span></b><small>${x.d}</small></span>${x.tag?`<span class="chip ok">${x.tag}</span>`:''}<span class="chip ${inst?'':'pend'}">${inst?'installé':'à télécharger'}</span></button>`; }).join('')}</div></div>
+    <div class="field"><span class="lbl">Raccourcis clavier</span>
+      <div class="keyrow"><span>Dictée rapide <span class="hint">· le texte s’insère dans le champ de message</span></span>
+        <button class="btn keycap${S.capture==='ptt'?' listening':''}" data-act="capture" data-k="ptt">${S.capture==='ptt' ? 'Appuie sur la combinaison…' : esc(VOICE.ptt)}</button>
+        <div class="radios" role="group" aria-label="Mode de la dictée rapide"><button data-act="pttmode" data-v="hold" aria-pressed="${VOICE.pttMode==='hold'}" title="Maintenir le raccourci pendant qu'on parle, relâcher pour insérer">Push-to-talk</button><button data-act="pttmode" data-v="toggle" aria-pressed="${VOICE.pttMode==='toggle'}" title="Appuyer une fois pour démarrer, une seconde fois pour arrêter et insérer">Enregistrement</button></div></div>
+      <div class="keyrow"><span>Longue dictée <span class="hint">· démarrer et terminer</span></span>
+        <button class="btn keycap${S.capture==='long'?' listening':''}" data-act="capture" data-k="long">${S.capture==='long' ? 'Appuie sur la combinaison…' : esc(VOICE.long)}</button><span></span></div>
+      <span class="hint">Dans l’app, une option rendra ces raccourcis globaux : ils marcheront même quand la fenêtre n’a pas le focus, et dicteront dans la session sélectionnée.</span></div>
+    <div class="field"><span class="lbl">Longue dictée</span>
+      <label class="optrow"><input type="radio" name="after" id="v-after-review" value="review" ${VOICE.after==='review'?'checked':''}><span>Me laisser relire avant d’envoyer</span></label>
+      <label class="optrow"><input type="radio" name="after" id="v-after-send" value="send" ${VOICE.after==='send'?'checked':''}><span>Envoyer directement à la fin</span></label>
+      <label class="optrow"><input type="checkbox" id="v-pre" ${VOICE.preamble?'checked':''}><span>Préfixer par un préambule qui prévient Claude que c’est une transcription brute à reconstruire</span></label>
+      <label class="optrow"><input type="checkbox" id="v-keep" ${VOICE.keepAudio?'checked':''}><span>Conserver l’audio 30 jours, compressé en Opus <span class="hint">· 24 kb/s ≈ 1,8 Mo pour 10 min, contre ≈ 19 Mo en WAV 16 kHz</span></span></label></div>
+    <p class="callout">Prototype : le micro n’est pas accessible ici, la dictée est simulée. Essaie <kbd>${esc(VOICE.ptt)}</kbd> maintenu, ou le bouton micro à côté du champ de message.</p>`;
+  $('#modal').innerHTML = `<div class="scrim" data-act="close-scrim"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="st-t">
+    <div class="mh"><h2 id="st-t">Réglages</h2><button class="btn ghost x" data-act="close" aria-label="Fermer">×</button></div>
+    <div class="stabs" role="tablist">${[['apparence','Apparence'],['voix','Voix et raccourcis']].map(([k,l]) => `<button role="tab" data-act="settings" data-t="${k}" aria-selected="${t===k}">${l}</button>`).join('')}</div>
+    <div class="mb">${body}</div>
+    ${t==='apparence' ? `<div class="mf"><span class="sum">Les réglages sont propres à chaque personne.</span><button class="btn ghost" data-act="theme-reset">Réinitialiser les couleurs</button><button class="btn" data-act="theme-copy">Copier le thème (JSON)</button></div>` : ''}
+  </div></div>`;
+}
+
+/* ---------- Actions ---------- */
+function toast(t, tx, opt={}){
+  const el = document.createElement('div');
+  el.className = 'toast' + (opt.wait ? ' wait' : '');
+  el.innerHTML = `<div class="tt">${esc(t)}</div>${tx?`<div class="tx">${esc(tx)}</div>`:''}${opt.go?`<div class="row"><button class="btn sm pri" data-act="sel" data-id="${opt.go}">Voir</button></div>`:''}`;
+  $('#toasts').appendChild(el);
+  setTimeout(() => el.remove(), opt.wait ? 9000 : 3500);
+}
+function push(s, ...lines){ s.term.push(...lines); s.last = 0; }
+function later(fn, ms){ setTimeout(() => { fn(); render(); }, ms); }
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-act]'); if(!b) return;
+  if(b.tagName==='A' && b.getAttribute('href')==='#') e.preventDefault();
+  const a = b.dataset.act, s = cur();
+  if(['mode','seen','autofix','m-wt','pick-sub'].includes(a)) return; // handled by change
+  if(a==='close-scrim' && e.target !== b) return;
+  switch(a){
+    case 'view': S.view = b.dataset.v; break;
+    case 'sel': S.sel = b.dataset.id; S.view = 'projet'; if(!b.closest('.tabs')) S.tab = sess(S.sel).status==='done' ? 'ship' : 'terminal'; break;
+    case 'open': S.sel = b.dataset.id; S.view = 'projet'; { const x = sess(S.sel); S.tab = x.status==='done' ? 'ship' : 'terminal'; } break;
+    case 'next-wait': { const w = SESSIONS.find(x => x.status==='waiting'); if(w){ S.sel = w.id; S.view = 'projet'; S.tab = 'terminal'; } } break;
+    case 'tab': S.tab = b.dataset.t; S.commenting = null; break;
+    case 'allow': case 'always':
+      push(s, ['sys', a==='always' ? `Règle ajoutée au projet : ${s.pending.tool}(${s.pending.cmd.split(' ')[0]} …)` : `Autorisé : ${s.pending.cmd}`], ['tool', `<b>${esc(s.pending.tool)}</b>(${esc(s.pending.cmd)})`]);
+      s.pending = null; s.status = 'running';
+      later(() => { push(s, ['out', 'ok  \tchantier/internal/planning\t0.402s'], ['claude', 'Tous les tests passent. Je relis le diff avant de te rendre la main.']); s.run.test = 'ok'; }, 1400);
+      break;
+    case 'deny': push(s, ['sys', `Refusé : ${s.pending.cmd}`], ['claude', 'Compris, je ne lance pas les tests. Je te laisse les lancer depuis l’onglet Run / Tests.']); s.pending = null; s.status = 'idle'; break;
+    case 'answer': push(s, ['user', b.dataset.a]); s.pending = null; s.status = 'running'; later(() => push(s, ['claude', `Parfait, je pars sur : ${b.dataset.a.toLowerCase()}.`]), 1000); break;
+    case 'focus-compose': document.getElementById('compose-' + s.id)?.focus(); return;
+    case 'interrupt': push(s, ['sys', 'Interrompu (Échap) · en attente de ton message']); s.status = 'idle'; break;
+    case 'stop': push(s, ['sys', 'Session arrêtée']); s.status = 'idle'; break;
+    case 'file': S.file[s.id] = +b.dataset.i; S.commenting = null; break;
+    case 'comment': S.commenting = {f: DIFFS[s.diff][S.file[s.id]||0].p, i: +b.dataset.i}; render(); document.getElementById('cm-text')?.focus(); return;
+    case 'cancel-comment': S.commenting = null; break;
+    case 'del-comment': s.comments.splice(+b.dataset.i, 1); break;
+    case 'run': {
+      const r = PROJECTS[s.project].runners.find(x => x.n===b.dataset.n), v = s.run[r.n];
+      if(r.kind==='server' || r.kind==='native'){ s.run[r.n] = v==='running' ? 'idle' : 'running'; if(s.run[r.n]==='running') toast(`${r.n} lancé`, r.cmd); }
+      else { s.run[r.n] = 'running'; later(() => { s.run[r.n] = TEST_OUT[s.id] && r.n==='test' ? 'failed' : 'ok'; }, 1300); }
+    } break;
+    case 'send-fail': push(s, ['user', 'Les tests échouent : TestCallbackStateExpire et TestCallbackStateInconnu. Sortie jointe, corrige.']); s.status = 'running'; S.tab = 'terminal';
+      later(() => push(s, ['claude', 'Le test attend 400 mais ValidState panique sur un state vide. Je corrige parseCode.'], ['tool', '<b>Update</b>(internal/auth/oauth.go)'], ['out', '+3 −1']), 1200); break;
+    case 'make-pr': push(s, ['user', 'Ouvre la PR pour cette branche' + (issueOf(s) ? ` (Closes #${s.issue})` : '')], ['tool', '<b>Bash</b>(git push -u origin ' + esc(s.branch) + ')']); s.status = 'running';
+      later(() => { push(s, ['tool', '<b>Bash</b>(gh pr create --title … --body …)'], ['out', `https://github.com/${PROJECTS[s.project].repo}/pull/61`]); s.status = 'done'; s.ship = {state:'pr', pr:61, ci:[['build','running','en cours'],['test','pending','en attente'],['lint','pending','en attente']], autofix:true}; S.tab = 'ship'; toast('PR #61 ouverte', 'La CI démarre, l’app la suit.'); }, 1500); break;
+    case 'merge-main': push(s, ['user', 'Rebase sur main et merge en fast-forward'], ['tool', '<b>Bash</b>(git fetch && git rebase origin/main)']); s.status = 'running';
+      later(() => { push(s, ['tool', '<b>Bash</b>(git push origin HEAD:main)'], ['out', 'main mis à jour (fast-forward)']); s.status = 'done'; s.ship = {state:'merged', how:'main', ago:"à l'instant"}; S.tab = 'ship'; toast('Mergée dans main', 'Le worktree peut être supprimé.'); }, 1500); break;
+    case 'merge-pr': s.ship = {state:'merged', how:'pr', ago:"à l'instant"}; toast(`PR #${s.ship.pr||''} mergée`); break;
+    case 'cleanup': { const p = PROJECTS[s.project]; SESSIONS = SESSIONS.filter(x => x !== s); S.sel = SESSIONS[0].id; S.tab = 'terminal'; toast('Worktree supprimé', `${p.name} · ${s.branch} : worktree et branche locale supprimés`); } break;
+    case 'toast': toast(b.dataset.m); return;
+    case 'resume': openModal({project:b.dataset.p, src:'resume', resume:b.dataset.id}); return;
+    case 'new': openModal(); return;
+    /* thèmes */
+    case 'theme-mode': THEME.mode = b.dataset.m; applyTheme(); if(S.settings) renderSettings(); break;
+    case 'settings': S.settings = {tab:b.dataset.t}; S.capture = null; renderSettings(); return;
+    case 'preset': THEME.preset = b.dataset.p; applyTheme(); renderSettings(); return;
+    case 'theme-reset': THEME.custom = {light:{}, dark:{}}; applyTheme(); renderSettings(); toast('Couleurs réinitialisées'); return;
+    case 'theme-copy': try { navigator.clipboard.writeText(JSON.stringify(THEME, null, 2)).then(() => toast('Thème copié', 'À coller dans le fichier de thème ou à partager.'), () => toast('Copie refusée par le navigateur')); } catch(_) { toast('Copie refusée par le navigateur'); } return;
+    /* voix */
+    case 'model': { const k = b.dataset.k; if(!VOICE.installed.includes(k)){ VOICE.installed.push(k); toast('Modèle téléchargé (simulé)', MODELS[k].nom); } VOICE.model = k; saveVoice(); renderSettings(); } return;
+    case 'capture': S.capture = b.dataset.k; renderSettings(); return;
+    case 'pttmode': VOICE.pttMode = b.dataset.v; saveVoice(); renderSettings(); render(); return;
+    case 'mic': startRec('long'); return;
+    case 'rec-cancel': S.rec = null; break;
+    case 'rec-review': finishLong(false); return;
+    case 'rec-send': finishLong(true); return;
+    /* fichiers */
+    case 'fdir': { const f = ftOf(s), p = b.dataset.p; f.open.has(p) ? f.open.delete(p) : f.open.add(p); } break;
+    case 'fopen': ftOf(s).file = b.dataset.p; ftOf(s).raw = false; S.tab = 'files'; break;
+    case 'fraw': ftOf(s).raw = b.dataset.v==='1'; break;
+    case 'ftoc': document.getElementById(b.dataset.h)?.scrollIntoView({block:'start'}); return;
+    case 'fmention': S.draft[s.id] = ((S.draft[s.id]||'') + ' @' + ftOf(s).file).trim(); S.tab = 'terminal'; toast('Fichier mentionné', '@' + ftOf(s).file + ' ajouté au message'); break;
+    case 'fedit': toast("Ouverture dans l'éditeur (simulé)", ftOf(s).file); return;
+    /* modal */
+    case 'close': case 'close-scrim': S.modal = null; S.settings = null; S.capture = null; renderModal(); return;
+    case 'm-src': syncModalFields(); S.modal.src = b.dataset.s; if(b.dataset.s==='free'){ S.modal.issue = null; S.modal.prompt = ''; S.modal.branch = ''; } renderModal(); return;
+    case 'pick-issue': { syncModalFields(); const m = S.modal, i = ISSUES[m.project].find(x => x.n===+b.dataset.n); m.issue = i.n; m.subs = i.subs ? i.subs.map(x => x.n) : []; m.branch = branchFor(i); m.prompt = promptFor(i, PROJECTS[m.project]); renderModal(); } return;
+    case 'pick-resume': S.modal.resume = b.dataset.id; renderModal(); return;
+    case 'launch': launch(); return;
+  }
+  render();
+});
+
+document.addEventListener('change', e => {
+  const t = e.target, s = cur();
+  if(t.dataset.act==='mode'){ s.mode = t.value; push(s, ['sys', `Mode changé : ${MODES.find(m => m[0]===t.value)[1]}`]); render(); return; }
+  if(t.dataset.act==='seen'){ const f = DIFFS[s.diff][S.file[s.id]||0]; s.viewed[f.p] = t.checked; render(); return; }
+  if(t.dataset.act==='autofix'){ s.ship.autofix = t.checked; return; }
+  if(t.dataset.tok){ renderSettings(); return; }
+  if(t.id==='v-pttmode'){ VOICE.pttMode = t.value; saveVoice(); return; }
+  if(t.name==='after'){ VOICE.after = t.value; saveVoice(); return; }
+  if(t.id==='v-pre'){ VOICE.preamble = t.checked; saveVoice(); return; }
+  if(t.id==='v-keep'){ VOICE.keepAudio = t.checked; saveVoice(); return; }
+  if(!S.modal) return;
+  if(t.id==='m-project'){ const pid = t.value; Object.assign(S.modal, {project:pid, profile:PROJECTS[pid].profile, wtMode:PROJECTS[pid].wt, issue:null, subs:[], branch:'', prompt:'', resume:null}); renderModal(); return; }
+  if(t.dataset.act==='m-wt'){ syncModalFields(); S.modal.wt = t.checked; renderModal(); return; }
+  if(t.dataset.act==='pick-sub'){ syncModalFields(); const n = +t.dataset.n, a = S.modal.subs; t.checked ? a.push(n) : a.splice(a.indexOf(n), 1); renderModal(); return; }
+  if(['m-profile','m-wtmode'].includes(t.id)){ syncModalFields(); renderModal(); }
+});
+
+document.addEventListener('input', e => {
+  const t = e.target;
+  if(t.dataset.tok){ const m = resolved(); THEME.custom[m][t.dataset.tok] = t.value; applyTheme(); const h = t.parentElement.querySelector('.hex'); if(h) h.textContent = t.value; return; }
+  if(t.id && t.id.startsWith('compose-')){ S.draft[t.id.slice(8)] = t.value; return; }
+  if(t.id && t.id.startsWith('ffilter-')){ const s = cur(); ftOf(s).filter = t.value; $('#ftree-list').innerHTML = treeList(s); return; }
+  if(e.target.id==='issue-filter'){ S.modal.filter = e.target.value; const list = (ISSUES[S.modal.project]||[]).filter(i => (i.t+' '+i.n).toLowerCase().includes(S.modal.filter.toLowerCase())); $('#issue-list').innerHTML = issueList(list); }
+});
+
+document.addEventListener('submit', e => {
+  e.preventDefault();
+  const f = e.target.dataset.form, s = cur();
+  if(f==='compose'){ const inp = document.getElementById('compose-' + s.id), v = inp.value.trim(); if(!v) return;
+    S.draft[s.id] = ''; push(s, ['user', v]); s.pending = null; s.status = 'running'; render(); later(() => push(s, ['claude', 'Bien noté, je m’en occupe.']), 1000); }
+  if(f==='comment'){ const v = document.getElementById('cm-text').value.trim(); if(v){ s.comments.push({f:S.commenting.f, i:S.commenting.i, txt:v}); } S.commenting = null; render(); }
+  if(f==='review'){ const g = document.getElementById('review-' + s.id).value.trim(), n = s.comments.length;
+    const lines = s.comments.map(c => { const l = DIFFS[s.diff].find(x => x.p===c.f).lines[c.i]; return `${c.f}:${l[2]??l[1]} — ${c.txt}`; });
+    push(s, ['user', `Revue du diff (${n} commentaire${n>1?'s':''})${g?' : '+g:''}\n` + lines.map(x => '• ' + x).join('\n')]);
+    s.comments = []; s.status = 'running'; S.tab = 'terminal'; render();
+    toast('Revue envoyée à Claude', `${PROJECTS[s.project].name} · ${s.branch}`);
+    later(() => push(s, ['claude', 'Je prends en compte la revue, je commence par ' + lines[0].split(' — ')[0] + '.']), 1200); }
+});
+
+document.addEventListener('submit', e => {
+  if(e.target.dataset.form==='rec-send') sendDictation(document.getElementById('rec-edit').value, document.getElementById('rec-pre').checked);
+});
+
+const MODS = ['Ctrl','Alt','Maj','Super'];
+document.addEventListener('keydown', e => {
+  if(S.capture){
+    e.preventDefault();
+    if(e.key==='Escape'){ S.capture = null; renderSettings(); return; }
+    const c = comboOf(e); if(!c || c.split('+').every(p => MODS.includes(p))) return;
+    VOICE[S.capture] = c; saveVoice(); S.capture = null; renderSettings(); render(); toast('Raccourci enregistré', c); return;
+  }
+  const c = comboOf(e), busy = S.modal || S.settings;
+  if(c===VOICE.ptt){
+    e.preventDefault(); if(e.repeat) return;
+    if(S.rec && S.rec.kind==='ptt'){ if(VOICE.pttMode==='toggle') stopPtt(); return; }
+    if(!S.rec && !busy) startRec('ptt'); return;
+  }
+  if(c===VOICE.long){
+    e.preventDefault(); if(e.repeat) return;
+    if(S.rec && S.rec.kind==='long' && !S.rec.review) finishLong(VOICE.after==='send');
+    else if(!S.rec && !busy) startRec('long');
+    return;
+  }
+  if(e.key==='Escape'){
+    if(S.rec && !S.rec.review){ S.rec = null; $('#ptt').hidden = true; render(); return; }
+    if(busy){ S.modal = null; S.settings = null; renderModal(); }
+  }
+});
+document.addEventListener('keyup', () => { if(S.rec && S.rec.kind==='ptt' && VOICE.pttMode==='hold') stopPtt(); });
+
+applyTheme();
+render();
+/* Notification simulée : une session passe en attente */
+setTimeout(() => {
+  const s = sess('s6'); if(!s || s.status!=='running') return;
+  s.status = 'waiting'; s.last = 0;
+  s.pending = {type:'question', text:"Je stocke l'état des sessions dans SQLite ou dans des fichiers JSON par session ?", opts:['SQLite','Fichiers JSON']};
+  push(s, ['claude', 'Le PTY fonctionne et les hooks arrivent sur le socket. Avant de persister l’état, une question.']);
+  render();
+  toast('orchestrateur · main attend ta réponse', 'Notification desktop · le son est joué par peon-ping', {wait:true, go:'s6'});
+}, 8000);
+</script>

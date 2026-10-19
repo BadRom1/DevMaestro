@@ -1,0 +1,6 @@
+{
+  "name": "orch-spike-01",
+  "version": "0.0.1",
+  "description": "Prototype n° 1 : relaie tous les événements de hooks vers relay.py",
+  "author": { "name": "DevMaestro" }
+}
