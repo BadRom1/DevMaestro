@@ -61,6 +61,42 @@ export interface AppSettings {
   view: MainView
   /** Worktrees créés avec une session (v0.2, lot 6). */
   worktrees: WorktreeSettings
+  /** Interface (v0.3, lot 8). */
+  ui: UiSettings
+}
+
+export interface UiSettings {
+  /** Taille de toute l'interface, en pour cent (un des `ZOOM_STEPS`), appliquée par le processus principal. */
+  zoom: number
+}
+
+/** Paliers de la taille de l'interface (pour cent), du plus petit au plus grand. */
+export const ZOOM_STEPS: readonly number[] = [80, 90, 100, 110, 125, 150, 175, 200]
+export const DEFAULT_ZOOM = 100
+
+export function isZoomStep(v: unknown): v is number {
+  return typeof v === 'number' && ZOOM_STEPS.includes(v)
+}
+
+/** Palier le plus proche d'une valeur lue (fichier abîmé ou d'une autre version) ; hors 80–200 % : 100 %. */
+export function snapZoom(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return DEFAULT_ZOOM
+  if (v < ZOOM_STEPS[0]! || v > ZOOM_STEPS[ZOOM_STEPS.length - 1]!) return DEFAULT_ZOOM
+  let best = DEFAULT_ZOOM
+  for (const z of ZOOM_STEPS) if (Math.abs(z - v) < Math.abs(best - v)) best = z
+  return best
+}
+
+export type ZoomDirection = 'in' | 'out' | 'reset'
+export const ZOOM_DIRECTIONS: readonly ZoomDirection[] = ['in', 'out', 'reset']
+
+/** Palier suivant (`in`), précédent (`out`) ou 100 % (`reset`) ; reste au bout de l'échelle. */
+export function stepZoom(current: number, dir: ZoomDirection): number {
+  if (dir === 'reset') return DEFAULT_ZOOM
+  const z = snapZoom(current)
+  const i = ZOOM_STEPS.indexOf(z)
+  const j = dir === 'in' ? Math.min(ZOOM_STEPS.length - 1, i + 1) : Math.max(0, i - 1)
+  return ZOOM_STEPS[j]!
 }
 
 export interface WorktreeSettings {
@@ -104,6 +140,7 @@ export interface SettingsPatch {
     branchPrefix?: string
     notifyIntegrated?: boolean
   }
+  ui?: { zoom?: number }
 }
 
 export const MAX_PROJECT_PROFILES = 500
@@ -124,6 +161,7 @@ export function defaultSettings(): AppSettings {
     profileLabels: {},
     view: 'projet',
     worktrees: { location: 'sibling', projectLocations: {}, branchPrefix: '', notifyIntegrated: true },
+    ui: { zoom: DEFAULT_ZOOM },
   }
 }
 
@@ -281,6 +319,63 @@ function themePatch(v: unknown): ThemePatch {
   return out
 }
 
+/** Taille maximale d'un thème importé (texte JSON). */
+export const MAX_THEME_IMPORT = 64 * 1024
+
+/** Thème importé : les deux modes, et le mode choisi s'il est fourni (sinon l'actuel est gardé). */
+export interface ThemeImport {
+  mode?: ThemeMode
+  light: SchemeTheme
+  dark: SchemeTheme
+}
+
+/**
+ * Thème collé ou lu d'un fichier (« Importer un thème (JSON) »), validé aussi
+ * strictement qu'une modification venue de la page : format de « Copier le
+ * thème » (`{mode?, light, dark}`), ou ancien format à palette unique
+ * (`{mode?, palette, custom?: {light?, dark?}}`), repris dans les deux modes.
+ * Lève `SettingsError` avec un message précis, en français.
+ */
+export function parseThemeImport(text: string): ThemeImport {
+  if (typeof text !== 'string' || text.trim() === '') throw new SettingsError('aucun thème à importer')
+  if (text.length > MAX_THEME_IMPORT) throw new SettingsError(`thème trop long (${Math.round(MAX_THEME_IMPORT / 1024)} Kio au plus)`)
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch (e) {
+    throw new SettingsError(`JSON invalide : ${(e as Error).message}`)
+  }
+  if (!isObj(raw)) throw new SettingsError('le thème doit être un objet JSON')
+  const legacy = 'palette' in raw || 'custom' in raw
+  const modern = 'light' in raw || 'dark' in raw
+  if (legacy && modern) throw new SettingsError('format mélangé : « palette »/« custom » (ancien format) et « light »/« dark » ensemble')
+  if (legacy) {
+    for (const k of Object.keys(raw)) {
+      if (!['mode', 'palette', 'custom'].includes(k)) throw new SettingsError(`champ inconnu : ${k}`)
+    }
+    if (!isPalette(raw.palette)) throw new SettingsError(`« palette » inconnue (attendu : ${PALETTE_NAMES.join(', ')})`)
+    const custom = raw.custom === undefined ? {} : raw.custom
+    if (!isObj(custom)) throw new SettingsError('« custom » doit être un objet ({ light, dark })')
+    for (const k of Object.keys(custom)) {
+      if (!(SCHEMES as readonly string[]).includes(k)) throw new SettingsError(`champ inconnu : custom.${k}`)
+    }
+    const p = themePatch({
+      ...(raw.mode !== undefined ? { mode: raw.mode } : {}),
+      light: { palette: raw.palette, custom: custom.light ?? {} },
+      dark: { palette: raw.palette, custom: custom.dark ?? {} },
+    })
+    return p as ThemeImport
+  }
+  for (const k of SCHEMES) {
+    if (raw[k] === undefined) throw new SettingsError(`« ${k} » manquant (attendu : { mode, light, dark })`)
+  }
+  for (const k of SCHEMES) {
+    const s = raw[k]
+    if (isObj(s) && s.custom === undefined) throw new SettingsError(`« theme.${k}.custom » manquant`)
+  }
+  return themePatch(raw) as ThemeImport
+}
+
 export class SettingsError extends Error {
   override name = 'SettingsError'
 }
@@ -307,6 +402,7 @@ export function normalizeSettings(raw: unknown): AppSettings {
     profileLabels: labelsFrom(raw.profileLabels),
     view: (MAIN_VIEWS as readonly unknown[]).includes(raw.view) ? (raw.view as MainView) : d.view,
     worktrees: worktreesFrom(raw.worktrees),
+    ui: { zoom: isObj(raw.ui) ? snapZoom(raw.ui.zoom) : DEFAULT_ZOOM },
   }
 }
 
@@ -326,7 +422,7 @@ export function validatePatch(raw: unknown): SettingsPatch {
   if (!isObj(raw)) throw new SettingsError('modification des réglages : objet attendu')
   const out: SettingsPatch = {}
   for (const k of Object.keys(raw)) {
-    if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view', 'worktrees'].includes(k)) {
+    if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view', 'worktrees', 'ui'].includes(k)) {
       throw new SettingsError(`réglage inconnu : ${k}`)
     }
   }
@@ -373,6 +469,20 @@ export function validatePatch(raw: unknown): SettingsPatch {
     out.profileLabels = pl
   }
   if (raw.worktrees !== undefined) out.worktrees = worktreesPatch(raw.worktrees)
+  if (raw.ui !== undefined) out.ui = uiPatch(raw.ui)
+  return out
+}
+
+function uiPatch(v: unknown): NonNullable<SettingsPatch['ui']> {
+  if (!isObj(v)) throw new SettingsError('« ui » doit être un objet')
+  for (const k of Object.keys(v)) {
+    if (k !== 'zoom') throw new SettingsError(`réglage inconnu : ui.${k}`)
+  }
+  const out: NonNullable<SettingsPatch['ui']> = {}
+  if (v.zoom !== undefined) {
+    if (!isZoomStep(v.zoom)) throw new SettingsError(`« ui.zoom » doit valoir ${ZOOM_STEPS.join(', ')} (pour cent)`)
+    out.zoom = v.zoom
+  }
   return out
 }
 
@@ -451,6 +561,7 @@ export function applyPatch(s: AppSettings, p: SettingsPatch): AppSettings {
     }
     next.worktrees = w
   }
+  if (p.ui) next.ui = { ...s.ui, ...p.ui }
   return next
 }
 
@@ -460,6 +571,7 @@ export function mergePatches(a: SettingsPatch, b: SettingsPatch): SettingsPatch 
   if (a.theme && b.theme) out.theme = { ...a.theme, ...b.theme }
   if (a.projectProfiles && b.projectProfiles) out.projectProfiles = { ...a.projectProfiles, ...b.projectProfiles }
   if (a.profileLabels && b.profileLabels) out.profileLabels = { ...a.profileLabels, ...b.profileLabels }
+  if (a.ui && b.ui) out.ui = { ...a.ui, ...b.ui }
   if (a.worktrees && b.worktrees) {
     out.worktrees = { ...a.worktrees, ...b.worktrees }
     if (a.worktrees.projectLocations && b.worktrees.projectLocations) {

@@ -34,7 +34,7 @@ import {
   type WorktreeInfo,
   type WorktreesList,
 } from '../shared/protocol'
-import { SettingsError } from '../shared/settings'
+import { SettingsError, stepZoom, type ZoomDirection } from '../shared/settings'
 import { managedWorktreesDir, rootFromCommonDir } from '../shared/worktrees'
 import { IntegratedNotifier, NotifyDecider, integratedContent, notificationContent } from './notifyLogic'
 import { SettingsStore } from './settingsStore'
@@ -43,7 +43,16 @@ import { defaultSocketPath } from './daemon/paths'
 import { TerminalRelay } from './daemon/relay'
 import { RpcError } from './daemon/rpc'
 import { resolveOrchdBin, spawnDaemon } from './daemon/spawn'
-import { ValidationError, WORKTREE_TIMEOUT_MS, requestTimeoutMs, validateExternalUrl, validateParams, validateView } from './validate'
+import {
+  ValidationError,
+  WORKTREE_TIMEOUT_MS,
+  requestTimeoutMs,
+  validateExternalUrl,
+  validateParams,
+  validateView,
+  validateZoomDirection,
+} from './validate'
+import { zoomKey } from './zoom'
 
 const log = (msg: string): void => console.log(`[devmaestro] ${msg}`)
 
@@ -289,6 +298,31 @@ function toPage(channel: string, payload: unknown): void {
   if (wc && !wc.isDestroyed()) wc.send(channel, payload)
 }
 
+/**
+ * Taille de l'interface : zoom d'Electron (toute la page, terminal compris),
+ * piloté par le réglage `ui.zoom` ; appliquée après chaque changement de
+ * réglages et à chaque chargement de la page.
+ */
+function applyZoom(): void {
+  const wc = mainWindow?.webContents
+  if (!wc || wc.isDestroyed()) return
+  const factor = settings.settings.ui.zoom / 100
+  if (Math.abs(wc.getZoomFactor() - factor) > 1e-6) wc.setZoomFactor(factor)
+}
+
+/** Un palier de plus, de moins, ou 100 % : appliqué tout de suite, signalé à la page, puis enregistré. */
+async function changeZoom(dir: ZoomDirection): Promise<number> {
+  await settingsLoaded
+  const next = stepZoom(settings.settings.ui.zoom, dir)
+  if (next === settings.settings.ui.zoom) return next
+  // `update` change la valeur en mémoire avant d'écrire le fichier.
+  const saving = settings.update({ ui: { zoom: next } })
+  applyZoom()
+  toPage(Ipc.zoomChanged, next)
+  await saving.catch((err: unknown) => log(`taille de l’interface non enregistrée : ${(err as Error).message}`))
+  return next
+}
+
 /** Nouveau canal du terminal pour la page ; l'ancien est fermé. */
 function openTerminalPort(win: BrowserWindow): void {
   port?.close()
@@ -339,9 +373,18 @@ function createWindow(): BrowserWindow {
       webviewTag: false,
       spellcheck: false,
       devTools: dev,
+      zoomFactor: settings.settings.ui.zoom / 100,
     },
   })
   pageContentsId = win.webContents.id
+  // Raccourcis de taille gardés ici : la page (terminal compris) et le menu par défaut ne les reçoivent pas.
+  win.webContents.on('before-input-event', (e, input) => {
+    const key = zoomKey(input)
+    if (!key) return
+    e.preventDefault()
+    if (key.step) void changeZoom(key.step)
+  })
+  win.webContents.on('did-finish-load', () => void settingsLoaded.then(applyZoom))
   win.once('ready-to-show', () => win.show())
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null
@@ -453,7 +496,10 @@ function registerIpc(): void {
     if (!trusted(e)) return UNTRUSTED
     await settingsLoaded
     try {
-      return { ok: true, settings: await settings.update(patch) }
+      // `update` change la valeur en mémoire avant d'écrire : la taille est appliquée sans attendre le disque.
+      const saving = settings.update(patch)
+      applyZoom()
+      return { ok: true, settings: await saving }
     } catch (err) {
       if (err instanceof SettingsError) {
         return { ok: false, error: { code: ErrorCode.InvalidParams, message: `réglages refusés : ${err.message}` } }
@@ -466,8 +512,19 @@ function registerIpc(): void {
     // La fenêtre peut être en train de se fermer : on reconnaît sa page par l'identifiant de ses contenus.
     if (!trusted(e) && !(pageContentsId !== null && e.sender.id === pageContentsId && e.senderFrame?.parent == null)) return
     void settingsLoaded.then(() =>
-      settings.update(patch).catch((err: unknown) => log(`réglages de fermeture non enregistrés : ${(err as Error).message}`)),
+      settings
+        .update(patch)
+        .then(() => applyZoom())
+        .catch((err: unknown) => log(`réglages de fermeture non enregistrés : ${(err as Error).message}`)),
     )
+  })
+  ipcMain.handle(Ipc.zoomStep, async (e, dir: unknown) => {
+    if (!trusted(e)) return null
+    try {
+      return await changeZoom(validateZoomDirection(dir))
+    } catch {
+      return null
+    }
   })
   ipcMain.handle(Ipc.pickFolder, async (e) => {
     if (!trusted(e) || !mainWindow) return null
@@ -505,11 +562,13 @@ app.on('second-instance', () => {
   }
 })
 
-void app.whenReady().then(() => {
+void app.whenReady().then(async () => {
   log(`Electron ${process.versions.electron}, Chromium ${process.versions.chrome}, socket ${socket}, orchd « ${orchdBin} »`)
   hardenSessions()
   registerIpc()
   client.start()
+  // Réglages lus avant la fenêtre : la page s'affiche directement à la bonne taille.
+  await settingsLoaded
   mainWindow = createWindow()
   // Le processus GPU tourne une fois la première image prête.
   mainWindow.once('ready-to-show', () => setTimeout(logDisplayPlatform, 300))

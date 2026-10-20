@@ -10,7 +10,7 @@
  *   suivent.
  */
 import type { Methods, MethodName, Notification, Snapshot } from './protocol'
-import type { AppSettings, SettingsPatch } from './settings'
+import type { AppSettings, SettingsPatch, ZoomDirection } from './settings'
 
 export type ConnectionState =
   | { state: 'connecting'; attempt: number; detail?: string }
@@ -72,6 +72,10 @@ export interface DevMaestroApi {
   worktreesDir(): Promise<string | null>
   /** Notification « branche intégrée » cliquée : ouvrir le nettoyage des worktrees de ce dépôt. */
   onOpenCleanup(cb: (req: { root: string; path: string | null }) => void): () => void
+  /** Taille de l'interface d'un palier (Ctrl + molette) ; renvoie la nouvelle taille (pour cent), `null` si refusé. */
+  zoomStep(dir: ZoomDirection): Promise<number | null>
+  /** Taille de l'interface changée par le processus principal (raccourci clavier ou molette), en pour cent. */
+  onZoomChanged(cb: (zoom: number) => void): () => void
 }
 
 /** Messages du canal du terminal, processus principal → page. */
@@ -116,4 +120,6 @@ export const Ipc = {
   selectSession: 'devmaestro:select-session',
   worktreesDir: 'devmaestro:worktrees-dir',
   openCleanup: 'devmaestro:open-cleanup',
+  zoomStep: 'devmaestro:zoom-step',
+  zoomChanged: 'devmaestro:zoom-changed',
 } as const

@@ -95,6 +95,17 @@ impl GitExec {
         self.spawn(dir, args, timeout, true)
     }
 
+    /// Comme [`GitExec::run_with`], mais un délai dépassé rend `Ok(None)`
+    /// (l'appelant peut se rabattre sur une commande moins coûteuse).
+    pub fn run_or_timeout(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<Option<Out>, DiffError> {
+        self.spawn_inner(dir, args, timeout, true)
+    }
+
     /// Comme [`GitExec::run`], sans `--literal-pathspecs` : pour les commandes
     /// qui le refusent (`check-ignore`), avec des chemins fixés par le démon.
     pub fn run_without_literal_pathspecs(
@@ -112,6 +123,19 @@ impl GitExec {
         timeout: Duration,
         literal: bool,
     ) -> Result<Out, DiffError> {
+        let what = args.first().copied().unwrap_or("");
+        self.spawn_inner(dir, args, timeout, literal)?
+            .ok_or_else(|| failed(what, "délai dépassé"))
+    }
+
+    /// Lance la commande ; `Ok(None)` si elle a été tuée au bout de `timeout`.
+    fn spawn_inner(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        timeout: Duration,
+        literal: bool,
+    ) -> Result<Option<Out>, DiffError> {
         let what = args.first().copied().unwrap_or("");
         let mut command = Command::new(&self.program);
         command.arg("-C").arg(dir);
@@ -156,20 +180,20 @@ impl GitExec {
                 Ok(None) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(failed(what, "délai dépassé"));
+                    return Ok(None);
                 }
                 Err(e) => return Err(failed(what, e)),
             }
         };
         let stdout = reader.join().unwrap_or_default();
         let stderr = err_reader.join().unwrap_or_default();
-        Ok(Out {
+        Ok(Some(Out {
             ok: status.success(),
             code: status.code(),
             truncated: stdout.len() >= MAX_OUTPUT,
             stdout,
             stderr,
-        })
+        }))
     }
 
     /// Première ligne de la sortie d'une commande réussie, si elle n'est pas vide.

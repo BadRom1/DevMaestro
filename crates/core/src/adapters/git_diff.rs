@@ -22,6 +22,15 @@
 //!   --exclude-standard -z` pour les fichiers non suivis (au plus
 //!   [`MAX_UNTRACKED`] ; les lignes ne sont comptées que pour les
 //!   [`MAX_COUNTED_UNTRACKED`] plus récents, avec un cache par taille et date).
+//! - Historique (v0.3, lot 9) : `git log -z` de `<base>..HEAD` (shas
+//!   résolus d'abord : la liste et ses compteurs portent sur le même `HEAD`),
+//!   format à champs séparés par des octets nuls
+//!   ([`crate::domain::commits::LOG_FORMAT`]), `--encoding=UTF-8`,
+//!   `--no-show-signature`, `--no-notes` ; compteurs par `--numstat -M
+//!   --diff-merges=first-parent --root` (une fusion contre son premier
+//!   parent, un commit racine contre l'arbre vide). Diff d'un commit :
+//!   `git diff -M <premier parent ou arbre vide> <commit>`, jamais contre
+//!   l'arbre de travail.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -29,6 +38,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::git_exec::{GitExec, Out, failed};
+use crate::domain::commits::{
+    Commit, CommitLog, CommitRange, LOG_FORMAT, MAX_LOG_JSON_BYTES, fit_commits, parse_log,
+};
 use crate::domain::diff::{
     BaseKind, ChangeSet, ChangedFile, DiffBase, FileDiff, FileStatus, MAX_COUNTED_UNTRACKED,
     MAX_FILE_BYTES, count_lines, looks_binary, parse_unified, tracked_files, untracked_diff,
@@ -50,6 +62,8 @@ type LineCache = HashMap<PathBuf, (u64, i128, u64, bool)>;
 pub struct GitDiff {
     git: GitExec,
     lines: Mutex<LineCache>,
+    /// Délai de `git log --numstat` (au-delà : liste relue sans compteurs).
+    stats_timeout: std::time::Duration,
 }
 
 impl Default for GitDiff {
@@ -57,6 +71,7 @@ impl Default for GitDiff {
         Self {
             git: GitExec::default(),
             lines: Mutex::new(HashMap::new()),
+            stats_timeout: GIT_TIMEOUT,
         }
     }
 }
@@ -106,6 +121,12 @@ impl GitDiff {
         self.git.default_branch(top)
     }
 
+    /// Arbre vide (son identifiant dépend du format d'objets du dépôt).
+    fn empty_tree(&self, top: &Path) -> Result<String, DiffError> {
+        self.line(top, &["hash-object", "-t", "tree", "/dev/null"])
+            .ok_or_else(|| failed("hash-object", "arbre vide introuvable"))
+    }
+
     /// Base du diff et `HEAD`.
     fn base(&self, top: &Path) -> Result<(DiffBase, Option<String>), DiffError> {
         let head = self.line(top, &["rev-parse", "--verify", "-q", "HEAD^{commit}"]);
@@ -126,9 +147,7 @@ impl GitDiff {
             Some(h) => h.clone(),
             // Dépôt sans commit : l'arbre vide (son identifiant dépend du
             // format d'objets du dépôt).
-            None => self
-                .line(top, &["hash-object", "-t", "tree", "/dev/null"])
-                .ok_or_else(|| failed("hash-object", "arbre vide introuvable"))?,
+            None => self.empty_tree(top)?,
         };
         Ok((
             DiffBase {
@@ -232,6 +251,7 @@ impl DiffSource for GitDiff {
             root: top,
             base,
             head,
+            target: None,
             files,
             truncated,
             skipped_non_utf8: skipped,
@@ -276,7 +296,8 @@ impl DiffSource for GitDiff {
         let top = &changes.root;
         let base = &changes.base;
         let work = top.join(&file.path);
-        if file.status == FileStatus::Untracked {
+        let target = changes.target.as_deref();
+        if file.status == FileStatus::Untracked && target.is_none() {
             return Ok(match read_capped(&work) {
                 Some(c) if c.len() as u64 > MAX_FILE_BYTES => FileDiff::too_large(),
                 Some(c) => untracked_diff(&c),
@@ -287,19 +308,26 @@ impl DiffSource for GitDiff {
             return Ok(FileDiff::binary());
         }
         // Taille de chaque côté avant de demander le diff.
-        if stamp(&work).is_some_and(|(s, _)| s > MAX_FILE_BYTES) {
+        let too_big = |rev: &str, path: &str| {
+            let spec = format!("{rev}:{path}");
+            self.line(top, &["cat-file", "-s", &spec])
+                .is_some_and(|s| s.parse::<u64>().is_ok_and(|s| s > MAX_FILE_BYTES))
+        };
+        let new_too_big = match target {
+            None => stamp(&work).is_some_and(|(s, _)| s > MAX_FILE_BYTES),
+            Some(t) => file.status != FileStatus::Deleted && too_big(t, &file.path),
+        };
+        if new_too_big {
             return Ok(FileDiff::too_large());
         }
         let old = file.old_path.as_deref().unwrap_or(&file.path);
-        if file.status != FileStatus::Added {
-            let spec = format!("{}:{old}", base.sha);
-            if let Some(s) = self.line(top, &["cat-file", "-s", &spec])
-                && s.parse::<u64>().is_ok_and(|s| s > MAX_FILE_BYTES)
-            {
-                return Ok(FileDiff::too_large());
-            }
+        if file.status != FileStatus::Added && too_big(&base.sha, old) {
+            return Ok(FileDiff::too_large());
         }
         let mut args = Self::diff_args(&base.sha, &["-U3"]);
+        if let Some(t) = target {
+            args.push(t);
+        }
         args.push("--");
         if file.old_path.is_some() {
             args.push(old);
@@ -313,6 +341,133 @@ impl DiffSource for GitDiff {
             return Ok(FileDiff::too_large());
         }
         Ok(parse_unified(&out.stdout))
+    }
+
+    fn commits(
+        &self,
+        cwd: &Path,
+        limit: usize,
+        stats: bool,
+        range: Option<CommitRange>,
+    ) -> Result<CommitLog, DiffError> {
+        let top = self.toplevel(cwd)?;
+        let (base, head) = self.base(&top)?;
+        let mut log = CommitLog {
+            root: top,
+            // Sans commit : comme une base égale à `HEAD`.
+            range: CommitRange::resolve(range, &base.sha, head.as_deref().unwrap_or(&base.sha)),
+            base,
+            head,
+            commits: Vec::new(),
+            truncated: false,
+            stats,
+        };
+        // Pas de commit : rien à lister.
+        let Some(head) = log.head.clone() else {
+            return Ok(log);
+        };
+        // Plage de la branche vide (base = `HEAD`) : pas de `git log`.
+        if log.range == CommitRange::Branch && head == log.base.sha {
+            return Ok(log);
+        }
+        let max = format!("--max-count={}", limit.saturating_add(1));
+        let exclude = format!("^{}", log.base.sha);
+        let args = |stats: bool| {
+            let mut args = vec![
+                "log",
+                "-z",
+                "--no-color",
+                "--encoding=UTF-8",
+                "--no-show-signature",
+                "--no-notes",
+                LOG_FORMAT,
+                &max,
+            ];
+            if stats {
+                args.extend_from_slice(&[
+                    "--numstat",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "-M",
+                    "--diff-merges=first-parent",
+                    "--root",
+                ]);
+            }
+            args.extend_from_slice(&["--end-of-options", &head]);
+            if log.range == CommitRange::Branch {
+                args.push(&exclude);
+            }
+            args.push("--");
+            args
+        };
+        // Compteurs trop lents (gros commits, dépôt énorme) : la liste est
+        // relue sans eux plutôt que d'échouer.
+        let timed = if stats {
+            self.git
+                .run_or_timeout(&log.root, &args(true), self.stats_timeout)?
+        } else {
+            None
+        };
+        let out = match timed {
+            Some(out) => out,
+            None => {
+                log.stats = false;
+                self.git.run(&log.root, &args(false))?
+            }
+        };
+        if !out.ok {
+            return Err(failed("log", "échec"));
+        }
+        let (mut commits, stopped) = parse_log(&out.stdout);
+        if out.truncated {
+            // Dernier commit peut-être incomplet (compteurs).
+            commits.pop();
+        }
+        log.truncated = out.truncated || stopped || commits.len() > limit;
+        commits.truncate(limit);
+        log.truncated |= fit_commits(&mut commits, MAX_LOG_JSON_BYTES);
+        log.commits = commits;
+        Ok(log)
+    }
+
+    fn commit_changes(&self, root: &Path, commit: &Commit) -> Result<ChangeSet, DiffError> {
+        let (parent, kind, reference) = match commit.first_parent() {
+            Some(p) => (
+                p.to_owned(),
+                BaseKind::Parent,
+                crate::domain::commits::short_sha(p).to_owned(),
+            ),
+            None => (
+                self.empty_tree(root)?,
+                BaseKind::Root,
+                "arbre vide".to_owned(),
+            ),
+        };
+        let diff = |extra: &[&str]| {
+            let mut args = Self::diff_args(&parent, extra);
+            args.extend_from_slice(&[&commit.sha, "--"]);
+            self.run(root, &args)
+        };
+        let ns = diff(&["--name-status", "-z"])?;
+        let num = diff(&["--numstat", "-z"])?;
+        if !ns.ok || !num.ok {
+            return Err(failed("diff", "échec"));
+        }
+        let (mut files, skipped) = tracked_files(&ns.stdout, &num.stdout);
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(ChangeSet {
+            root: root.to_path_buf(),
+            base: DiffBase {
+                reference,
+                sha: parent,
+                kind,
+            },
+            head: Some(commit.sha.clone()),
+            target: Some(commit.sha.clone()),
+            files,
+            truncated: ns.truncated || num.truncated,
+            skipped_non_utf8: skipped,
+        })
     }
 }
 
@@ -544,5 +699,230 @@ mod tests {
         let d = g.file_diff(&c, f).unwrap();
         assert_eq!(d.hunks[0].lines.len(), 2);
         assert!(!marker.exists(), "une commande du dépôt a été lancée");
+    }
+
+    #[test]
+    fn commits_since_the_base_with_merge_root_and_counters() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let g = GitDiff::default();
+        assert_eq!(g.commits(&root, 10, true, None), Err(DiffError::NotARepo));
+        if !git(&root, &["init", "-q", "-b", "main"]) {
+            eprintln!("git absent : test sauté");
+            return;
+        }
+        // Dépôt sans commit : liste vide.
+        let log = g.commits(&root, 10, true, None).unwrap();
+        assert!(log.commits.is_empty() && log.head.is_none() && !log.truncated);
+        std::fs::write(root.join("a.txt"), "1\n2\n3\n4\n5\n6\n7\n8\n").unwrap();
+        assert!(git(&root, &["add", "."]));
+        assert!(git(&root, &["commit", "-q", "-m", "base"]));
+        // Sur la branche par défaut elle-même : rien sur la branche, donc
+        // les derniers commits de `HEAD` en automatique.
+        let branch = g
+            .commits(&root, 10, true, Some(CommitRange::Branch))
+            .unwrap();
+        assert!(branch.commits.is_empty() && branch.range == CommitRange::Branch);
+        let recent = g.commits(&root, 10, true, None).unwrap();
+        assert_eq!(recent.range, CommitRange::Recent);
+        assert_eq!(recent.commits.len(), 1);
+        assert_eq!(recent.commits[0].subject, "base");
+        assert_eq!(
+            (recent.commits[0].files, recent.commits[0].additions),
+            (1, 8)
+        );
+        // Configuration du dépôt qui changerait la sortie si elle était lue.
+        for (k, v) in [
+            ("i18n.logOutputEncoding", "ISO-8859-1"),
+            ("log.showRoot", "false"),
+            ("log.showSignature", "true"),
+            ("color.ui", "always"),
+            ("diff.renames", "false"),
+            ("format.pretty", "oneline"),
+            ("log.diffMerges", "separate"),
+        ] {
+            assert!(git(&root, &["config", k, v]));
+        }
+        assert!(git(&root, &["checkout", "-q", "-b", "fonction"]));
+        std::fs::write(root.join("a.txt"), "1\nDEUX\n3\n4\n5\n6\n7\n8\n").unwrap();
+        std::fs::write(root.join("bin.dat"), b"\0\x01").unwrap();
+        assert!(git(&root, &["add", "."]));
+        let message =
+            "Sujet « accentué »\n\nCorps ligne 1\n 3 files changed, 1 insertion(+)\n\n`fin`\n";
+        assert!(git(
+            &root,
+            &[
+                "commit",
+                "-q",
+                "--author=Élodie Ü <e@exemple.fr>",
+                "-m",
+                message
+            ]
+        ));
+        assert!(git(&root, &["mv", "a.txt", "b.txt"]));
+        assert!(git(&root, &["commit", "-q", "-m", "renommage"]));
+        // Historique sans lien (sa racine entre dans la liste), puis fusion.
+        assert!(git(&root, &["checkout", "-q", "--orphan", "autre"]));
+        assert!(git(&root, &["rm", "-q", "-rf", "."]));
+        std::fs::write(root.join("o.txt"), "x\ny\n").unwrap();
+        assert!(git(&root, &["add", "."]));
+        assert!(git(&root, &["commit", "-q", "-m", "racine sans lien"]));
+        assert!(git(&root, &["checkout", "-q", "fonction"]));
+        assert!(git(
+            &root,
+            &[
+                "merge",
+                "-q",
+                "--no-edit",
+                "--allow-unrelated-histories",
+                "autre"
+            ]
+        ));
+
+        let log = g.commits(&root, 10, true, None).unwrap();
+        assert_eq!(log.base.kind, BaseKind::MergeBase);
+        assert_eq!(log.range, CommitRange::Branch);
+        // Forcé en récent : toute l'histoire de `HEAD`, base comprise.
+        let recent = g
+            .commits(&root, 10, false, Some(CommitRange::Recent))
+            .unwrap();
+        assert_eq!(recent.range, CommitRange::Recent);
+        assert_eq!(recent.commits.len(), 5);
+        assert!(recent.commits.iter().any(|c| c.subject == "base"));
+        let subjects: Vec<_> = log.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects.len(), 4, "{subjects:?}");
+        assert!(
+            subjects[0].starts_with("Merge branch 'autre'"),
+            "{subjects:?}"
+        );
+        assert!(subjects.contains(&"racine sans lien"));
+        assert!(!subjects.contains(&"base"), "la base n'en fait pas partie");
+        let by = |s: &str| log.commits.iter().find(|c| c.subject == s).unwrap().clone();
+        let merge = log.commits[0].clone();
+        assert_eq!(merge.parents.len(), 2);
+        // Fusion contre son premier parent : o.txt ajouté.
+        assert_eq!((merge.files, merge.additions, merge.deletions), (1, 2, 0));
+        let first = by("Sujet « accentué »");
+        assert_eq!(first.author, "Élodie Ü");
+        assert_eq!(
+            first.body,
+            "Corps ligne 1\n 3 files changed, 1 insertion(+)\n\n`fin`"
+        );
+        assert_eq!((first.files, first.additions, first.deletions), (2, 1, 1));
+        assert!(first.date.contains('T'), "{}", first.date);
+        let rename = by("renommage");
+        assert_eq!(
+            (rename.files, rename.additions, rename.deletions),
+            (1, 0, 0)
+        );
+        let orphan = by("racine sans lien");
+        assert!(orphan.parents.is_empty());
+        assert_eq!((orphan.files, orphan.additions), (1, 2));
+        assert_eq!(log.head.as_deref(), Some(merge.sha.as_str()));
+        // Limite et liste sans compteurs.
+        let short = g.commits(&root, 2, false, None).unwrap();
+        assert!(short.truncated);
+        assert_eq!(short.commits.len(), 2);
+        assert_eq!(short.commits[0].sha, merge.sha);
+        assert_eq!(short.commits[0].files, 0);
+
+        // Diff d'un commit : contre son premier parent.
+        let c = g.commit_changes(&log.root, &first).unwrap();
+        assert_eq!(c.base.kind, BaseKind::Parent);
+        assert_eq!(c.base.sha, first.parents[0]);
+        assert_eq!(c.target.as_deref(), Some(first.sha.as_str()));
+        let paths: Vec<_> = c
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.status))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                ("a.txt", FileStatus::Modified),
+                ("bin.dat", FileStatus::Added)
+            ]
+        );
+        let d = g.file_diff(&c, c.file("a.txt").unwrap()).unwrap();
+        let lines: Vec<_> = d.hunks[0]
+            .lines
+            .iter()
+            .map(|l| (l.kind, l.text.as_str()))
+            .collect();
+        assert_eq!(lines[1], ('-', "2"));
+        assert_eq!(lines[2], ('+', "DEUX"));
+        assert!(g.file_diff(&c, c.file("bin.dat").unwrap()).unwrap().binary);
+        // L'arbre de travail n'entre pas en jeu.
+        std::fs::write(root.join("b.txt"), "tout autre chose\n").unwrap();
+        let r = g.commit_changes(&log.root, &rename).unwrap();
+        let f = r.file("b.txt").unwrap();
+        assert_eq!(f.status, FileStatus::Renamed);
+        assert!(g.file_diff(&r, f).unwrap().hunks.is_empty());
+        // Commit racine : contre l'arbre vide.
+        let o = g.commit_changes(&log.root, &orphan).unwrap();
+        assert_eq!(o.base.kind, BaseKind::Root);
+        assert_eq!(o.files[0].status, FileStatus::Added);
+        let d = g.file_diff(&o, &o.files[0]).unwrap();
+        assert_eq!(d.hunks[0].header, "@@ -0,0 +1,2 @@");
+        // Fusion : contre le premier parent.
+        let m = g.commit_changes(&log.root, &merge).unwrap();
+        assert_eq!(m.files.len(), 1);
+        assert_eq!(m.files[0].path, "o.txt");
+    }
+
+    #[test]
+    fn slow_counters_fall_back_to_a_plain_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        if !git(&root, &["init", "-q", "-b", "main"]) {
+            eprintln!("git absent : test sauté");
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        assert!(git(&root, &["add", "."]));
+        assert!(git(&root, &["commit", "-q", "-m", "base"]));
+        // Délai nul : `git log --numstat` est toujours tué.
+        let g = GitDiff {
+            stats_timeout: std::time::Duration::ZERO,
+            ..GitDiff::default()
+        };
+        let log = g.commits(&root, 5, true, None).unwrap();
+        assert!(!log.stats);
+        assert_eq!(log.commits.len(), 1);
+        assert_eq!(log.commits[0].subject, "base");
+        assert_eq!(log.commits[0].files, 0);
+        // Délai normal : compteurs.
+        let log = GitDiff::default().commits(&root, 5, true, None).unwrap();
+        assert!(log.stats);
+        assert_eq!(log.commits[0].files, 1);
+        // Sans compteurs demandés.
+        assert!(
+            !GitDiff::default()
+                .commits(&root, 5, false, None)
+                .unwrap()
+                .stats
+        );
+    }
+
+    #[test]
+    fn commit_file_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        if !git(&root, &["init", "-q", "-b", "main"]) {
+            eprintln!("git absent : test sauté");
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        assert!(git(&root, &["add", "."]));
+        assert!(git(&root, &["commit", "-q", "-m", "base"]));
+        assert!(git(&root, &["checkout", "-q", "-b", "f"]));
+        std::fs::write(root.join("a.txt"), "x".repeat(MAX_FILE_BYTES as usize + 1)).unwrap();
+        assert!(git(&root, &["commit", "-q", "-am", "gros"]));
+        // Petit dans l'arbre de travail, gros dans le commit.
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        let g = GitDiff::default();
+        let log = g.commits(&root, 5, true, None).unwrap();
+        let c = g.commit_changes(&log.root, &log.commits[0]).unwrap();
+        assert!(g.file_diff(&c, &c.files[0]).unwrap().too_large);
     }
 }

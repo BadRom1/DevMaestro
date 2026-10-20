@@ -8,10 +8,10 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 
-import { ErrorCode, type DiffSummary, type FileContent, type FileEntry, type Session } from '../../../shared/protocol'
+import { ErrorCode, type DiffFile, type DiffSummary, type FileContent, type FileEntry, type Session } from '../../../shared/protocol'
 import { call, errorCode, errorText } from '../api'
 import { awaitingAnswer } from '../state/status'
-import { STATUS_LABELS, sortFiles } from '../state/diff'
+import { STATUS_LABELS } from '../state/diff'
 import {
   ancestorDirs,
   defaultFile,
@@ -39,7 +39,6 @@ import { CodeView, lineGeometry, type SelectionPoint } from './CodeView'
 import { CommentBox, ReviewBar, linesLabel } from './ReviewBar'
 
 /** Aucun fichier dans le diff (référence stable). */
-const NO_FILES: DiffSummary['files'] = []
 
 /** Anti-rebond des rechargements après `session.diff_changed`. */
 const TREE_REFRESH_MS = 1000
@@ -97,6 +96,7 @@ interface PendingSelection {
 export function FilesView({
   session,
   diff,
+  reviewFiles,
   diffVersion,
   onMentioned,
   onShowDiff,
@@ -105,8 +105,11 @@ export function FilesView({
   review,
   onSent,
   focusFile,
+  onOpenCommit,
 }: {
   session: Session
+  /** Commentaire de commit cliqué dans la liste de la revue : onglet Commits. */
+  onOpenCommit?: (sha: string, path: string) => void
   /** Brouillon de revue de la session (partagé avec l'onglet Diff). */
   draft: ReviewDraft
   review: (a: ReviewAction) => void
@@ -116,6 +119,8 @@ export function FilesView({
   focusFile?: { sessionId: string; path: string; line: number; n: number } | null
   /** Liste du diff (fichiers modifiés), si chargée. */
   diff: DiffSummary | null
+  /** Liste du diff triée (ordre de l'onglet Diff), commune aux barres de revue de tous les onglets. */
+  reviewFiles: readonly DiffFile[]
   /** Change à chaque nouvelle liste du diff : marques rafraîchies. */
   diffVersion: number
   /** Mention envoyée : retour au terminal. */
@@ -166,8 +171,6 @@ export function FilesView({
 
   const changedFiles = useMemo(() => (diff?.files ?? []).map((f) => ({ path: f.path, status: f.status })), [diff])
   const changedPaths = useMemo(() => changedFiles.map((f) => f.path), [changedFiles])
-  /** Liste du diff dans l'ordre de l'onglet Diff : la revue part dans le même ordre d'où qu'on l'envoie. */
-  const sortedDiffFiles = useMemo(() => (diff ? sortFiles(diff.files) : NO_FILES), [diff])
 
   /** Numéro du dernier appel par dossier (une réponse plus ancienne est ignorée) et appels en cours. */
   const dirSeq = useRef(new Map<string, number>())
@@ -647,12 +650,13 @@ export function FilesView({
             session={session}
             draft={draft}
             review={review}
-            files={sortedDiffFiles}
+            files={reviewFiles}
             onSent={onSent}
             onOpenFile={(path, line) => {
               if (path !== file) openFile(path)
               setPendingLine({ path, line })
             }}
+            {...(onOpenCommit ? { onOpenCommit } : {})}
           />
         )}
       </div>

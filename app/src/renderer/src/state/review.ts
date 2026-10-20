@@ -1,8 +1,9 @@
 /**
  * Revue d'une session : commentaires par ligne du diff, commentaires sur des
- * lignes de fichier (onglet Fichiers) et commentaire général, en mémoire tant
- * qu'ils ne sont pas envoyés (gardés quand on change de session ou d'onglet).
- * Un seul brouillon par session, partagé par les onglets Diff et Fichiers.
+ * lignes de fichier (onglet Fichiers), commentaires par ligne du diff d'un
+ * commit (onglet Commits) et commentaire général, en mémoire tant qu'ils ne
+ * sont pas envoyés (gardés quand on change de session ou d'onglet). Un seul
+ * brouillon par session, partagé par les onglets Diff, Fichiers et Commits.
  * Réducteur pur, réancrage après rechargement du diff et construction de la
  * revue envoyée (`sessions.sendReview`).
  *
@@ -10,7 +11,9 @@
  * il est replacé sur la ligne au même texte la plus proche ; sinon il devient
  * « ligne modifiée » (hors du compte, pas envoyé, gardé avec un avertissement).
  * Un commentaire de fichier ne garde que ses numéros de ligne : le démon relit
- * les lignes actuelles à l'envoi.
+ * les lignes actuelles à l'envoi. Un commentaire de commit n'est jamais
+ * réancré (un commit ne change pas) ; si le commit sort de l'historique de la
+ * session, le démon le refuse et la barre de revue le désigne.
  */
 import type { AnyReviewComment, DiffFile, ReviewSide } from '../../../shared/protocol'
 import type { DiffRow, LineAnchor } from './diff'
@@ -44,10 +47,31 @@ export interface FileDraftComment {
   text: string
 }
 
-export type DraftComment = DiffDraftComment | FileDraftComment
+/** Commentaire sur une ligne du diff d'un commit (`sha` complet). */
+export interface CommitDraftComment {
+  kind: 'commit'
+  id: number
+  sha: string
+  path: string
+  side: ReviewSide
+  line: number
+  text: string
+  lineText: string
+}
+
+export type DraftComment = DiffDraftComment | FileDraftComment | CommitDraftComment
 
 export const isFileComment = (c: DraftComment): c is FileDraftComment => 'kind' in c && c.kind === 'file'
-export const isDiffComment = (c: DraftComment): c is DiffDraftComment => !isFileComment(c)
+export const isCommitComment = (c: DraftComment): c is CommitDraftComment => 'kind' in c && c.kind === 'commit'
+export const isDiffComment = (c: DraftComment): c is DiffDraftComment => !('kind' in c)
+
+/** Sha court affiché (7 caractères, comme git). */
+export const shortSha = (sha: string): string => sha.slice(0, 7)
+
+/** « a1b2c3d src/a.rs:12 » (« (ancienne version) » côté ancien). */
+export function commitCommentLabel(c: Pick<CommitDraftComment, 'sha' | 'path' | 'line' | 'side'>): string {
+  return `${shortSha(c.sha)} ${c.path}:${c.line}${c.side === 'old' ? ' (ancienne version)' : ''}`
+}
 
 /** Lignes couvertes par une sélection de fichier, ou pourquoi on ne peut pas la commenter. */
 export function fileSelectionError(line: number, lineEnd: number): string | null {
@@ -57,6 +81,8 @@ export function fileSelectionError(line: number, lineEnd: number): string | null
 }
 
 export interface ReviewEditing {
+  /** Commit commenté (onglet Commits) ; absent : diff du worktree. */
+  sha?: string
   path: string
   side: ReviewSide
   line: number
@@ -76,7 +102,7 @@ export interface ReviewDraft {
 export const emptyDraft: ReviewDraft = { comments: [], general: '', editing: null, nextId: 1 }
 
 export type ReviewAction =
-  | { type: 'edit'; path: string; anchor: LineAnchor; lineText: string }
+  | { type: 'edit'; path: string; anchor: LineAnchor; lineText: string; sha?: string }
   /** Texte de la boîte ouverte. */
   | { type: 'editText'; text: string }
   | { type: 'cancel' }
@@ -97,9 +123,20 @@ function clip(s: string, max: number): string {
   return chars.length > max ? chars.slice(0, max).join('') : s
 }
 
-/** Commentaires comptés et envoyables (hors « ligne modifiée »), diff et fichiers. */
+/** Commentaires comptés et envoyables (hors « ligne modifiée »), diff, fichiers et commits. */
 export function activeComments(d: ReviewDraft): DraftComment[] {
-  return d.comments.filter((c) => isFileComment(c) || !c.stale)
+  return d.comments.filter((c) => !isDiffComment(c) || !c.stale)
+}
+
+/** Commentaires de commit du brouillon (d'un commit, ou tous), par ordre d'ajout. */
+export function commitComments(d: ReviewDraft, sha?: string): CommitDraftComment[] {
+  return d.comments.filter(isCommitComment).filter((c) => sha === undefined || c.sha === sha)
+}
+
+/** La boîte ouverte est-elle sur cette ligne (du diff du worktree si `sha` est absent) ? */
+export function editingAt(d: ReviewDraft, path: string | null, anchor: LineAnchor, sha?: string): boolean {
+  const e = d.editing
+  return !!e && e.path === path && (e.sha ?? null) === (sha ?? null) && e.side === anchor.side && e.line === anchor.line
 }
 
 /** Commentaires de fichier du brouillon, par chemin puis ligne. */
@@ -128,10 +165,11 @@ export function reviewReducer(d: ReviewDraft, a: ReviewAction): ReviewDraft {
   switch (a.type) {
     case 'edit': {
       if (activeComments(d).length >= MAX_COMMENTS) return d
-      const same =
-        d.editing && d.editing.path === a.path && d.editing.side === a.anchor.side && d.editing.line === a.anchor.line
-      if (same) return d
-      return { ...d, editing: { path: a.path, side: a.anchor.side, line: a.anchor.line, lineText: a.lineText, text: '' } }
+      if (editingAt(d, a.path, a.anchor, a.sha)) return d
+      return {
+        ...d,
+        editing: { ...(a.sha ? { sha: a.sha } : {}), path: a.path, side: a.anchor.side, line: a.anchor.line, lineText: a.lineText, text: '' },
+      }
     }
     case 'editText':
       return d.editing ? { ...d, editing: { ...d.editing, text: clip(a.text, MAX_COMMENT_CHARS) } } : d
@@ -142,12 +180,10 @@ export function reviewReducer(d: ReviewDraft, a: ReviewAction): ReviewDraft {
       if (!e) return d
       const text = e.text.trim()
       if (!text || activeComments(d).length >= MAX_COMMENTS) return { ...d, editing: null }
-      return {
-        ...d,
-        editing: null,
-        comments: [...d.comments, { id: d.nextId, path: e.path, side: e.side, line: e.line, text, lineText: e.lineText }],
-        nextId: d.nextId + 1,
-      }
+      const comment: DraftComment = e.sha
+        ? { kind: 'commit', id: d.nextId, sha: e.sha, path: e.path, side: e.side, line: e.line, text, lineText: e.lineText }
+        : { id: d.nextId, path: e.path, side: e.side, line: e.line, text, lineText: e.lineText }
+      return { ...d, editing: null, comments: [...d.comments, comment], nextId: d.nextId + 1 }
     }
     case 'delete':
       return { ...d, comments: d.comments.filter((c) => c.id !== a.id) }
@@ -174,7 +210,7 @@ export function reviewReducer(d: ReviewDraft, a: ReviewAction): ReviewDraft {
     case 'reanchor': {
       let changed = false
       const comments = d.comments.map((c) => {
-        if (isFileComment(c) || c.path !== a.path) return c
+        if (!isDiffComment(c) || c.path !== a.path) return c
         const n = findAnchor(a.rows, c.side, c.line, c.lineText)
         const next: DiffDraftComment = n === null ? { ...c, stale: true } : { ...c, line: n, stale: false }
         if (next.line === c.line && !!next.stale === !!c.stale) return c
@@ -182,7 +218,7 @@ export function reviewReducer(d: ReviewDraft, a: ReviewAction): ReviewDraft {
         return next
       })
       let editing = d.editing
-      if (editing && editing.path === a.path) {
+      if (editing && !editing.sha && editing.path === a.path) {
         const n = findAnchor(a.rows, editing.side, editing.line, editing.lineText)
         // Ligne disparue : la boîte se ferme, le brouillon serait sans ancre.
         const next = n === null ? null : n === editing.line ? editing : { ...editing, line: n }
@@ -205,6 +241,11 @@ export function commentsAt(d: ReviewDraft, path: string, anchor: LineAnchor): Di
   return d.comments.filter(isDiffComment).filter((c) => !c.stale && c.path === path && c.side === anchor.side && c.line === anchor.line)
 }
 
+/** Commentaires d'une ligne du diff d'un commit. */
+export function commitCommentsAt(d: ReviewDraft, sha: string, path: string, anchor: LineAnchor): CommitDraftComment[] {
+  return commitComments(d, sha).filter((c) => c.path === path && c.side === anchor.side && c.line === anchor.line)
+}
+
 export interface BuiltReview {
   comments: AnyReviewComment[]
   /** Identifiants des commentaires envoyés (retirés après succès). */
@@ -217,8 +258,11 @@ export interface BuiltReview {
 /**
  * Revue à envoyer : les commentaires de diff ancrés dont le fichier est dans
  * la liste du diff (le démon refuse les autres), dans l'ordre de la liste puis
- * des lignes, puis les commentaires de fichier (toujours envoyables : le démon
- * relit les lignes), par chemin puis ligne. `null` s'il n'y a rien à envoyer.
+ * des lignes, puis les commentaires de commit (commits dans l'ordre où ils ont
+ * été commentés, puis chemin et ligne ; le démon vérifie que le commit est
+ * dans l'historique), puis les commentaires de fichier (toujours envoyables :
+ * le démon relit les lignes), par chemin puis ligne. `null` s'il n'y a rien à
+ * envoyer.
  */
 export function buildReview(d: ReviewDraft, files: readonly DiffFile[]): BuiltReview | null {
   const order = new Map(files.map((f, i) => [f.path, i]))
@@ -231,14 +275,27 @@ export function buildReview(d: ReviewDraft, files: readonly DiffFile[]): BuiltRe
       (a, b) =>
         order.get(a.path)! - order.get(b.path)! || a.line - b.line || (a.side === b.side ? 0 : a.side === 'old' ? -1 : 1) || a.id - b.id,
     )
-  const sorted: DraftComment[] = [...sortedDiff, ...fileComments(d)].slice(0, MAX_COMMENTS)
+  const commits = commitComments(d)
+  const firstSeen = new Map<string, number>()
+  commits.forEach((c, i) => firstSeen.has(c.sha) || firstSeen.set(c.sha, i))
+  const sortedCommits = [...commits].sort(
+    (a, b) =>
+      firstSeen.get(a.sha)! - firstSeen.get(b.sha)! ||
+      (a.path < b.path ? -1 : a.path > b.path ? 1 : 0) ||
+      a.line - b.line ||
+      (a.side === b.side ? 0 : a.side === 'old' ? -1 : 1) ||
+      a.id - b.id,
+  )
+  const sorted: DraftComment[] = [...sortedDiff, ...sortedCommits, ...fileComments(d)].slice(0, MAX_COMMENTS)
   const general = d.general.trim()
   if (sorted.length === 0 && !general) return null
   return {
-    comments: sorted.map((c) =>
+    comments: sorted.map((c): AnyReviewComment =>
       isFileComment(c)
-        ? { kind: 'file' as const, path: c.path, line: c.line, line_end: c.lineEnd, text: c.text }
-        : { path: c.path, line: c.line, side: c.side, text: c.text },
+        ? { kind: 'file', path: c.path, line: c.line, line_end: c.lineEnd, text: c.text }
+        : isCommitComment(c)
+          ? { kind: 'commit', sha: c.sha, path: c.path, line: c.line, side: c.side, text: c.text }
+          : { path: c.path, line: c.line, side: c.side, text: c.text },
     ),
     ids: sorted.map((c) => c.id),
     ...(general ? { general } : {}),
@@ -291,7 +348,7 @@ export function rejectedId(built: Pick<BuiltReview, 'comments' | 'ids'>, r: Reje
   const tries = r.index === null ? [] : [r.index, r.index - 1]
   for (const i of tries) if (fits(i)) return built.ids[i] ?? null
   if (r.path !== null) {
-    const i = built.comments.findIndex((c, k) => fits(k) && (r.lineEnd === null || !('kind' in c) || c.line_end === r.lineEnd))
+    const i = built.comments.findIndex((c, k) => fits(k) && (r.lineEnd === null || !('kind' in c) || c.kind !== 'file' || c.line_end === r.lineEnd))
     if (i >= 0) return built.ids[i] ?? null
   }
   return null

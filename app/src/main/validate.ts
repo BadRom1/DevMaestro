@@ -4,7 +4,8 @@
  * minimal (identifiants UUID, entiers bornés, énumérations, chaînes de
  * longueur bornée). Les champs inconnus sont retirés. Messages en français.
  */
-import { MAX_TITLE, SESSION_COLORS, type MethodName } from '../shared/protocol'
+import { COMMIT_RANGES, MAX_TITLE, SESSION_COLORS, type MethodName } from '../shared/protocol'
+import { ZOOM_DIRECTIONS, type ZoomDirection } from '../shared/settings'
 import { WORKTREE_LOCATIONS, branchNameProblem } from '../shared/worktrees'
 
 export class ValidationError extends Error {
@@ -138,6 +139,17 @@ const MAX_REVIEW_COMMENTS = 200
 const MAX_REVIEW_TEXT = 4000
 /** Commentaire de fichier : 400 lignes au plus (`line_end - line + 1`). */
 const MAX_REVIEW_FILE_LINES = 400
+
+/** Identifiant complet d'un commit : 40 (SHA-1) ou 64 (SHA-256) caractères hexadécimaux en minuscules. */
+const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+
+function sha(o: Obj, k: string): string {
+  const v = o[k]
+  if (typeof v !== 'string' || !SHA_RE.test(v)) {
+    throw new ValidationError(`« ${k} » doit être un identifiant de commit complet (40 ou 64 caractères hexadécimaux en minuscules)`)
+  }
+  return v
+}
 
 /** Chemin d'un fichier du diff (relatif au dépôt, tel que donné par `sessions.diff`). */
 function relPath(o: Obj, k: string): string {
@@ -288,6 +300,21 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       out.id = uuid(o, 'id')
       out.path = relPath(o, 'path')
       return out
+    case 'sessions.commits':
+      out.id = uuid(o, 'id')
+      optional(o, out, 'limit', (x, k) => int(x, k, 1, 500))
+      // `null` ou absent : choix automatique du démon.
+      optional(o, out, 'range', (x, k) => oneOf(x, k, COMMIT_RANGES))
+      return out
+    case 'sessions.commitDiff':
+      out.id = uuid(o, 'id')
+      out.sha = sha(o, 'sha')
+      return out
+    case 'sessions.commitDiffFile':
+      out.id = uuid(o, 'id')
+      out.sha = sha(o, 'sha')
+      out.path = relPath(o, 'path')
+      return out
     case 'sessions.sendReview': {
       out.id = uuid(o, 'id')
       const list = o.comments
@@ -311,7 +338,17 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
               text: x.text === undefined ? '' : str(x, 'text', MAX_REVIEW_TEXT, { codePoints: true }),
             }
           }
-          if (x.kind !== undefined && x.kind !== 'diff') throw new ValidationError('« kind » doit valoir diff ou file')
+          if (x.kind === 'commit') {
+            return {
+              kind: 'commit',
+              sha: sha(x, 'sha'),
+              path: relPath(x, 'path'),
+              line: int(x, 'line', 1, 10_000_000),
+              side: oneOf(x, 'side', ['new', 'old'] as const),
+              text: str(x, 'text', MAX_REVIEW_TEXT, { nonEmpty: true, codePoints: true }),
+            }
+          }
+          if (x.kind !== undefined && x.kind !== 'diff') throw new ValidationError('« kind » doit valoir diff, file ou commit')
           return {
             path: relPath(x, 'path'),
             line: int(x, 'line', 1, 10_000_000),
@@ -367,4 +404,10 @@ export function validateExternalUrl(raw: unknown): string {
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new ValidationError('seuls les liens http et https s’ouvrent')
   return u.toString()
+}
+
+/** Pas de taille de l'interface demandé par la page (Ctrl + molette) : `in`, `out` ou `reset`. */
+export function validateZoomDirection(raw: unknown): ZoomDirection {
+  if (!(ZOOM_DIRECTIONS as readonly unknown[]).includes(raw)) throw new ValidationError('taille de l’interface : in, out ou reset attendu')
+  return raw as ZoomDirection
 }

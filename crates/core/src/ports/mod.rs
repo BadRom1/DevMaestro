@@ -145,19 +145,41 @@ pub trait DiffSource: Send + Sync {
     /// Fichiers changés depuis la base de la branche (commités, non commités
     /// et non suivis), chemins relatifs à la racine du worktree.
     fn changes(&self, cwd: &Path) -> Result<crate::domain::diff::ChangeSet, DiffError>;
-    /// Diff d'un fichier de la liste.
     /// Racine du worktree contenant `cwd` ([`DiffError::NotARepo`] hors dépôt).
     fn root(&self, cwd: &Path) -> Result<PathBuf, DiffError>;
     /// Fichiers suivis et non suivis non ignorés du worktree `root`
     /// (`git ls-files --cached --others --exclude-standard`), chemins relatifs
     /// à la racine ; `true` si la liste a été coupée.
     fn repo_files(&self, root: &Path) -> Result<(Vec<String>, bool), DiffError>;
-    /// Diff d'un fichier de la liste `changes` (même racine, même base).
+    /// Diff d'un fichier de la liste `changes` (même racine, même base ;
+    /// contre l'arbre de travail, ou contre `changes.target` pour le diff
+    /// d'un commit).
     fn file_diff(
         &self,
         changes: &crate::domain::diff::ChangeSet,
         file: &crate::domain::diff::ChangedFile,
     ) -> Result<crate::domain::diff::FileDiff, DiffError>;
+    /// Commits du plus récent au plus ancien, au plus `limit` : de la
+    /// branche depuis la base du diff (même résolution que
+    /// [`DiffSource::changes`]) ou les derniers de `HEAD`, selon `range`
+    /// (`None` : automatique, voir
+    /// [`crate::domain::commits::CommitRange::resolve`]) ; compteurs par
+    /// commit seulement avec `stats`.
+    fn commits(
+        &self,
+        cwd: &Path,
+        limit: usize,
+        stats: bool,
+        range: Option<crate::domain::commits::CommitRange>,
+    ) -> Result<crate::domain::commits::CommitLog, DiffError>;
+    /// Fichiers changés par un commit de l'historique (racine `root`) contre
+    /// son premier parent, ou contre l'arbre vide pour un commit racine
+    /// (`target` = le commit).
+    fn commit_changes(
+        &self,
+        root: &Path,
+        commit: &crate::domain::commits::Commit,
+    ) -> Result<crate::domain::diff::ChangeSet, DiffError>;
 }
 
 /// Point de départ d'un nouveau worktree.

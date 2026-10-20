@@ -6,6 +6,8 @@ import { ErrorCode, type Session } from '../../shared/protocol'
 import { CallError, api, call } from './api'
 import { CleanupDialog } from './components/CleanupDialog'
 import { forgetDiffMemory } from './components/DiffView'
+import { forgetCommitsMemory } from './state/commits'
+import { forgetCommitDiffs } from './components/CommitsView'
 import { forgetFilesMemory } from './components/FilesView'
 import { LinkDialog } from './components/LinkDialog'
 import { NewSessionDialog } from './components/NewSessionDialog'
@@ -19,6 +21,7 @@ import { KanbanView } from './components/KanbanView'
 import { browserStorage } from './state/collapse'
 import { loadPaneOpen, paneVisible, savePaneOpen } from './state/kanbanFilter'
 import { SettingsDialog } from './components/SettingsDialog'
+import { WheelZoom } from './state/wheelZoom'
 import { useSettings } from './settings'
 import { buildProjectChoices, sessionProjectKey } from './state/newSession'
 import { noteWork, type WorktreeLists } from './state/worktrees'
@@ -37,10 +40,12 @@ import {
 import { resolveScheme } from './state/themeTokens'
 import { applyTheme, systemPrefersLight, terminalTheme, type ThemeMode } from './theme'
 
-/** État gardé des onglets Diff et Fichiers d'une session oubliée : libéré. */
+/** État gardé des onglets Diff, Fichiers et Commits d'une session oubliée : libéré. */
 function forgetViewMemory(id: string): void {
   forgetFilesMemory(id)
   forgetDiffMemory(id)
+  forgetCommitsMemory(id)
+  forgetCommitDiffs(id)
 }
 
 /** Aucun fichier vu (référence stable). */
@@ -543,6 +548,20 @@ export function App() {
   const showRef = useRef(show)
   showRef.current = show
   useEffect(() => api.onSelectSession?.((id) => showRef.current(id)), [])
+  // Ctrl + molette : taille de l'interface (processus principal). Capturé avant le terminal, qui ne défile
+  // pas et n'envoie rien à Claude ; Chromium ne zoome pas de lui-même.
+  useEffect(() => {
+    const wheel = new WheelZoom()
+    const on = (e: WheelEvent) => {
+      if (!e.ctrlKey) return
+      e.preventDefault()
+      e.stopPropagation()
+      const dir = wheel.step(e, performance.now())
+      if (dir) void api.zoomStep?.(dir)
+    }
+    window.addEventListener('wheel', on, { capture: true, passive: false })
+    return () => window.removeEventListener('wheel', on, { capture: true })
+  }, [])
 
   const sessionPane = (
     <SessionPane

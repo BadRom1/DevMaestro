@@ -4,17 +4,24 @@
  * profils, profil par défaut par projet). Les modifications s'appliquent tout
  * de suite et sont enregistrées par le processus principal.
  */
-import { useId, useState, type CSSProperties } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react'
 
 import type { Profile } from '../../../shared/protocol'
 import {
+  DEFAULT_ZOOM,
   MAX_LONG_LABEL,
   MAX_SHORT_LABEL,
+  MAX_THEME_IMPORT,
   PALETTE_NAMES,
   SCHEMES,
   THEME_TOKENS,
+  ZOOM_STEPS,
   checkProfileLabel,
+  parseThemeImport,
   profileLabel,
+  stepZoom,
+  type SchemeTheme,
+  type ThemeImport,
   type ThemeMode,
   type ThemeToken,
 } from '../../../shared/settings'
@@ -32,6 +39,7 @@ import type { ProjectChoice } from '../state/newSession'
 import { BASE, PALETTES, TOKEN_LABELS, paletteValue, schemeTokens, themeJson, tokenValue, type Scheme } from '../state/themeTokens'
 import { tildify } from '../state/format'
 import { Meter, ProfileBadge, StatusGlyph } from './common'
+import { ConfirmBar } from './ForgetConfirm'
 import { Modal } from './Modal'
 
 type Tab = 'apparence' | 'general'
@@ -52,6 +60,44 @@ const PREVIEW_GLYPHS = [
 
 const SCHEME_LABELS: Record<Scheme, string> = { light: 'Clair', dark: 'Sombre' }
 
+/** Aperçu d'un mode (glyphes, diff, jauges, boutons) avec ses jetons, quel que soit le mode affiché. */
+function ThemePreview({ tokens, label }: { tokens: Record<string, string>; label: string }) {
+  const style = Object.fromEntries(Object.entries(tokens).map(([k, v]) => [`--${k}`, v])) as CSSProperties
+  return (
+    <div className="preview" style={style} aria-label={label} role="group">
+      <div className="row">
+        {PREVIEW_GLYPHS.map((g) => (
+          <span key={g.kind} className="pv">
+            <StatusGlyph glyph={g} /> {g.label}
+          </span>
+        ))}
+      </div>
+      <div className="diff" aria-hidden="true">
+        <div className="del">− token := r.URL.Query().Get("code")</div>
+        <div className="add">+ code, err := parseCode(r, sessions)</div>
+      </div>
+      <div className="row">
+        <span className="pv">
+          <Meter pct={45} label="Exemple 45 %" /> 45 %
+        </span>
+        <span className="pv">
+          <Meter pct={80} label="Exemple 80 %" /> 80 %
+        </span>
+        <span className="pv">
+          <Meter pct={95} label="Exemple 95 %" /> 95 %
+        </span>
+      </div>
+      <div className="row">
+        <span className="chip pend">peut-être obsolète</span>
+        <span className="chip bad">dossier supprimé</span>
+        <button type="button" className="btn pri sm" tabIndex={-1}>
+          Bouton principal
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /** Bloc d'un mode affiché (clair ou sombre) : sa palette, ses couleurs et son aperçu. */
 function SchemeBlock({ target, active, followsSystem }: { target: Scheme; active: boolean; followsSystem: boolean }) {
   const { settings, update } = useSettings()
@@ -68,8 +114,6 @@ function SchemeBlock({ target, active, followsSystem }: { target: Scheme; active
     else next[token] = value.toLowerCase()
     update({ theme: { [target]: { ...own, custom: next } } })
   }
-
-  const preview = Object.fromEntries(Object.entries(schemeTokens(settings.theme, target)).map(([k, v]) => [`--${k}`, v])) as CSSProperties
 
   return (
     <section className={`scheme-block${active ? ' on' : ''}`} aria-labelledby={`${id}-h`}>
@@ -154,37 +198,198 @@ function SchemeBlock({ target, active, followsSystem }: { target: Scheme; active
           </button>
         </div>
       </div>
-      <div className="preview" style={preview} aria-label={`Aperçu du mode ${modeName}`} role="group">
-        <div className="row">
-          {PREVIEW_GLYPHS.map((g) => (
-            <span key={g.kind} className="pv">
-              <StatusGlyph glyph={g} /> {g.label}
-            </span>
-          ))}
-        </div>
-        <div className="diff" aria-hidden="true">
-          <div className="del">− token := r.URL.Query().Get("code")</div>
-          <div className="add">+ code, err := parseCode(r, sessions)</div>
-        </div>
-        <div className="row">
-          <span className="pv">
-            <Meter pct={45} label="Exemple 45 %" /> 45 %
-          </span>
-          <span className="pv">
-            <Meter pct={80} label="Exemple 80 %" /> 80 %
-          </span>
-          <span className="pv">
-            <Meter pct={95} label="Exemple 95 %" /> 95 %
-          </span>
-        </div>
-        <div className="row">
-          <span className="chip pend">peut-être obsolète</span>
-          <span className="chip bad">dossier supprimé</span>
-          <button type="button" className="btn pri sm" tabIndex={-1}>
-            Bouton principal
+      <ThemePreview tokens={schemeTokens(settings.theme, target)} label={`Aperçu du mode ${modeName}`} />
+    </section>
+  )
+}
+
+/** « Taille du texte » : toute l'interface, terminal compris (zoom appliqué par le processus principal). */
+function TextSize() {
+  const { settings, update } = useSettings()
+  const zoom = settings.ui.zoom
+  const set = (z: number) => update({ ui: { zoom: z } })
+  return (
+    <div className="field">
+      <label className="lbl" htmlFor="st-zoom">
+        Taille du texte
+      </label>
+      <div className="row-inline">
+        <div className="zoomctl">
+          <button
+            type="button"
+            className="btn"
+            aria-label="Texte plus petit"
+            disabled={zoom === ZOOM_STEPS[0]}
+            onClick={() => set(stepZoom(zoom, 'out'))}
+          >
+            −
+          </button>
+          <select id="st-zoom" value={zoom} onChange={(e) => set(Number(e.target.value))}>
+            {ZOOM_STEPS.map((z) => (
+              <option key={z} value={z}>
+                {z} %{z === DEFAULT_ZOOM ? ' (par défaut)' : ''}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="btn"
+            aria-label="Texte plus grand"
+            disabled={zoom === ZOOM_STEPS[ZOOM_STEPS.length - 1]}
+            onClick={() => set(stepZoom(zoom, 'in'))}
+          >
+            +
+          </button>
+          <button type="button" className="btn ghost" disabled={zoom === DEFAULT_ZOOM} onClick={() => set(DEFAULT_ZOOM)}>
+            100 %
           </button>
         </div>
+        <span className="hint">
+          Toute l’interface, terminal compris. Raccourcis : <kbd>Ctrl</kbd> + <kbd>+</kbd>, <kbd>Ctrl</kbd> + <kbd>−</kbd>,{' '}
+          <kbd>Ctrl</kbd> + <kbd>0</kbd>, ou <kbd>Ctrl</kbd> + molette.
+        </span>
       </div>
+    </div>
+  )
+}
+
+type Parsed = { ok: true; theme: ThemeImport } | { ok: false; error: string } | null
+
+/**
+ * « Importer un thème (JSON) » : texte collé ou fichier choisi, validé comme
+ * une modification des réglages (ancien format à palette unique accepté),
+ * aperçu des deux modes, puis « Appliquer ».
+ */
+function ThemeImportPanel({ onDone, onCancel }: { onDone: (message: string) => void; onCancel: () => void }) {
+  const { settings, update } = useSettings()
+  const [text, setText] = useState('')
+  const [fileError, setFileError] = useState<string | null>(null)
+  /** « Abandonner le JSON saisi ? » affiché (Échap ou Annuler avec un texte non appliqué). */
+  const [confirmDrop, setConfirmDrop] = useState(false)
+  const file = useRef<HTMLInputElement>(null)
+  const box = useRef<HTMLElement>(null)
+  const id = useId()
+  const parsed: Parsed = useMemo(() => {
+    if (text.trim() === '') return null
+    try {
+      return { ok: true, theme: parseThemeImport(text) }
+    } catch (e) {
+      return { ok: false, error: (e as Error).message }
+    }
+  }, [text])
+
+  useEffect(() => box.current?.scrollIntoView?.({ block: 'nearest' }), [])
+
+  async function readFile(f: File | undefined) {
+    setFileError(null)
+    if (!f) return
+    if (f.size > MAX_THEME_IMPORT) {
+      setFileError(`Fichier trop gros : ${Math.round(MAX_THEME_IMPORT / 1024)} Kio au plus.`)
+      return
+    }
+    try {
+      setText(await f.text())
+    } catch (e) {
+      setFileError(`Lecture impossible : ${(e as Error).message}`)
+    }
+  }
+
+  const error = fileError ?? (parsed && !parsed.ok ? `Thème refusé : ${parsed.error}.` : null)
+  const theme = parsed?.ok ? parsed.theme : null
+  const pair: Record<'light' | 'dark', SchemeTheme> | null = theme ? { light: theme.light, dark: theme.dark } : null
+
+  /** Fermer le panneau : sans perdre de JSON saisi sans confirmation. */
+  function cancel() {
+    if (text.trim() === '') onCancel()
+    else setConfirmDrop(true)
+  }
+
+  return (
+    <section
+      className="import-box"
+      ref={box}
+      aria-labelledby={`${id}-h`}
+      // Échap ferme d'abord ce panneau (ou la confirmation), pas les Réglages.
+      data-own-escape=""
+      onKeyDown={(e) => {
+        if (e.key !== 'Escape') return
+        e.preventDefault()
+        e.stopPropagation()
+        if (confirmDrop) setConfirmDrop(false)
+        else cancel()
+      }}
+    >
+      <h3 id={`${id}-h`}>Importer un thème (JSON)</h3>
+      <label className="field">
+        <span className="lbl">JSON du thème</span>
+        <textarea
+          autoFocus
+          value={text}
+          spellCheck={false}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={`${id}-st`}
+          placeholder={'{ "mode": "system", "light": { "palette": "okabe", "custom": {} }, "dark": { … } }'}
+          onChange={(e) => {
+            setFileError(null)
+            setText(e.target.value)
+          }}
+        />
+      </label>
+      <div className="row-inline">
+        <button type="button" className="btn sm" onClick={() => file.current?.click()}>
+          Choisir un fichier…
+        </button>
+        <input
+          ref={file}
+          type="file"
+          accept=".json,application/json"
+          className="sr-only"
+          tabIndex={-1}
+          aria-hidden="true"
+          onChange={(e) => {
+            void readFile(e.target.files?.[0])
+            e.target.value = ''
+          }}
+        />
+        <span className="hint">Format de « Copier le thème (JSON) », ou ancien format à palette unique.</span>
+      </div>
+      <p id={`${id}-st`} className={error ? 'inline-err' : 'hint'} role="status">
+        {error ?? (theme ? `Thème valide${theme.mode ? '' : ' (le mode actuel est gardé)'} : aperçu ci-dessous.` : 'Colle un thème ou choisis un fichier.')}
+      </p>
+      {pair && (
+        <div className="schemes">
+          {SCHEMES.map((sc) => (
+            <ThemePreview key={sc} tokens={schemeTokens(pair, sc)} label={`Aperçu du thème importé, mode ${SCHEME_LABELS[sc].toLowerCase()}`} />
+          ))}
+        </div>
+      )}
+      <div className="row-inline">
+        <button
+          type="button"
+          className="btn pri"
+          disabled={!theme}
+          onClick={() => {
+            if (!theme) return
+            update({ theme: { mode: theme.mode ?? settings.theme.mode, light: theme.light, dark: theme.dark } })
+            onDone('Thème importé.')
+          }}
+        >
+          Appliquer
+        </button>
+        <button type="button" className="btn ghost" onClick={cancel}>
+          Annuler
+        </button>
+      </div>
+      {confirmDrop && (
+        <ConfirmBar
+          message="Abandonner le thème saisi ? Le JSON collé sera perdu."
+          confirmLabel="Abandonner"
+          busyLabel="Abandon…"
+          errorPrefix="Abandon impossible"
+          onConfirm={async () => onCancel()}
+          onCancel={() => setConfirmDrop(false)}
+        />
+      )}
     </section>
   )
 }
@@ -193,15 +398,25 @@ function Appearance({ scheme }: { scheme: Scheme }) {
   const { settings, update } = useSettings()
   const theme = settings.theme
   const [copied, setCopied] = useState<string | null>(null)
+  const [importing, setImporting] = useState(false)
+  const importBtn = useRef<HTMLButtonElement>(null)
 
   async function copy() {
     const ok = await api.copyText(themeJson(theme)).catch(() => false)
     setCopied(ok ? 'Thème copié (JSON).' : 'Copie impossible.')
   }
 
+  function closeImport(message: string | null) {
+    setImporting(false)
+    if (message) setCopied(message)
+    importBtn.current?.focus()
+  }
+
   return (
     <>
       <div className="mb">
+        {importing && <ThemeImportPanel onDone={(m) => closeImport(m)} onCancel={() => closeImport(null)} />}
+        <TextSize />
         <div className="field">
           <span className="lbl" id="st-mode">
             Mode
@@ -234,6 +449,18 @@ function Appearance({ scheme }: { scheme: Scheme }) {
         <span className="hint" role="status" style={{ marginRight: 'auto' }}>
           {copied ?? 'Les réglages sont propres à ton compte sur ce poste.'}
         </span>
+        <button
+          type="button"
+          className="btn"
+          ref={importBtn}
+          aria-expanded={importing}
+          onClick={() => {
+            setCopied(null)
+            setImporting((v) => !v)
+          }}
+        >
+          Importer un thème (JSON)
+        </button>
         <button type="button" className="btn" onClick={() => void copy()}>
           Copier le thème (JSON)
         </button>
@@ -429,72 +656,77 @@ function Worktrees({ projects, home }: { projects: ProjectChoice[]; home: string
 function General({ profiles, projects, home }: { profiles: Profile[]; projects: ProjectChoice[]; home: string | null }) {
   const { settings, update, label } = useSettings()
   return (
-    <div className="mb">
-      <div className="field">
-        <span className="lbl">Notifications</span>
-        <label className="optrow">
-          <input
-            type="checkbox"
-            checked={settings.notifications.enabled}
-            onChange={(e) => update({ notifications: { enabled: e.target.checked } })}
-          />
-          <span>
-            Notification du bureau quand une session attend une réponse
-            <span className="hint optaide">
-              Sans son (tes hooks s’en chargent) ; aucune si la fenêtre a le focus et affiche déjà cette session.
+    <>
+      <div className="mb">
+        <div className="field">
+          <span className="lbl">Notifications</span>
+          <label className="optrow">
+            <input
+              type="checkbox"
+              checked={settings.notifications.enabled}
+              onChange={(e) => update({ notifications: { enabled: e.target.checked } })}
+            />
+            <span>
+              Notification du bureau quand une session attend une réponse
+              <span className="hint optaide">
+                Sans son (tes hooks s’en chargent) ; aucune si la fenêtre a le focus et affiche déjà cette session.
+              </span>
             </span>
-          </span>
-        </label>
-      </div>
-      <div className="field">
-        <span className="lbl">Confirmations</span>
-        <label className="optrow">
-          <input type="checkbox" checked={settings.confirmRemoval} onChange={(e) => update({ confirmRemoval: e.target.checked })} />
-          <span>Demander confirmation avant de retirer une session ou de masquer une ancienne session</span>
-        </label>
-      </div>
-      <div className="field">
-        <span className="lbl">Profils</span>
-        <span className="hint">
-          Libellé long (affiché partout) et court (badge de 1 à 3 caractères). Le nom technique reste dans les infobulles.
-        </span>
-        {profiles.length === 0 && <p className="hint">Aucun profil connu du démon.</p>}
-        {profiles.map((p) => (
-          <LabelRow key={p.name} profile={p} profiles={profiles} />
-        ))}
-      </div>
-      <div className="field">
-        <span className="lbl">Profil par défaut par projet</span>
-        <span className="hint">Proposé dans « Nouvelle session ». « Automatique » : le dernier profil utilisé dans le projet.</span>
-        {projects.length === 0 && <p className="hint">Aucun projet connu pour l’instant.</p>}
-        <div className="pprofiles">
-          {projects.map((c) => {
-            const set = settings.projectProfiles[c.profileKey] ?? ''
-            return (
-              <label key={c.key} className="pprow">
-                <span className="nm" title={c.root}>
-                  <b>{c.name}</b> <span className="hint mono">{tildify(c.root, home)}</span>
-                </span>
-                <select
-                  value={set}
-                  aria-label={`Profil par défaut de ${c.name}`}
-                  onChange={(e) => update({ projectProfiles: { [c.profileKey]: e.target.value || null } })}
-                >
-                  <option value="">Automatique</option>
-                  {profiles.map((p) => (
-                    <option key={p.name} value={p.name}>
-                      {label(p.name).long}
-                    </option>
-                  ))}
-                  {set && !profiles.some((p) => p.name === set) && <option value={set}>{set} (inconnu)</option>}
-                </select>
-              </label>
-            )
-          })}
+          </label>
         </div>
+        <div className="field">
+          <span className="lbl">Confirmations</span>
+          <label className="optrow">
+            <input type="checkbox" checked={settings.confirmRemoval} onChange={(e) => update({ confirmRemoval: e.target.checked })} />
+            <span>Demander confirmation avant de retirer une session ou de masquer une ancienne session</span>
+          </label>
+        </div>
+        <div className="field">
+          <span className="lbl">Profils</span>
+          <span className="hint">
+            Libellé long (affiché partout) et court (badge de 1 à 3 caractères). Le nom technique reste dans les infobulles.
+          </span>
+          {profiles.length === 0 && <p className="hint">Aucun profil connu du démon.</p>}
+          {profiles.map((p) => (
+            <LabelRow key={p.name} profile={p} profiles={profiles} />
+          ))}
+        </div>
+        <div className="field">
+          <span className="lbl">Profil par défaut par projet</span>
+          <span className="hint">Proposé dans « Nouvelle session ». « Automatique » : le dernier profil utilisé dans le projet.</span>
+          {projects.length === 0 && <p className="hint">Aucun projet connu pour l’instant.</p>}
+          <div className="pprofiles">
+            {projects.map((c) => {
+              const set = settings.projectProfiles[c.profileKey] ?? ''
+              return (
+                <label key={c.key} className="pprow">
+                  <span className="nm" title={c.root}>
+                    <b>{c.name}</b> <span className="hint mono">{tildify(c.root, home)}</span>
+                  </span>
+                  <select
+                    value={set}
+                    aria-label={`Profil par défaut de ${c.name}`}
+                    onChange={(e) => update({ projectProfiles: { [c.profileKey]: e.target.value || null } })}
+                  >
+                    <option value="">Automatique</option>
+                    {profiles.map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {label(p.name).long}
+                      </option>
+                    ))}
+                    {set && !profiles.some((p) => p.name === set) && <option value={set}>{set} (inconnu)</option>}
+                  </select>
+                </label>
+              )
+            })}
+          </div>
+        </div>
+        <Worktrees projects={projects} home={home} />
       </div>
-      <Worktrees projects={projects} home={home} />
-    </div>
+      <div className="mf">
+        <span className="hint">Les réglages sont propres à ton compte sur ce poste.</span>
+      </div>
+    </>
   )
 }
 

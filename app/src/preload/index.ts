@@ -54,6 +54,14 @@ const api: DevMaestroApi = {
     ipcRenderer.on(Ipc.openCleanup, h)
     return () => void ipcRenderer.removeListener(Ipc.openCleanup, h)
   },
+  zoomStep: (dir) => ipcRenderer.invoke(Ipc.zoomStep, String(dir)) as Promise<number | null>,
+  onZoomChanged(cb) {
+    const h = (_e: IpcRendererEvent, zoom: unknown) => {
+      if (typeof zoom === 'number') cb(zoom)
+    }
+    ipcRenderer.on(Ipc.zoomChanged, h)
+    return () => void ipcRenderer.removeListener(Ipc.zoomChanged, h)
+  },
 }
 
 contextBridge.exposeInMainWorld('devmaestro', api)

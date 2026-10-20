@@ -1,5 +1,6 @@
 //! Modèle de domaine (architecture § 5) et règles pures.
 
+pub mod commits;
 pub mod decision;
 pub mod diff;
 pub mod files;

@@ -1,6 +1,6 @@
 /**
  * Fenêtre modale accessible : focus piégé (Tab et Maj+Tab restent dedans),
- * Échap ferme, clic sur le fond ferme, focus rendu à l'élément d'origine à la
+ * Échap ferme (sauf depuis un élément marqué `data-own-escape`, qui le gère), clic sur le fond ferme, focus rendu à l'élément d'origine à la
  * fermeture seulement (pas à chaque rendu du parent).
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
@@ -44,6 +44,8 @@ export function Modal({
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // Une partie du dialogue qui gère elle-même Échap (panneau à fermer d'abord) : on la laisse faire.
+        if (e.target instanceof Element && e.target.closest('[data-own-escape]')) return
         e.preventDefault()
         if (!busyRef.current) onCloseRef.current()
         return

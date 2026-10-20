@@ -447,12 +447,20 @@ impl Connection {
                 .await
                 .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
             }
-            "sessions.diff" | "sessions.diffFile" | "sessions.sendReview" => {
+            "sessions.diff"
+            | "sessions.diffFile"
+            | "sessions.commits"
+            | "sessions.commitDiff"
+            | "sessions.commitDiffFile"
+            | "sessions.sendReview" => {
                 // `git` : hors du runtime.
                 let (d2, params, m) = (d.clone(), params.clone(), method.to_owned());
                 let r = tokio::task::spawn_blocking(move || match m.as_str() {
                     "sessions.diff" => d2.diff(&params).map(|v| (v, None)),
                     "sessions.diffFile" => d2.diff_file(&params).map(|v| (v, None)),
+                    "sessions.commits" => d2.commits(&params).map(|v| (v, None)),
+                    "sessions.commitDiff" => d2.commit_diff(&params).map(|v| (v, None)),
+                    "sessions.commitDiffFile" => d2.commit_diff_file(&params).map(|v| (v, None)),
                     _ => d2
                         .prepare_review(&params)
                         .map(|keys| (json!({"sent": true}), Some(keys))),

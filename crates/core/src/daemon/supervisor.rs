@@ -19,6 +19,7 @@ use time::OffsetDateTime;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
+mod commits;
 mod subagents;
 mod worktrees;
 
@@ -277,6 +278,16 @@ struct DiffWatch {
     in_flight: bool,
     /// Un hook est arrivé pendant le recalcul : en refaire un ensuite.
     dirty: bool,
+    /// Dernier historique calculé (v0.3, lot 9), et quand : un sha est
+    /// validé dessus s'il a moins de [`DIFF_REUSE`].
+    commits: Option<(Arc<crate::domain::commits::CommitLog>, Instant)>,
+    /// Plage demandée par le dernier `sessions.commits` (`None` :
+    /// automatique) : un recalcul de validation liste la même.
+    commits_range: Option<crate::domain::commits::CommitRange>,
+    /// Compteurs abandonnés (trop lents) : pas de nouvel essai avant cette date.
+    slow_stats_until: Option<Instant>,
+    /// Fichiers des derniers commits relus, par sha (bornés).
+    commit_changes: HashMap<String, Arc<crate::domain::diff::ChangeSet>>,
 }
 
 /// Verrou des écritures dans le PTY d'une session.
@@ -1669,6 +1680,8 @@ impl Daemon {
         enum Parsed {
             Diff(ReviewComment),
             File(FileComment),
+            /// Commentaire sur le diff d'un commit : sha complet.
+            Commit(String, ReviewComment),
         }
         /// Erreur sur un commentaire de fichier : rang, chemin et lignes
         /// demandés dans le message, et `data: {index, path, line,
@@ -1728,8 +1741,10 @@ impl Daemon {
             let at = |m: &str| RpcError::params(format!("commentaire {} : {m}", i + 1));
             let kind = match c.get("kind") {
                 None | Some(Value::Null) => "diff",
-                Some(Value::String(k)) if k == "diff" || k == "file" => k.as_str(),
-                Some(_) => return Err(at("« kind » : « diff » ou « file » attendu")),
+                Some(Value::String(k)) if ["diff", "file", "commit"].contains(&k.as_str()) => {
+                    k.as_str()
+                }
+                Some(_) => return Err(at("« kind » : « diff », « file » ou « commit » attendu")),
             };
             if kind == "file" {
                 let raw_path = c.get("path").unwrap_or(&Value::Null);
@@ -1775,6 +1790,11 @@ impl Daemon {
                 }));
                 continue;
             }
+            let sha = if kind == "commit" {
+                Some(commits::sha_param(c.get("sha")).map_err(|m| at(&m))?)
+            } else {
+                None
+            };
             let path = c
                 .get("path")
                 .and_then(Value::as_str)
@@ -1796,12 +1816,16 @@ impl Daemon {
             if text.trim().is_empty() {
                 return Err(at("« text » vide"));
             }
-            parsed.push(Parsed::Diff(ReviewComment {
+            let comment = ReviewComment {
                 path,
                 line,
                 side,
                 text,
-            }));
+            };
+            parsed.push(match sha {
+                Some(sha) => Parsed::Commit(sha, comment),
+                None => Parsed::Diff(comment),
+            });
         }
         if parsed.is_empty() && general.is_none() {
             return Err(RpcError::params(
@@ -1813,6 +1837,7 @@ impl Daemon {
         // de fichier marche aussi hors dépôt).
         let has_diff = parsed.iter().any(|p| matches!(p, Parsed::Diff(_)));
         let has_file = parsed.iter().any(|p| matches!(p, Parsed::File(_)));
+        let has_commit = parsed.iter().any(|p| matches!(p, Parsed::Commit(..)));
         let changes = if has_diff {
             Some(self.recent_changes(id, &cwd)?)
         } else {
@@ -1823,8 +1848,26 @@ impl Daemon {
         } else {
             None
         };
+        // Historique : résolu une fois pour toute la revue (tous les sha
+        // cités), fichiers relus une fois par commit.
+        let history = if has_commit {
+            let shas: Vec<&str> = parsed
+                .iter()
+                .filter_map(|p| match p {
+                    Parsed::Commit(sha, _) => Some(sha.as_str()),
+                    _ => None,
+                })
+                .collect();
+            Some(self.history_log(id, &cwd, &shas)?)
+        } else {
+            None
+        };
+        let mut commit_files: HashMap<String, Arc<crate::domain::diff::ChangeSet>> = HashMap::new();
         let count = parsed.len();
         let mut diffs: HashMap<String, crate::domain::diff::FileDiff> = HashMap::new();
+        // Diffs de fichiers de commits, par (sha, chemin).
+        let mut commit_diffs: HashMap<(String, String), crate::domain::diff::FileDiff> =
+            HashMap::new();
         // Dernier fichier lu (les sélections d'un même fichier se suivent
         // en général) : toujours lu par le démon, jamais de texte d'extrait
         // venu du client ; un seul fichier de 2 Mio au plus en mémoire.
@@ -1848,6 +1891,35 @@ impl Daemon {
                     }
                     let ex = excerpt(&diffs[&c.path], c.line, c.side);
                     review.push(&ReviewEntry::Diff(c, ex));
+                }
+                Parsed::Commit(sha, c) => {
+                    let at = |m: &str| RpcError::params(format!("commentaire {} : {m}", i + 1));
+                    let log = history.as_ref().expect("historique résolu");
+                    let commit = log
+                        .commit(&sha)
+                        .ok_or_else(|| at(&commits::foreign_commit(&sha)))?;
+                    let changes = match commit_files.get(&sha) {
+                        Some(c) => c.clone(),
+                        None => {
+                            let c = self.commit_files(id, log, commit)?;
+                            commit_files.insert(sha.clone(), c.clone());
+                            c
+                        }
+                    };
+                    let file = changes.file(&c.path).ok_or_else(|| {
+                        at(&format!(
+                            "« {} » ne fait pas partie du diff du commit « {} »",
+                            c.path,
+                            commit.short()
+                        ))
+                    })?;
+                    let key = (sha.clone(), c.path.clone());
+                    if !commit_diffs.contains_key(&key) {
+                        let d = self.deps.diff.file_diff(&changes, file).unwrap_or_default();
+                        commit_diffs.insert(key.clone(), d);
+                    }
+                    let ex = excerpt(&commit_diffs[&key], c.line, c.side);
+                    review.push(&ReviewEntry::Commit(sha, c, ex));
                 }
                 Parsed::File(c) => {
                     let (path_v, line_v, end_v) = (json!(c.path), json!(c.line), json!(c.line_end));
@@ -1902,7 +1974,7 @@ impl Daemon {
             id,
             input,
             lock,
-            instruction: review_instruction(has_diff, has_file),
+            instruction: review_instruction(has_diff || has_commit, has_file),
             text,
         })
     }

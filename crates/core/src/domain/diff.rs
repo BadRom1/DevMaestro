@@ -20,6 +20,10 @@ pub enum BaseKind {
     MergeBase,
     /// `HEAD` (pas de branche par défaut trouvée, ou pas d'ancêtre commun).
     Head,
+    /// Premier parent d'un commit (v0.3, lot 9 : diff d'un commit).
+    Parent,
+    /// Arbre vide : diff d'un commit racine.
+    Root,
 }
 
 impl BaseKind {
@@ -27,6 +31,8 @@ impl BaseKind {
         match self {
             Self::MergeBase => "merge_base",
             Self::Head => "head",
+            Self::Parent => "parent",
+            Self::Root => "root",
         }
     }
 }
@@ -92,8 +98,12 @@ pub struct ChangeSet {
     /// Racine du worktree.
     pub root: std::path::PathBuf,
     pub base: DiffBase,
-    /// `HEAD` (absent avant le premier commit).
+    /// `HEAD` (absent avant le premier commit) ; le commit, pour le diff
+    /// d'un commit.
     pub head: Option<String>,
+    /// Commit comparé à la base (diff d'un commit, v0.3 lot 9) ; `None` :
+    /// la base est comparée à l'arbre de travail.
+    pub target: Option<String>,
     pub files: Vec<ChangedFile>,
     /// Liste incomplète : sortie de `git` trop longue ou trop de fichiers
     /// non suivis.
@@ -579,6 +589,10 @@ pub enum ReviewEntry {
     /// Commentaire de fichier et ses lignes `(numéro, texte)`, relues par
     /// le démon.
     File(FileComment, Vec<(u32, String)>),
+    /// Commentaire sur le diff d'un commit (v0.3, lot 9) : sha complet, le
+    /// commentaire et son extrait (absent si la ligne n'est pas dans le diff
+    /// du commit).
+    Commit(String, ReviewComment, Option<Vec<DiffLine>>),
 }
 
 /// Consigne tapée avant la revue : celle des extraits de fichiers si la
@@ -630,40 +644,54 @@ pub fn format_review_head(general: Option<&str>) -> String {
     out
 }
 
+/// Commentaire de diff (d'un worktree ou d'un commit) : en-tête
+/// `### <préfixe><chemin>:<ligne>`, extrait, commentaire.
+fn format_diff_comment(
+    out: &mut String,
+    prefix: &str,
+    c: &ReviewComment,
+    excerpt: Option<&[DiffLine]>,
+) {
+    let side = match c.side {
+        Side::New => "",
+        Side::Old => " (ancienne version)",
+    };
+    out.push_str(&format!(
+        "\n### {prefix}{}:{}{side}\n",
+        sanitize_inline(&c.path),
+        c.line
+    ));
+    if let Some(lines) = excerpt {
+        let body: String = lines
+            .iter()
+            .map(|l| {
+                let no = match c.side {
+                    Side::New => l.new_no.or(l.old_no),
+                    Side::Old => l.old_no.or(l.new_no),
+                };
+                let mark = if l.kind == ' ' { ' ' } else { l.kind };
+                format!(
+                    "{mark}{:>5} | {}\n",
+                    no.map(|n| n.to_string()).unwrap_or_default(),
+                    excerpt_line(&l.text)
+                )
+            })
+            .collect();
+        let f = fence(&body);
+        out.push_str(&format!("\n{f}diff\n{body}{f}\n"));
+    }
+    out.push_str(&format!("\n{}\n", sanitize(c.text.trim())));
+}
+
 /// Un élément de la revue collée (voir [`format_review`]).
 pub fn format_entry(entry: &ReviewEntry) -> String {
     let mut out = String::new();
     match entry {
-        ReviewEntry::Diff(c, excerpt) => {
-            let side = match c.side {
-                Side::New => "",
-                Side::Old => " (ancienne version)",
-            };
-            out.push_str(&format!(
-                "\n### {}:{}{side}\n",
-                sanitize_inline(&c.path),
-                c.line
-            ));
-            if let Some(lines) = excerpt {
-                let body: String = lines
-                    .iter()
-                    .map(|l| {
-                        let no = match c.side {
-                            Side::New => l.new_no.or(l.old_no),
-                            Side::Old => l.old_no.or(l.new_no),
-                        };
-                        let mark = if l.kind == ' ' { ' ' } else { l.kind };
-                        format!(
-                            "{mark}{:>5} | {}\n",
-                            no.map(|n| n.to_string()).unwrap_or_default(),
-                            excerpt_line(&l.text)
-                        )
-                    })
-                    .collect();
-                let f = fence(&body);
-                out.push_str(&format!("\n{f}diff\n{body}{f}\n"));
-            }
-            out.push_str(&format!("\n{}\n", sanitize(c.text.trim())));
+        ReviewEntry::Diff(c, excerpt) => format_diff_comment(&mut out, "", c, excerpt.as_deref()),
+        ReviewEntry::Commit(sha, c, excerpt) => {
+            // Le sha vient de `git` (validé) : jamais de Markdown.
+            let short = format!("{} ", super::commits::short_sha(&sanitize_inline(sha)));
+            format_diff_comment(&mut out, &short, c, excerpt.as_deref());
         }
         ReviewEntry::File(c, lines) => {
             let range = if c.line_end > c.line {
@@ -728,6 +756,8 @@ impl ReviewBuilder {
 /// Revue en Markdown (contenu collé) : remarque générale, puis par
 /// commentaire, dans l'ordre reçu :
 /// - de diff : `### <chemin>:<ligne>`, l'extrait du diff et le commentaire ;
+/// - de commit : `### <sha court> <chemin>:<ligne>`, puis comme un
+///   commentaire de diff (extrait pris dans le diff du commit) ;
 /// - de fichier : `### <chemin>:<début>-<fin>` (`:<ligne>` pour une seule),
 ///   les lignes numérotées dans un bloc de code étiqueté par le langage de
 ///   l'extension, puis le commentaire s'il n'est pas vide.
@@ -1032,6 +1062,31 @@ mod tests {
             text: "x".into(),
         };
         assert!(format_review(None, &[ReviewEntry::Diff(d, None)]).contains("### b␤c:1\n"));
+    }
+
+    #[test]
+    fn commit_comments_name_the_short_sha() {
+        let d = parse_unified(b"@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n");
+        let c = |side, line| ReviewComment {
+            path: "src/a.rs".into(),
+            line,
+            side,
+            text: "Pourquoi ?".into(),
+        };
+        let sha = "0123456789abcdef0123456789abcdef01234567".to_owned();
+        let entries = vec![
+            ReviewEntry::Commit(sha.clone(), c(Side::New, 2), excerpt(&d, 2, Side::New)),
+            ReviewEntry::Commit(sha, c(Side::Old, 2), None),
+        ];
+        let md = format_review(None, &entries);
+        assert!(
+            md.contains("### 0123456 src/a.rs:2\n\n```diff\n     1 | a\n-    2 | b\n+    2 | B\n     3 | c\n```\n\nPourquoi ?\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("### 0123456 src/a.rs:2 (ancienne version)\n\nPourquoi ?\n"),
+            "{md}"
+        );
     }
 
     #[test]

@@ -375,7 +375,70 @@ export interface FileReviewComment {
   text: string
 }
 
-export type AnyReviewComment = ReviewComment | FileReviewComment
+/** Commentaire sur une ligne du diff d'un commit (onglet Commits, v0.3 lot 9) : `sha` complet. */
+export interface CommitReviewComment {
+  kind: 'commit'
+  sha: string
+  path: string
+  line: number
+  side: ReviewSide
+  text: string
+}
+
+export type AnyReviewComment = ReviewComment | FileReviewComment | CommitReviewComment
+
+/* ---------- Historique des commits (v0.3, lot 9) ---------- */
+
+/** `branch` : commits de la branche depuis la base du diff ; `recent` : derniers commits de `HEAD`. */
+export type CommitRange = 'branch' | 'recent'
+export const COMMIT_RANGES: readonly CommitRange[] = ['branch', 'recent']
+
+export interface CommitInfo {
+  /** Complet : 40 caractères (64 pour un dépôt SHA-256). */
+  sha: string
+  /** Premier parent d'abord ; vide pour un commit racine. */
+  parents: string[]
+  /** Nom de l'auteur seul. */
+  author: string
+  /** Date de l'auteur, ISO 8601 avec fuseau. */
+  date: string
+  subject: string
+  /** Reste du message (coupé à 4 Kio par le démon). */
+  body: string
+  /**
+   * Fichiers et lignes changés contre le premier parent ; `null` quand le
+   * démon n'a pas calculé les compteurs (`stats: false`, dépôt volumineux).
+   */
+  files: number | null
+  additions: number | null
+  deletions: number | null
+}
+
+export interface CommitsList {
+  range: CommitRange
+  base: DiffBase | null
+  /** `null` avant le premier commit. */
+  head: string | null
+  /** Du plus récent au plus ancien. */
+  commits: CommitInfo[]
+  /** Liste coupée : d'autres commits existent au-delà, ou réponse trop grosse. */
+  truncated: boolean
+  /** Compteurs calculés ; `false` : dépôt trop lent, compteurs `null`. Absent (ancien démon) : `true`. */
+  stats?: boolean
+}
+
+export interface CommitDiffBase {
+  ref: string
+  sha: string
+  /** `parent` : premier parent ; `root` : commit racine, contre l'arbre vide. */
+  kind: 'parent' | 'root'
+}
+
+/** Même forme que `sessions.diff`, plus `sha` (base : le premier parent du commit). */
+export interface CommitDiff extends Omit<DiffSummary, 'base'> {
+  sha: string
+  base: CommitDiffBase | null
+}
 
 /* ---------- Onglet Fichiers (v0.2, lot 3) ---------- */
 
@@ -500,6 +563,10 @@ export interface Methods {
   'sessions.diff': { params: { id: string }; result: DiffSummary }
   'sessions.diffFile': { params: { id: string; path: string }; result: FileDiff }
   'sessions.sendReview': { params: { id: string; comments: AnyReviewComment[]; general?: string }; result: unknown }
+  /** Commits de la session (`range` absent : choix automatique du démon). */
+  'sessions.commits': { params: { id: string; limit?: number; range?: CommitRange }; result: CommitsList }
+  'sessions.commitDiff': { params: { id: string; sha: string }; result: CommitDiff }
+  'sessions.commitDiffFile': { params: { id: string; sha: string; path: string }; result: FileDiff }
   /** Texte tapé dans la session (sans Entrée), ex. « @chemin » pour mentionner un fichier. */
   'sessions.input': { params: { id: string; data: string }; result: unknown }
   'files.list': { params: { id: string; path?: string }; result: FilesList }
@@ -543,6 +610,9 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'sessions.diff',
   'sessions.diffFile',
   'sessions.sendReview',
+  'sessions.commits',
+  'sessions.commitDiff',
+  'sessions.commitDiffFile',
   'files.list',
   'files.read',
   'sessions.input',

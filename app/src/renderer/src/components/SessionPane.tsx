@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react'
 
 import {
   SETTABLE_MODES,
@@ -31,17 +31,23 @@ import type { ITheme } from '@xterm/xterm'
 import { TerminalView } from '../terminal/TerminalView'
 import { Meter, ProfileChip, StatusGlyph } from './common'
 import { useSettings } from '../settings'
-import { PermissionCard, QuestionCard } from './RequestCards'
+import { RequestDock, useRequestDock } from './RequestDock'
+import { requestKey } from '../state/askDock'
 import { ViewBoundary } from './ViewBoundary'
-import { activeComments, fileComments, type ReviewAction, type ReviewDraft } from '../state/review'
+import { activeComments, commitComments, fileComments, type ReviewAction, type ReviewDraft } from '../state/review'
 import { DiffView, useSessionDiff } from './DiffView'
 import { FilesView } from './FilesView'
+import { CommitsView } from './CommitsView'
 import { AgentsView } from './Subagents'
 import { runningCount, runningLabel } from '../state/subagents'
-
-type Tab = 'terminal' | 'diff' | 'files' | 'agents'
 import { ForgetConfirm } from './ForgetConfirm'
 import { ColorBar, ColorPicker, RenameField } from './SessionIdentity'
+import { sortFiles } from '../state/diff'
+import type { DiffFile } from '../../../shared/protocol'
+
+type Tab = 'terminal' | 'diff' | 'commits' | 'files' | 'agents'
+
+const NO_FILES: readonly DiffFile[] = []
 
 /** Changement de mode : appel, réessai unique et délai de confirmation (voir `modeSwitch`). */
 function useModeSwitch(session: Session) {
@@ -393,15 +399,24 @@ export function SessionPane({
 }) {
   const pending = session?.pending ?? []
   const termHost = useRef<HTMLDivElement>(null)
-  const asks = useRef<HTMLDivElement>(null)
-  const seen = useRef(new Set<string>())
-  const keys = pending.map((r) => `${session?.id}:${r.request_id}`)
-  const keysSig = keys.join(',')
+  const keys = session ? pending.map((r) => requestKey(session.id, r.request_id)) : []
+  /**
+   * Zone des demandes réduite (« Réduire ») ; une nouvelle demande la rouvre et
+   * prend le focus, sauf si l'utilisateur tape (terminal ou champ).
+   */
+  const dock = useRequestDock(session?.id ?? null, keys, () => typingElsewhere(termHost.current))
   const [tab, setTab] = useState<Tab>('terminal')
   /** Fichier à montrer dans le diff (« Voir le diff » depuis l'onglet Fichiers). */
   const [diffFocus, setDiffFocus] = useState<{ sessionId: string; path: string; n: number } | null>(null)
   /** Extrait à montrer dans l'onglet Fichiers (clic dans la liste de la revue). */
   const [filesFocus, setFilesFocus] = useState<{ sessionId: string; path: string; line: number; n: number } | null>(null)
+  /** Commit à montrer dans l'onglet Commits (clic dans la liste de la revue). */
+  const [commitFocus, setCommitFocus] = useState<{ sessionId: string; sha: string; path: string; n: number } | null>(null)
+  const openCommit = (sha: string, path: string) => {
+    if (!session) return
+    setCommitFocus((f) => ({ sessionId: session.id, sha, path, n: (f?.n ?? 0) + 1 }))
+    setTab('commits')
+  }
   // Le diff n'est calculé qu'une fois l'onglet ouvert pour la session (puis tenu à jour pour le badge).
   const [diffOpened, setDiffOpened] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => {
@@ -409,8 +424,11 @@ export function SessionPane({
   }, [tab, session?.id])
   const diff = useSessionDiff(session?.id ?? null, diffSeq, tab !== 'terminal' || (!!session && diffOpened.has(session.id)))
   const fileCount = diff.summary?.files.length ?? null
+  /** Liste du diff dans l'ordre de l'onglet Diff : la revue part dans le même ordre d'où qu'on l'envoie. */
+  const reviewFiles = useMemo(() => (diff.summary ? sortFiles(diff.summary.files) : NO_FILES), [diff.summary])
   const pendingComments = activeComments(draft).length
   const fileExtracts = fileComments(draft).length
+  const commitNotes = commitComments(draft).length
   const tabsId = useId()
   const backToTerminal = () => {
     setTab('terminal')
@@ -419,6 +437,7 @@ export function SessionPane({
   const tabs = [
     ['terminal', 'Terminal'],
     ['diff', 'Diff'],
+    ['commits', 'Commits'],
     ['files', 'Fichiers'],
     ['agents', 'Agents'],
   ] as const
@@ -440,16 +459,6 @@ export function SessionPane({
     const panel = document.getElementById(`${tabsId}-agents-panel`)
     panel?.querySelector<HTMLElement>('.ag-item[aria-current="true"]')?.focus()
   }, [tab, openAgents, agentId, tabsId])
-
-  // Nouvelle demande : le focus va à la carte, sauf si l'utilisateur tape (terminal ou champ).
-  useEffect(() => {
-    const fresh = keys.filter((k) => !seen.current.has(k))
-    seen.current = new Set(keys)
-    if (fresh.length === 0 || typingElsewhere(termHost.current)) return
-    const card = asks.current?.querySelector<HTMLElement>(`[data-request-key="${fresh[0]}"]`)
-    card?.focus()
-    // La signature des clés suffit comme dépendance.
-  }, [keysSig])
 
   return (
     <section className="panel sess" aria-label={session ? `Session ${sessionDisplayName(session)}` : 'Aucune session'}>
@@ -513,6 +522,11 @@ export function SessionPane({
                 💬{pendingComments}
               </span>
             )}
+            {k === 'commits' && commitNotes > 0 && (
+              <span className="badge pend" aria-label={`${commitNotes} commentaire${commitNotes > 1 ? 's' : ''} de commit dans la revue`}>
+                💬{commitNotes}
+              </span>
+            )}
             {k === 'files' && fileExtracts > 0 && (
               <span className="badge pend" aria-label={`${fileExtracts} extrait${fileExtracts > 1 ? 's' : ''} de fichier dans la revue`}>
                 💬{fileExtracts}
@@ -522,7 +536,7 @@ export function SessionPane({
         ))}
       </div>
       <div className="term-panel">
-        {/* Le terminal reste monté et dimensionné sous le diff (sa taille ne change pas). */}
+        {/* Le terminal reste monté sous les autres onglets ; seule la zone des demandes change sa taille. */}
         <div
           className="term-wrap"
           role="tabpanel"
@@ -549,6 +563,7 @@ export function SessionPane({
                   focusPath={diffFocus}
                   session={session}
                   diff={diff}
+                  reviewFiles={reviewFiles}
                   draft={draft}
                   review={review}
                   seen={seenFiles}
@@ -558,10 +573,35 @@ export function SessionPane({
                     setFilesFocus((f) => ({ sessionId: session.id, path, line, n: (f?.n ?? 0) + 1 }))
                     setTab('files')
                   }}
+                  onOpenCommit={openCommit}
                 />
               </ViewBoundary>
             ) : (
               <p className="empty">Choisis une session pour voir ce qu’elle a changé.</p>
+            )}
+          </div>
+        )}
+        {tab === 'commits' && (
+          <div className="diff-layer" role="tabpanel" id={`${tabsId}-commits-panel`} aria-labelledby={`${tabsId}-commits`}>
+            {session ? (
+              <ViewBoundary key={session.id} label="Commits">
+                <CommitsView
+                  key={session.id}
+                  session={session}
+                  seq={diffSeq}
+                  draft={draft}
+                  review={review}
+                  reviewFiles={reviewFiles}
+                  onSent={backToTerminal}
+                  focusCommit={commitFocus}
+                  onOpenFile={(path, line) => {
+                    setFilesFocus((f) => ({ sessionId: session.id, path, line, n: (f?.n ?? 0) + 1 }))
+                    setTab('files')
+                  }}
+                />
+              </ViewBoundary>
+            ) : (
+              <p className="empty">Choisis une session pour parcourir ses commits.</p>
             )}
           </div>
         )}
@@ -573,6 +613,7 @@ export function SessionPane({
                   key={session.id}
                   session={session}
                   diff={diff.summary}
+                  reviewFiles={reviewFiles}
                   diffVersion={diff.version}
                   draft={draft}
                   review={review}
@@ -583,6 +624,7 @@ export function SessionPane({
                     setDiffFocus((f) => ({ sessionId: session.id, path, n: (f?.n ?? 0) + 1 }))
                     setTab('diff')
                   }}
+                  onOpenCommit={openCommit}
                   onMentioned={() => {
                     setTab('terminal')
                     // Le terminal reprend le focus pour continuer le message.
@@ -615,19 +657,15 @@ export function SessionPane({
             )}
           </div>
         )}
-        {/* Les cartes recouvrent le bas du terminal sans changer sa taille. */}
-        <div className="asks" ref={asks} aria-live="polite" aria-label="Demandes en attente">
-          {session &&
-            pending.map((r) => {
-              const isStale = session.possibly_stale || stale.includes(r.request_id)
-              const k = `${session.id}:${r.request_id}`
-              return r.pending.kind === 'question' ? (
-                <QuestionCard key={k} cardKey={k} session={session} req={r} stale={isStale} />
-              ) : (
-                <PermissionCard key={k} cardKey={k} session={session} req={r} stale={isStale} />
-              )
-            })}
-        </div>
+        {/* Zone réservée au bas du volet, sous l'onglet affiché : le contenu au-dessus rétrécit (terminal réajusté). */}
+        <RequestDock
+          session={session}
+          pending={pending}
+          stale={stale}
+          reduced={dock.reduced}
+          dockRef={dock.dockRef}
+          onToggle={dock.toggle}
+        />
       </div>
     </section>
   )

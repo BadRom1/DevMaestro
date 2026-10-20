@@ -1,8 +1,8 @@
 /**
- * Revue en cours d'une session, commune aux onglets « Diff » et « Fichiers » :
- * boîte de commentaire, liste des extraits de fichiers du brouillon, commentaire
- * général, compteur et envoi (`sessions.sendReview`, une fois pour tous les
- * commentaires de diff et de fichier).
+ * Revue en cours d'une session, commune aux onglets « Diff », « Fichiers » et
+ * « Commits » : boîte de commentaire, listes des extraits de fichiers et des
+ * commentaires de commit du brouillon, commentaire général, compteur et envoi
+ * (`sessions.sendReview`, une fois pour tous les commentaires).
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 
@@ -14,11 +14,15 @@ import {
   MAX_COMMENT_CHARS,
   activeComments,
   buildReview,
+  commitComments,
   fileComments,
   hasDraft,
+  isCommitComment,
   isFileComment,
   parseRejection,
   rejectedId,
+  commitCommentLabel,
+  type CommitDraftComment,
   type FileDraftComment,
   type ReviewAction,
   type ReviewDraft,
@@ -138,6 +142,56 @@ function FileCommentList({
   )
 }
 
+/** Commentaires de commit du brouillon : voir (onglet Commits), retirer. */
+function CommitCommentList({
+  draft,
+  review,
+  onOpen,
+  rejected,
+}: {
+  draft: ReviewDraft
+  review: (a: ReviewAction) => void
+  onOpen?: (sha: string, path: string) => void
+  rejected: number | null
+}) {
+  const list = commitComments(draft)
+  if (list.length === 0) return null
+  return (
+    <details className="fcomments" open={rejected !== null && list.some((c) => c.id === rejected) ? true : undefined}>
+      <summary>
+        {list.length} commentaire{list.length > 1 ? 's' : ''} de commit dans la revue
+      </summary>
+      <ul role="list">
+        {list.map((c) => (
+          <li key={c.id} className={c.id === rejected ? 'bad' : undefined}>
+            {onOpen ? (
+              <button type="button" className="linkish mono" title={c.sha} onClick={() => onOpen(c.sha, c.path)}>
+                {commitCommentLabel(c)}
+              </button>
+            ) : (
+              <span className="mono" title={c.sha}>
+                {commitCommentLabel(c)}
+              </span>
+            )}
+            <span className="ctext">
+              {c.id === rejected && <b className="rej">refusé · </b>}
+              {c.text}
+            </span>
+            <button
+              type="button"
+              className="btn sm ghost"
+              aria-label={`Retirer le commentaire ${commitCommentLabel(c)} de la revue`}
+              onClick={() => review({ type: 'delete', id: c.id })}
+            >
+              ×
+            </button>
+          </li>
+        ))}
+      </ul>
+    </details>
+  )
+}
+
 export function ReviewBar({
   session,
   draft,
@@ -145,6 +199,7 @@ export function ReviewBar({
   files,
   onSent,
   onOpenFile,
+  onOpenCommit,
 }: {
   session: Session
   draft: ReviewDraft
@@ -155,15 +210,16 @@ export function ReviewBar({
   onSent: () => void
   /** Clic sur un extrait de fichier de la liste. */
   onOpenFile?: (path: string, line: number) => void
+  /** Clic sur un commentaire de commit de la liste. */
+  onOpenCommit?: (sha: string, path: string) => void
 }) {
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   /** Commentaire refusé par le démon au dernier envoi (identifiant dans le brouillon). */
   const [rejected, setRejected] = useState<number | null>(null)
-  const rejectedFile: FileDraftComment | null = (() => {
-    const c = rejected === null ? undefined : draft.comments.find((x) => x.id === rejected)
-    return c && isFileComment(c) ? c : null
-  })()
+  const rejectedComment = rejected === null ? undefined : draft.comments.find((x) => x.id === rejected)
+  const rejectedFile: FileDraftComment | null = rejectedComment && isFileComment(rejectedComment) ? rejectedComment : null
+  const rejectedCommit: CommitDraftComment | null = rejectedComment && isCommitComment(rejectedComment) ? rejectedComment : null
   const [confirmClear, setConfirmClear] = useState(false)
   const built = useMemo(() => buildReview(draft, files), [draft, files])
   const count = activeComments(draft).length
@@ -211,6 +267,7 @@ export function ReviewBar({
         </span>
       )}
       {full && <span className="hint warnline">Limite de {MAX_COMMENTS} commentaires atteinte.</span>}
+      <CommitCommentList draft={draft} review={review} rejected={rejected} {...(onOpenCommit ? { onOpen: onOpenCommit } : {})} />
       <FileCommentList draft={draft} review={review} rejected={rejected} {...(onOpenFile ? { onOpen: onOpenFile } : {})} />
       <input
         value={draft.general}
@@ -261,7 +318,25 @@ export function ReviewBar({
               Extrait refusé : <b className="mono">{`${rejectedFile.path}:${linesLabel(rejectedFile.line, rejectedFile.lineEnd)}`}</b>.{' '}
             </>
           )}
+          {rejectedCommit && (
+            <>
+              Commentaire de commit refusé : <b className="mono">{commitCommentLabel(rejectedCommit)}</b>.{' '}
+            </>
+          )}
           {sendError}
+          {rejectedCommit && (
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => {
+                review({ type: 'delete', id: rejectedCommit.id })
+                setRejected(null)
+                setSendError(null)
+              }}
+            >
+              Retirer ce commentaire
+            </button>
+          )}
           {rejectedFile && (
             <button
               type="button"

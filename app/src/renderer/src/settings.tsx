@@ -7,6 +7,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import {
   applyPatch,
+  isZoomStep,
   mergePatches,
   profileLabel,
   validatePatch,
@@ -68,9 +69,26 @@ export function SettingsProvider({ initial, children }: { initial: AppSettings; 
       setSettings((s) => applyPatch(s, patch))
       pending.current = pending.current ? mergePatches(pending.current, patch) : patch
       if (timer.current) clearTimeout(timer.current)
-      timer.current = setTimeout(() => void flush(), SAVE_DELAY_MS)
+      // Taille de l'interface : appliquée par le processus principal, donc envoyée sans attendre.
+      if (patch.ui) void flush()
+      else timer.current = setTimeout(() => void flush(), SAVE_DELAY_MS)
     },
     [flush],
+  )
+
+  // Taille changée par le processus principal (Ctrl + / Ctrl − / Ctrl 0, Ctrl + molette) : copie locale à jour,
+  // sans renvoyer de modification (le processus principal l'a déjà enregistrée).
+  useEffect(
+    () =>
+      api.onZoomChanged?.((zoom) => {
+        if (!isZoomStep(zoom)) return
+        if (pending.current?.ui) {
+          const { ui: _ui, ...rest } = pending.current
+          pending.current = Object.keys(rest).length > 0 ? rest : null
+        }
+        setSettings((s) => (s.ui.zoom === zoom ? s : { ...s, ui: { ...s.ui, zoom } }))
+      }),
+    [],
   )
 
   // Fermeture de la page : ce qui attend part par un message sans réponse, que

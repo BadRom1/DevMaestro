@@ -3,26 +3,15 @@
  * de sa branche, diff ligne à ligne, commentaires par ligne envoyés à Claude
  * en une revue (`sessions.sendReview`).
  */
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { ErrorCode, type DiffFile, type DiffSummary, type FileDiff, type Session } from '../../../shared/protocol'
 import { call, errorCode, errorText } from '../api'
-import {
-  STATUS_LABELS,
-  baseLabel,
-  countLabel,
-  diffRows,
-  skippedCount,
-  sortFiles,
-  stepFile,
-  totals,
-  type LineAnchor,
-} from '../state/diff'
-import { MAX_COMMENTS, activeComments, commentsAt, isDiffComment, type ReviewAction, type ReviewDraft } from '../state/review'
-import { PathLabel } from './common'
-import { CommentBox, ReviewBar } from './ReviewBar'
-
-const DEBOUNCE_MS = 400
+import { STATUS_LABELS, baseLabel, diffRows, skippedCount, sortFiles, totals } from '../state/diff'
+import { MAX_COMMENTS, activeComments, commentsAt, editingAt, isDiffComment, type ReviewAction, type ReviewDraft } from '../state/review'
+import { useNotifiedReload } from '../notifiedReload'
+import { DiffFileList, DiffTable, fileKeys } from './DiffReader'
+import { ReviewBar } from './ReviewBar'
 
 /** Fichier choisi et défilement, par session (gardés hors du composant). */
 interface DiffMemory {
@@ -67,7 +56,6 @@ export function useSessionDiff(sessionId: string | null, seq: number, active: bo
   const [state, setState] = useState<DiffState>({ summary: null, loading: false, error: null, version: 0 })
   const current = useRef(sessionId)
   current.current = sessionId
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const load = useCallback(async () => {
     const id = current.current
@@ -84,53 +72,37 @@ export function useSessionDiff(sessionId: string | null, seq: number, active: bo
     }
   }, [])
 
-  const reload = useCallback(() => {
-    if (timer.current) clearTimeout(timer.current)
-    timer.current = setTimeout(() => void load(), DEBOUNCE_MS)
-  }, [load])
-
-  // Nouvelle session affichée : liste oubliée.
   useEffect(() => {
     setState({ summary: null, loading: false, error: null, version: 0 })
-    return () => {
-      if (timer.current) clearTimeout(timer.current)
-    }
   }, [sessionId])
 
-  // Onglet ouvert (ou déjà ouvert pour cette session) : chargement immédiat, une seule fois.
   useEffect(() => {
     if (sessionId && active) void load()
   }, [sessionId, active, load])
 
-  // `session.diff_changed` : avec anti-rebond, seulement si le diff de cette session a été ouvert.
-  const activeRef = useRef(active)
-  activeRef.current = active
-  useEffect(() => {
-    if (seq > 0 && activeRef.current) reload()
-  }, [seq, reload])
-
+  const reload = useNotifiedReload(load, seq, active)
   return { ...state, reload }
-}
-
-function typing(t: EventTarget | null): boolean {
-  return t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement
 }
 
 export function DiffView({
   session,
   diff,
+  reviewFiles,
   draft,
   review,
   seen,
   onSeen,
   onSent,
   onOpenFile,
+  onOpenCommit,
   focusPath,
 }: {
   session: Session
   /** Fichier à sélectionner (« Voir le diff » de l'onglet Fichiers) ; `n` change à chaque demande. */
   focusPath?: { sessionId: string; path: string; n: number } | null
   diff: DiffState & { reload: () => void }
+  /** Liste du diff triée, commune aux barres de revue de tous les onglets. */
+  reviewFiles: readonly DiffFile[]
   draft: ReviewDraft
   review: (a: ReviewAction) => void
   seen: Record<string, boolean>
@@ -139,6 +111,8 @@ export function DiffView({
   onSent: () => void
   /** Extrait de fichier cliqué dans la liste de la revue : onglet Fichiers. */
   onOpenFile?: (path: string, line: number) => void
+  /** Commentaire de commit cliqué dans la liste de la revue : onglet Commits. */
+  onOpenCommit?: (sha: string, path: string) => void
 }) {
   const files = useMemo(() => sortFiles(diff.summary?.files ?? []), [diff.summary])
   const memo = diffMemoryFor(session.id)
@@ -165,6 +139,7 @@ export function DiffView({
   const [fileDiff, setFileDiff] = useState<{ path: string; data: FileDiff } | null>(null)
   const [fileError, setFileError] = useState<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  const onKey = fileKeys(files, selected, setSelected, listRef)
 
   // Fichier choisi : le premier, ou le même s'il est toujours dans la liste.
   useEffect(() => {
@@ -217,25 +192,6 @@ export function DiffView({
   const seenCount = files.filter((f) => seen[f.path]).length
   const t = totals(files)
 
-  function move(delta: 1 | -1) {
-    const next = stepFile(files, selected, delta)
-    if (!next) return
-    setSelected(next)
-    listRef.current?.querySelector<HTMLElement>(`[data-path="${CSS.escape(next)}"]`)?.focus()
-  }
-
-  function onKey(e: KeyboardEvent<HTMLDivElement>) {
-    if (typing(e.target) || e.ctrlKey || e.metaKey || e.altKey) return
-    const inList = listRef.current?.contains(e.target as Node)
-    if (e.key === 'j' || (inList && e.key === 'ArrowDown')) {
-      e.preventDefault()
-      move(1)
-    } else if (e.key === 'k' || (inList && e.key === 'ArrowUp')) {
-      e.preventDefault()
-      move(-1)
-    }
-  }
-
   if (diff.error && !diff.summary) {
     return (
       <div className="diffpane empty" role="alert">
@@ -254,81 +210,53 @@ export function DiffView({
     )
   }
 
-  const editingHere = (a: LineAnchor) =>
-    !!draft.editing && draft.editing.path === selected && draft.editing.side === a.side && draft.editing.line === a.line
-
   return (
     <div className="diffpane" onKeyDown={onKey}>
-      <div className="files" ref={listRef} aria-label="Fichiers changés">
-        <div className="fhead">
-          <span className="lbl">
-            {seenCount}/{files.length} vus
-          </span>
-          <span className="hint" title={diff.summary.base ? `${diff.summary.base.ref} ${diff.summary.base.sha}` : undefined}>
-            {baseLabel(diff.summary.base)}
-          </span>
-          <span className="hint">
-            <span className="plus">
-              +{t.additions}
-              {t.unknown ? '+?' : ''}
-            </span>{' '}
-            <span className="minus">
-              −{t.deletions}
-              {t.unknown ? '−?' : ''}
+      <DiffFileList
+        files={files}
+        selected={selected}
+        onSelect={setSelected}
+        listRef={listRef}
+        label="Fichiers changés"
+        empty="Aucune modification depuis la base."
+        seen={seen}
+        comments={(path) => draft.comments.filter(isDiffComment).filter((c) => c.path === path && !c.stale).length}
+        head={
+          <>
+            <span className="lbl">
+              {seenCount}/{files.length} vus
             </span>
-            {diff.loading && ' · mise à jour…'}
-          </span>
-          {diff.summary.truncated && (
-            <span className="chip pend" title="Trop de fichiers changés : le démon n’en donne qu’une partie.">
-              liste tronquée
+            <span className="hint" title={diff.summary.base ? `${diff.summary.base.ref} ${diff.summary.base.sha}` : undefined}>
+              {baseLabel(diff.summary.base)}
             </span>
-          )}
-          {skippedCount(diff.summary.skipped_non_utf8) > 0 && (
-            <span
-              className="hint"
-              title={Array.isArray(diff.summary.skipped_non_utf8) ? diff.summary.skipped_non_utf8.join('\n') : undefined}
-            >
-              {skippedCount(diff.summary.skipped_non_utf8)} fichier{skippedCount(diff.summary.skipped_non_utf8) > 1 ? 's' : ''} non UTF-8
-              ignoré{skippedCount(diff.summary.skipped_non_utf8) > 1 ? 's' : ''}
+            <span className="hint">
+              <span className="plus">
+                +{t.additions}
+                {t.unknown ? '+?' : ''}
+              </span>{' '}
+              <span className="minus">
+                −{t.deletions}
+                {t.unknown ? '−?' : ''}
+              </span>
+              {diff.loading && ' · mise à jour…'}
             </span>
-          )}
-        </div>
-        {files.length === 0 && <p className="hint pad">Aucune modification depuis la base.</p>}
-        <ul role="list">
-          {files.map((f) => {
-            const n = draft.comments.filter(isDiffComment).filter((c) => c.path === f.path && !c.stale).length
-            return (
-              <li key={f.path}>
-                <button
-                  className={`frow${seen[f.path] ? ' seen' : ''}`}
-                  data-path={f.path}
-                  aria-current={f.path === selected}
-                  aria-label={`${f.path}, ${STATUS_LABELS[f.status]}, ${f.additions ?? 'nombre inconnu de'} ajouts, ${f.deletions ?? 'nombre inconnu de'} suppressions${n ? `, ${n} commentaire${n > 1 ? 's' : ''}` : ''}${seen[f.path] ? ', vu' : ''}`}
-                  onClick={() => setSelected(f.path)}
-                >
-                  <span className={`s s-${f.status === '?' ? 'u' : f.status}`} aria-hidden="true">
-                    {f.status}
-                  </span>
-                  <PathLabel inline className="n" path={f.path} title={f.old_path ? `${f.old_path} → ${f.path}` : f.path} />
-                  <span className="st2" aria-hidden="true">
-                    {n > 0 && <span className="ccount">💬{n} </span>}
-                    {f.binary ? (
-                      'binaire'
-                    ) : (
-                      <>
-                        <span className="plus">+{countLabel(f.additions)}</span> <span className="minus">−{countLabel(f.deletions)}</span>
-                      </>
-                    )}
-                  </span>
-                </button>
-              </li>
-            )
-          })}
-        </ul>
-        <p className="hint pad">
-          <kbd>j</kbd> / <kbd>k</kbd> : fichier suivant / précédent
-        </p>
-      </div>
+            {diff.summary.truncated && (
+              <span className="chip pend" title="Trop de fichiers changés : le démon n’en donne qu’une partie.">
+                liste tronquée
+              </span>
+            )}
+            {skippedCount(diff.summary.skipped_non_utf8) > 0 && (
+              <span
+                className="hint"
+                title={Array.isArray(diff.summary.skipped_non_utf8) ? diff.summary.skipped_non_utf8.join('\n') : undefined}
+              >
+                {skippedCount(diff.summary.skipped_non_utf8)} fichier{skippedCount(diff.summary.skipped_non_utf8) > 1 ? 's' : ''} non UTF-8
+                ignoré{skippedCount(diff.summary.skipped_non_utf8) > 1 ? 's' : ''}
+              </span>
+            )}
+          </>
+        }
+      />
       <div className="dmain">
         {file ? (
           <div className="dhead">
@@ -355,84 +283,16 @@ export function DiffView({
             <p className="empty">Fichier trop volumineux pour être affiché ici.</p>
           )}
           {file && !fileDiff && !fileError && <p className="empty">Chargement…</p>}
-          {rows.length > 0 && (
-            <table className="code">
-              <tbody>
-                {rows.map((r) => {
-                  if (r.type === 'hunk') {
-                    return (
-                      <tr key={r.key} className="hunk">
-                        <td className="cbtn" />
-                        <td className="no" />
-                        <td className="no" />
-                        <td className="c">{r.header}</td>
-                      </tr>
-                    )
-                  }
-                  const a = r.anchor
-                  const cms = a && selected ? commentsAt(draft, selected, a) : []
-                  const sign = r.kind === 'add' ? '+' : r.kind === 'del' ? '−' : ' '
-                  return (
-                    <Fragment key={r.key}>
-                      <tr className={r.kind}>
-                        <td className="cbtn">
-                          {a && selected && !full && (
-                            <button
-                              type="button"
-                              aria-label={`Commenter la ligne ${a.line} (${a.side === 'new' ? 'nouvelle' : 'ancienne'} version)`}
-                              onClick={() => review({ type: 'edit', path: selected, anchor: a, lineText: r.text })}
-                            >
-                              +
-                            </button>
-                          )}
-                        </td>
-                        <td className="no">{r.oldNo ?? ''}</td>
-                        <td className="no">{r.newNo ?? ''}</td>
-                        <td className="c">
-                          <span className="sign" aria-hidden="true">
-                            {sign}{' '}
-                          </span>
-                          <span className="sr-only">{r.kind === 'add' ? 'ajout : ' : r.kind === 'del' ? 'suppression : ' : ''}</span>
-                          {r.text}
-                        </td>
-                      </tr>
-                      {cms.map((c) => (
-                        <tr key={`c${c.id}`} className="cm">
-                          <td colSpan={4}>
-                            <div className="cbox">
-                              <div className="who">
-                                <span>Toi · commentaire en attente</span>
-                                <button
-                                  type="button"
-                                  className="btn sm ghost"
-                                  aria-label={`Supprimer le commentaire de la ligne ${c.line}`}
-                                  onClick={() => review({ type: 'delete', id: c.id })}
-                                >
-                                  ×
-                                </button>
-                              </div>
-                              <div className="ctext">{c.text}</div>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                      {a && editingHere(a) && (
-                        <tr className="cm">
-                          <td colSpan={4}>
-                            <CommentBox
-                              text={draft.editing?.text ?? ''}
-                              onText={(text) => review({ type: 'editText', text })}
-                              onSave={() => review({ type: 'save' })}
-                              onCancel={() => review({ type: 'cancel' })}
-                            />
-                          </td>
-                        </tr>
-                      )}
-                    </Fragment>
-                  )
-                })}
-              </tbody>
-            </table>
+          {rows.length > 0 && selected && (
+            <DiffTable
+              rows={rows}
+              draft={draft}
+              review={review}
+              full={full}
+              commentsAt={(a) => commentsAt(draft, selected, a)}
+              editingAt={(a) => editingAt(draft, selected, a)}
+              onEdit={(a, lineText) => review({ type: 'edit', path: selected, anchor: a, lineText })}
+            />
           )}
           {staleHere.length > 0 && (
             <section className="stale-comments" aria-label="Commentaires hors diff">
@@ -464,9 +324,10 @@ export function DiffView({
           session={session}
           draft={draft}
           review={review}
-          files={files}
+          files={reviewFiles}
           onSent={onSent}
           {...(onOpenFile ? { onOpenFile } : {})}
+          {...(onOpenCommit ? { onOpenCommit } : {})}
         />
       </div>
     </div>

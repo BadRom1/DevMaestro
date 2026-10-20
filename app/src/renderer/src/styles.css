@@ -197,11 +197,19 @@ select.mode { background: var(--panel-2); border: 1px solid var(--line-2); borde
 .badge { font-size: 11px; border-radius: 99px; padding: 0 6px; background: var(--line); color: var(--fg); font-variant-numeric: tabular-nums }
 .badge.wait { background: var(--wait); color: var(--bg) }
 
-/* Cartes de demande */
+/* Cartes de demande : zone réservée au bas du volet de session (deuxième rangée de .term-panel), sous l'onglet
+   affiché quel qu'il soit. Le contenu au-dessus rétrécit (le terminal est réajusté) au lieu d'être recouvert ;
+   au-delà de 45 % de la hauteur, seule la liste des cartes défile. */
 .term-panel { position: relative }
-/* Cartes de demande : panneau flottant au bas du terminal, sans le redimensionner. */
-.asks { position: absolute; left: 22px; right: 22px; bottom: 20px; z-index: 2; display: grid; gap: 8px; max-height: 60%; overflow: auto; padding: 8px; border-radius: 8px; background: color-mix(in srgb, var(--panel) 88%, transparent); border: 1px solid var(--line-2); box-shadow: 0 8px 24px rgba(0, 0, 0, .25) }
-.asks:empty { display: none }
+.asks { grid-area: 2 / 1; position: relative; z-index: 2; display: flex; flex-direction: column; gap: 8px; max-height: 45vh; min-height: 0; margin: 0 12px 12px; padding: 8px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--wait) }
+.asks:empty { margin: 0; padding: 0; border-width: 0; height: 0; overflow: hidden }
+.asks.reduced { padding: 4px 8px 4px 12px }
+.asks-bar { flex: none; display: flex; align-items: center; gap: 8px; min-height: 26px; color: var(--wait); font-weight: 600; font-size: 12.5px }
+.asks-bar .asks-sep { color: var(--faint); font-weight: 400 }
+.asks-bar .btn { margin-left: auto }
+.asks.reduced .asks-bar .btn { margin-left: 0 }
+.asks-list { display: grid; gap: 8px; min-height: 0; overflow: auto }
+.asks-list[hidden] { display: none }
 .ask { border: 1px solid var(--wait); border-radius: var(--r); padding: 10px 12px; background: color-mix(in srgb, var(--wait) 9%, var(--panel)); font-size: 13px; display: grid; gap: 8px }
 .ask .t { color: var(--wait); font-weight: 600; display: flex; gap: 8px; align-items: center; flex-wrap: wrap }
 .ask code, .ask .code { font-family: var(--f-mono); font-size: 12.5px; background: var(--panel-2); padding: 2px 6px; border-radius: 4px; overflow-wrap: anywhere; white-space: pre-wrap }
@@ -228,14 +236,27 @@ select.mode { background: var(--panel-2); border: 1px solid var(--line-2); borde
 
 /* Fenêtre « Nouvelle session » */
 .scrim { position: fixed; inset: 0; background: rgba(5, 7, 12, .55); display: grid; place-items: center; z-index: 20; padding: 16px }
-.modal { width: min(720px, 100%); max-height: 100%; overflow: auto; background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; display: grid }
+/* Dialogue : en-tête (titre, ×, onglets) et pied fixes, seul le corps (.mb) défile. La fenêtre ne défile pas
+   (overflow: hidden) : la barre de défilement du corps reste à l'intérieur de ses coins arrondis. */
+.modal { width: min(720px, 100%); max-height: 100%; overflow: hidden; background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; display: flex; flex-direction: column }
+.modal > * { flex: none }
+.modal > form, .modal > [role="tabpanel"] { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column }
+.modal > form > *, .modal > [role="tabpanel"] > * { flex: none }
+.modal .mb { flex: 1 1 auto; min-height: 0; overflow: auto }
 .mh { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--line) }
 .mh h2 { margin: 0; font-size: 16px }
 .mh .x { margin-left: auto }
 .mb { padding: 14px 16px; display: grid; gap: 14px }
 .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px }
-.field { display: grid; gap: 4px; min-width: 0 }
+.field { display: grid; gap: 4px; min-width: 0; align-content: start }
 .field select, .field input, .field textarea { background: var(--sunk); border: 1px solid var(--line-2); border-radius: var(--r); padding: 5px 8px; min-width: 0; width: 100% }
+/* Règle de formulaire : dans une rangée (.grid2, .grid3), chaque champ est empilé depuis le haut (align-content
+   ci-dessus : la hauteur en plus d'un voisin ne s'étale pas entre libellé et contrôle) et tous les contrôles d'une
+   ligne ont la même hauteur (une liste déroulante est sinon plus haute d'un ou deux pixels qu'un champ de texte) :
+   libellés, contrôles et lignes de base alignés ; l'aide passe dessous sans décaler les voisins. */
+:root { --ctl-h: 30px }
+.field select, .field input:not([type="checkbox"]):not([type="radio"]):not([type="color"]):not([type="file"]), .wtrow select, .wtrow input, .pprow select, .lrow input { height: var(--ctl-h); line-height: 18px; padding-block: 0 }
+.field > .hint, .field > .inline-err { min-width: 0; overflow-wrap: anywhere }
 .field textarea { min-height: 110px; font-family: var(--f-mono); font-size: 12.5px; resize: vertical }
 .mf { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--line) }
 .mf .err { color: var(--err); font-size: 12.5px; margin-right: auto }
@@ -346,7 +367,8 @@ tr.cm td { padding: 6px 12px 8px 60px; white-space: normal }
 .dfoot .warnline { flex-basis: 100%; color: var(--wait) }
 .dfoot .forget { flex-basis: 100%; margin: 0 }
 .badge.pend { background: transparent; border: 1px solid var(--wait); color: var(--wait) }
-.sess > .term-panel { grid-template-rows: minmax(0, 1fr); grid-template-columns: minmax(0, 1fr) }
+/* Rangée 1 : onglet affiché ; rangée 2 : zone des demandes (vide : 0). */
+.sess > .term-panel { grid-template-rows: minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr) }
 .stale-comments { display: grid; gap: 6px; padding: 10px 12px 14px; border-top: 1px dashed var(--line-2) }
 .stale-comments h3 { margin: 0 }
 .stale-comments code { font-family: var(--f-mono); font-size: 12px; background: var(--sunk); padding: 0 4px; border-radius: 3px }
@@ -582,3 +604,33 @@ tr.cm td { padding: 6px 12px 8px 60px; white-space: normal }
 .kpane-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0 }
 .kpane-bar .hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0 }
 @media (max-width: 1100px) { .kview.open { grid-template-columns: minmax(220px, 1fr) minmax(0, 2fr) } }
+
+/* ---------- Finitions d'interface (v0.3, lot 8) ---------- */
+/* Taille du texte : − [liste] + 100 %. */
+.zoomctl { display: inline-flex; align-items: center; gap: 6px }
+.field .zoomctl select { width: auto; min-width: 150px }
+.zoomctl .btn { height: var(--ctl-h); min-width: 32px; padding-block: 0 }
+/* Importer un thème (JSON) : panneau en tête de l'onglet Apparence. */
+.import-box { border: 1px solid var(--accent); border-radius: 8px; padding: 10px 12px; display: grid; gap: 10px }
+.import-box h3 { margin: 0; font-size: 14px }
+.import-box p { margin: 0 }
+
+/* ---------- Onglet Commits (v0.3, lot 9) ---------- */
+/* Liste des commits à gauche, puis le lecteur de l'onglet Diff (fichiers du commit, diff, revue). */
+.commitspane { display: grid; grid-template-columns: 300px minmax(0, 1fr); height: 100%; min-height: 0 }
+.commitspane > .diffpane { min-width: 0 }
+.clist { border-right: 1px solid var(--line); overflow: auto; padding: 8px 6px; display: flex; flex-direction: column; gap: 2px; min-height: 0 }
+.clist .fhead { display: grid; gap: 2px; padding: 2px 8px 6px; justify-items: start }
+.clist ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px }
+.citem { display: grid }
+.cmt-row { display: grid; gap: 2px; width: 100%; border: 0; background: transparent; text-align: left; padding: 5px 8px; border-radius: 5px; min-width: 0 }
+.cmt-row:hover { background: var(--panel-2) }
+.cmt-row[aria-current="true"] { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent) }
+.cmt-row .csubj { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500 }
+.cmt-row .cmeta { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums }
+.cmt-row .cmeta .mono { font-size: 11.5px; color: var(--faint) }
+.cmt-row .cauthor { min-width: 0; max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.cbody { margin: 0 8px 4px 10px; font-size: 12px }
+.cbody summary { cursor: pointer; color: var(--muted); font-size: 11.5px }
+.cbody pre { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--f-mono); font-size: 12px; color: var(--fg); background: var(--sunk); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; max-height: 240px; overflow: auto }
+@media (max-width: 1300px) { .commitspane { grid-template-columns: 240px minmax(0, 1fr) } .commitspane .diffpane { grid-template-columns: 200px minmax(0, 1fr) } }

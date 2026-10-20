@@ -2,10 +2,16 @@
  * Terminal de la session affichée : un seul xterm.js pour toute l'app
  * (moteur WebGL, repli sur le moteur DOM), alimenté par le canal du terminal.
  *
- * Sa taille ne dépend que de la place disponible (les cartes de demande le
- * recouvrent sans le redimensionner), sauf quand le démon n'a pas pu prendre
- * notre taille (session arrêtée) : le terminal prend alors celle de
- * l'instantané jusqu'à la reprise.
+ * Sa taille ne dépend que de la place disponible (la zone des demandes, au
+ * bas du volet, la réduit : le terminal est réajusté quand elle apparaît,
+ * disparaît ou se réduit), sauf quand le démon n'a pas pu prendre notre
+ * taille (session arrêtée) : le terminal prend alors celle de l'instantané
+ * jusqu'à la reprise.
+ *
+ * Taille de l'interface (zoom d'Electron) : la police garde sa taille CSS et
+ * grossit avec la page. Le rapport de pixels (`devicePixelRatio`) change avec
+ * le zoom : l'atlas des glyphes est alors recalculé pour rester net, puis les
+ * colonnes réajustées (de même en changeant d'écran).
  */
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
@@ -162,6 +168,24 @@ export function TerminalView({
         raf = requestAnimationFrame(refit)
       })
       ro.observe(host.current)
+      // Changement de rapport de pixels (zoom de l'interface, autre écran) : glyphes redessinés, colonnes réajustées.
+      let dprQuery: MediaQueryList | null = null
+      const onDpr = () => {
+        watchDpr()
+        try {
+          term.clearTextureAtlas()
+        } catch {
+          // Moteur sans atlas (DOM, contexte WebGL perdu) : rien à vider, le rafraîchissement suffit.
+        }
+        refit()
+        term.refresh(0, term.rows - 1)
+      }
+      const watchDpr = () => {
+        dprQuery?.removeEventListener('change', onDpr)
+        dprQuery = typeof window.matchMedia === 'function' ? window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`) : null
+        dprQuery?.addEventListener('change', onDpr)
+      }
+      watchDpr()
       refit()
       if (usable(term.cols, term.rows)) onSizeRef.current?.(term.cols, term.rows)
       live.current = {
@@ -171,6 +195,7 @@ export function TerminalView({
         refit,
         dispose: () => {
           ro.disconnect()
+          dprQuery?.removeEventListener('change', onDpr)
           cancelAnimationFrame(raf)
           if (resizeTimer) clearTimeout(resizeTimer)
           offPort()
