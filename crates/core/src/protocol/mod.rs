@@ -59,6 +59,8 @@ pub mod error_code {
     pub const CWD_MISSING: i64 = -32016;
     /// Diff impossible : la session n'est pas dans un dépôt git.
     pub const NOT_A_REPO: i64 = -32017;
+    /// Sous-agent inconnu dans cette session (`sessions.subagent`).
+    pub const UNKNOWN_SUBAGENT: i64 = -32018;
 }
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {

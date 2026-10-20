@@ -65,7 +65,7 @@ Toute commande passe par une notion d'**hôte** (`local` en v1). Plus tard, un `
 | Projet | Un dépôt git (identifié par son dossier commun `git rev-parse --git-common-dir`). Porte : profil par défaut, emplacement des worktrees, dépôt GitHub. |
 | Worktree | Un checkout d'une branche du projet. Emplacement configurable : à côté du dépôt, dans `.worktrees/`, ou dans un dossier géré par l'app. |
 | Session | Un processus `claude` lancé (ou repris) par l'app dans un worktree, avec un `session_id` choisi par l'app. Peut être liée à une issue. |
-| Sous-agent | Un agent lancé par Claude dans une session (outil `Agent`) : description, type, statut, durée, outils utilisés, rapport final. Alimenté par `SubagentStart` / `SubagentStop` et par les champs `agent_id` / `agent_type` des hooks (**à vérifier**, Q12 du prototype n° 1). Affiché en sous-arbre de la session et dans un onglet « Agents ». |
+| Sous-agent | Un agent lancé par Claude dans une session (outil `Agent`) : description, type, statut, durée, outils utilisés, rapport final. Alimenté par `SubagentStart` / `SubagentStop` et par les champs `agent_id` / `agent_type` des hooks (vérifié, Q12 du prototype n° 1 ; les sous-agents tournent en arrière-plan). Affiché en sous-arbre de la session et dans un onglet « Agents ». |
 | Runner | Une commande détectée (dev, test, lint…) lancée dans un worktree, avec son port. |
 | Revue | Commentaires ligne à ligne sur le diff d'une session, envoyés à Claude en un seul message. |
 | Livraison | État de fin de travail : rien, PR ouverte (avec checks CI), mergée. Déclenche la proposition de nettoyage du worktree. |

@@ -11,9 +11,10 @@ pub mod quota;
 pub mod session;
 pub mod state;
 pub mod statusline;
+pub mod subagents;
 pub mod transcript;
 
-pub use hooks::{HookCommon, HookEvent, HookKind, HookParseError, ToolCall};
+pub use hooks::{BackgroundTask, HookCommon, HookEvent, HookKind, HookParseError, ToolCall};
 pub use metrics::{Metrics, ModelInfo, RateLimitWindow, RateLimits};
 pub use profile::Profile;
 pub use project::Project;
@@ -31,4 +32,5 @@ pub use state::{
     REASON_STOPPED_BY_APP, RequestId, Resolution, SessionState, apply, apply_tracked,
 };
 pub use statusline::{Statusline, StatuslineParseError};
+pub use subagents::{Subagent, SubagentChange, SubagentStatus, Subagents};
 pub use transcript::PastSession;

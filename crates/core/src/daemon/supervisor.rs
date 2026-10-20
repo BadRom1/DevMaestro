@@ -19,6 +19,8 @@ use time::OffsetDateTime;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
+mod subagents;
+
 use super::claude_config;
 use super::launch::{self, LaunchKind, LaunchSpec, ScopeSpec};
 use super::log::{error, info, warning};
@@ -28,7 +30,8 @@ use crate::domain::decision::{self, AnswerError, PermissionAnswer};
 use crate::domain::{
     Effect, HookEvent, HookKind, PastSession, PermissionMode, ProcessExit, Profile,
     REASON_DAEMON_RESTART, RequestId, SESSION_COLORS, Session, SessionState, SessionStatus,
-    Statusline, WaitKind, is_session_color, mode_from_footer, normalize_title, shift_tab_steps,
+    Statusline, SubagentChange, WaitKind, is_session_color, mode_from_footer, normalize_title,
+    shift_tab_steps,
 };
 use crate::paths::Paths;
 use crate::ports::{
@@ -237,6 +240,9 @@ pub enum Event {
     Quotas,
     /// Le diff d'une session a changé (`session.diff_changed`).
     DiffChanged(Uuid),
+    /// Les sous-agents d'une session ont changé (`session.subagents_changed`,
+    /// liste relue au moment d'envoyer).
+    SubagentsChanged(Uuid),
 }
 
 /// Anti-rebond du recalcul du diff d'une session.
@@ -394,6 +400,9 @@ struct Entry {
     cwd_exists: bool,
     /// Verrou des écritures dans le PTY (revue, Shift+Tab, clavier).
     pty_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Empreinte de chaque sous-agent tel qu'écrit en base pour la dernière
+    /// fois ([`crate::domain::Subagent::fingerprint`]).
+    subagents_persisted: HashMap<String, u64>,
 }
 
 /// Délai au bout duquel un `sessions.setMode` non confirmé n'empêche plus
@@ -471,6 +480,8 @@ pub struct Daemon {
     diff_watch: Mutex<HashMap<Uuid, DiffWatch>>,
     /// Fichiers des dépôts par session (onglet Fichiers).
     files_cache: Mutex<HashMap<Uuid, FilesCacheEntry>>,
+    /// Limitation des `session.subagents_changed` dus aux compteurs d'outils.
+    subagent_notify: Mutex<HashMap<Uuid, subagents::NotifyState>>,
     /// Un seul `git ls-files` à la fois par session.
     files_inflight: Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
 }
@@ -579,6 +590,7 @@ impl Entry {
             has_transcript: false,
             cwd_exists: true,
             pty_lock: Arc::new(tokio::sync::Mutex::new(())),
+            subagents_persisted: HashMap::new(),
         }
     }
 
@@ -686,6 +698,8 @@ impl Entry {
                 .map(|r| pending_request_json(r, self.answerable(r.id)))
                 .collect::<Vec<_>>(),
             "possibly_stale": s.state.possibly_stale(),
+            "subagents_running": s.state.subagents().running_count(),
+            "subagents_total": s.state.subagents().total(),
             "metrics": metrics_json(&s.metrics),
             "last_activity": time_json(s.state.last_activity),
             "created_at": time_json(Some(self.created_at)),
@@ -795,6 +809,7 @@ impl Daemon {
             quota_refreshing: AtomicBool::new(false),
             diff_watch: Mutex::new(HashMap::new()),
             files_cache: Mutex::new(HashMap::new()),
+            subagent_notify: Mutex::new(HashMap::new()),
             files_inflight: Mutex::new(HashMap::new()),
         })
     }
@@ -1048,7 +1063,28 @@ impl Daemon {
                 r.mode.as_deref().map(PermissionMode::parse),
                 r.last_activity,
             );
+            let mut agents = match self.deps.store.load_subagents(&r.id) {
+                Ok(a) => a,
+                Err(e) => {
+                    error!("lecture des sous-agents de la session {} : {e}", r.id);
+                    Vec::new()
+                }
+            };
+            let persisted: HashMap<String, u64> = agents
+                .iter()
+                .map(|a| (a.agent_id.clone(), a.fingerprint()))
+                .collect();
+            // Le processus n'est plus là : un sous-agent resté en cours ne
+            // finira jamais. Fin datée de la dernière activité connue.
+            for a in agents.iter_mut().filter(|a| a.is_running()) {
+                a.status = crate::domain::SubagentStatus::Interrupted;
+                a.current_tool = None;
+                a.ended_at = Some(r.last_activity.unwrap_or(now).max(a.started_at));
+            }
+            session.state.restore_subagents(agents);
             let mut entry = Entry::new(session, Terminal::new(DEFAULT_SIZE), r.created_at);
+            entry.subagents_persisted = persisted;
+            self.persist_subagents(&mut entry);
             entry.model = r.model.clone();
             entry.orphan = orphan;
             entry.updated_at = if was_active { now } else { r.updated_at };
@@ -1426,6 +1462,10 @@ impl Daemon {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(id);
+        self.subagent_notify
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
         info!("session {id} oubliée (retirée du registre et de la base, transcript masqué)");
         let _ = self.events.send(Event::Removed(*id));
         Ok(json!({"forgotten": true}))
@@ -1739,6 +1779,7 @@ impl Daemon {
                 for id in running {
                     daemon.schedule_diff_check(id, true);
                 }
+                daemon.tick_subagents();
             }
         });
     }
@@ -2414,7 +2455,12 @@ impl Daemon {
                 "session {id} reprise (claude {})",
                 entry.session.claude_session_id
             );
+            // Sous-agents gardés à la reprise (statuts déjà finaux).
+            self.persist_subagents(&mut entry);
             self.commit(&mut entry);
+            if entry.session.state.subagents().total() > 0 {
+                self.signal_subagents(id, SubagentChange::Structural);
+            }
             let result = json!({"session": entry.json(), "warnings": warnings});
             reg.sessions.insert(id, entry);
             return Ok(result);
@@ -2853,14 +2899,18 @@ impl Daemon {
             });
         }
         self.emit_effects(id, &applied.effects);
+        if applied.subagents == SubagentChange::Structural {
+            self.persist_subagents(entry);
+        }
         // Après le rattachement : le `session.updated` porte `answerable: true`.
         self.commit(entry);
+        self.signal_subagents(id, applied.subagents);
         // Fichiers peut-être changés : diff recalculé (anti-rebond).
         if matches!(
             event.kind,
             HookKind::PostToolUse(_)
                 | HookKind::PostToolUseFailure { .. }
-                | HookKind::Stop
+                | HookKind::Stop { .. }
                 | HookKind::StopFailure
         ) {
             self.schedule_diff_check(id, false);
@@ -3260,7 +3310,12 @@ impl Daemon {
             }
         };
         let now = self.now();
+        let running_before = entry.session.state.subagents().running_count();
         let effects = entry.session.state.process_exited(&exit, now);
+        let subagents_changed = entry.session.state.subagents().running_count() != running_before;
+        if subagents_changed {
+            self.persist_subagents(entry);
+        }
         entry.release_resolved(&effects);
         entry.release_all();
         entry.run = None;
@@ -3274,6 +3329,9 @@ impl Daemon {
         info!("session {id} : processus terminé ({how})");
         self.emit_effects(id, &effects);
         self.commit(entry);
+        if subagents_changed {
+            self.signal_subagents(id, SubagentChange::Structural);
+        }
         // `resumable` relu hors du verrou (système de fichiers).
         if let Some(daemon) = self.me.upgrade() {
             self.runtime
@@ -3358,14 +3416,23 @@ impl Daemon {
         let now = self.now();
         let mut reg = self.lock();
         for entry in reg.sessions.values_mut().filter(|e| e.run.is_some()) {
+            let running_before = entry.session.state.subagents().running_count();
             entry
                 .session
                 .state
                 .process_exited(&ProcessExit::Requested, now);
+            let subagents_changed =
+                entry.session.state.subagents().running_count() != running_before;
+            if subagents_changed {
+                self.persist_subagents(entry);
+            }
             entry.release_all();
             entry.run = None;
             entry.updated_at = now;
             self.commit(entry);
+            if subagents_changed {
+                self.signal_subagents(entry.session.id, SubagentChange::Structural);
+            }
         }
     }
 }
@@ -3384,12 +3451,16 @@ fn install_run(reg: &mut Registry, entry: &mut Entry, run: Run, token: String, p
     entry.last_exit = None;
     entry.session.cwd = plan.cwd;
     entry.session.profile = plan.profile.name;
+    let previous = std::mem::take(&mut entry.session.state);
     entry.session.state = SessionState::restored(
         SessionStatus::Starting,
-        plan.mode
-            .or_else(|| entry.session.state.permission_mode.clone()),
-        entry.session.state.last_activity,
+        plan.mode.or_else(|| previous.permission_mode.clone()),
+        previous.last_activity,
     );
+    // Les sous-agents restent (ordre de lancement continué) ; ceux qui
+    // tournaient encore sont déjà passés `interrupted` à la fin du processus.
+    let now = previous.last_activity.unwrap_or(entry.updated_at);
+    entry.session.state.carry_subagents_from(previous, now);
     if plan.model.is_some() {
         entry.model = plan.model;
     }

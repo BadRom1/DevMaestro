@@ -24,6 +24,13 @@
 //! - `/ctl` : tente d'utiliser le socket de contrôle depuis un processus
 //!   enfant (chemin déduit de `ORCH_SOCKET`) ; `/ctl-detache` : depuis un
 //!   petit-enfant rattaché à `init` ;
+//! - `/agents` : deux sous-agents en arrière-plan, avec les hooks de la
+//!   session réelle du 2026-10-20 (prototype n° 1, Q12) : `PreToolUse(Agent)`,
+//!   `SubagentStart` et `PostToolUse(Agent)` (`tool_response.agentId`,
+//!   `async_launched`) dans les deux ordres, un outil dans le premier, puis un
+//!   `Stop` qui les liste en cours. Touche `f` : fin des deux (`SubagentStop`
+//!   avec rapport, `<task-notification>`, `Stop` intermédiaires), jusqu'au
+//!   `Stop` final sans tâche de fond ;
 //! - `/exit` (après un `SessionEnd`), `/crash` (code 3, sans `SessionEnd`),
 //!   `/tetu` (ignore `SIGHUP`).
 //!
@@ -523,10 +530,113 @@ impl Fake {
     }
 
     fn end_turn(&self) {
+        self.stop_with(&[]);
+        self.statusline();
+    }
+
+    /// `Stop` dont `background_tasks` liste ces sous-agents en cours.
+    fn stop_with(&self, running: &[(&str, &str)]) {
         let mut ev = self.with_mode("Stop");
         ev["stop_hook_active"] = json!(false);
+        ev["background_tasks"] = json!(
+            running
+                .iter()
+                .map(
+                    |(id, desc)| json!({"id": id, "type": "subagent", "status": "running",
+                    "description": desc, "agent_type": "general-purpose"})
+                )
+                .collect::<Vec<_>>()
+        );
+        ev["session_crons"] = json!([]);
         self.hook("Stop", ev);
-        self.statusline();
+    }
+
+    /// Hook d'outil lancé dans un sous-agent (`agent_id`, `agent_type`).
+    fn agent_tool(&self, event: &str, agent_id: &str, tool: &str, tool_use_id: &str) {
+        let mut ev = self.with_mode(event);
+        ev["agent_id"] = json!(agent_id);
+        ev["agent_type"] = json!("general-purpose");
+        ev["tool_name"] = json!(tool);
+        ev["tool_input"] = json!({"file_path": "/tmp/faux/README.md"});
+        ev["tool_use_id"] = json!(tool_use_id);
+        if event == "PostToolUse" {
+            ev["tool_response"] = json!({"type": "text"});
+        }
+        self.hook(event, ev);
+    }
+
+    /// `/agents` : deux sous-agents en arrière-plan (voir l'en-tête).
+    fn agents(&self, keys: &mut Keys, line: &str) {
+        self.prompt_submit(line);
+        let n = TOOL_SEQ.fetch_add(1, Ordering::SeqCst);
+        // Identifiants propres au processus : une reprise relance un autre faux.
+        let pid = std::process::id();
+        let agents = [
+            (format!("afaux{pid}x{n}a"), "Lire le README"),
+            (format!("afaux{pid}x{n}b"), "Compter les fichiers"),
+        ];
+        for (i, (id, desc)) in agents.iter().enumerate() {
+            let tool_use_id = format!("toolu_agent_{n}_{i}");
+            let input = json!({"description": desc, "prompt": "Fais-le.",
+                "subagent_type": "general-purpose", "run_in_background": true});
+            self.pre_tool("Agent", &input, &tool_use_id);
+            let mut start = self.base("SubagentStart");
+            start["agent_id"] = json!(id);
+            start["agent_type"] = json!("general-purpose");
+            let mut post = self.with_mode("PostToolUse");
+            post["tool_name"] = json!("Agent");
+            post["tool_input"] = input.clone();
+            post["tool_use_id"] = json!(tool_use_id);
+            post["tool_response"] = json!({"isAsync": true, "status": "async_launched",
+                "agentId": id, "description": desc, "resolvedModel": "claude-opus-5-5",
+                "prompt": "Fais-le.", "canReadOutputFile": true});
+            // Les deux ordres existent (Q12).
+            if i == 0 {
+                self.hook("SubagentStart", start);
+                self.hook("PostToolUse", post);
+            } else {
+                self.hook("PostToolUse", post);
+                self.hook("SubagentStart", start);
+            }
+        }
+        let (a, b) = (agents[0].0.as_str(), agents[1].0.as_str());
+        self.agent_tool("PreToolUse", a, "Read", "toolu_sous_agent_1");
+        self.stop_with(&[(a, agents[0].1), (b, agents[1].1)]);
+        out("Deux sous-agents en arrière-plan (touche f pour les finir)\r\n");
+        while !matches!(keys.next(Duration::from_millis(10)), Some(Key::Char('f'))) {}
+        self.agent_tool("PostToolUse", a, "Read", "toolu_sous_agent_1");
+        let notification = |id: &str| {
+            format!(
+                "<task-notification>\n<task-id>{id}</task-id>\n<status>completed</status>\n\
+                 <summary>Agent terminé</summary>\n</task-notification>"
+            )
+        };
+        let sub_stop = |id: &str, report: &str| {
+            let mut ev = self.with_mode("SubagentStop");
+            ev["agent_id"] = json!(id);
+            ev["agent_type"] = json!("general-purpose");
+            ev["stop_hook_active"] = json!(false);
+            ev["agent_transcript_path"] = json!(format!("/tmp/faux/subagents/agent-{id}.jsonl"));
+            ev["last_assistant_message"] = json!(report);
+            // Liste encore l'agent qui s'arrête (Q12).
+            ev["background_tasks"] = json!([{"id": id, "type": "subagent", "status": "running"}]);
+            self.hook("SubagentStop", ev);
+        };
+        // Agent interne de Claude Code : `SubagentStop` sans `SubagentStart`.
+        let mut phantom = self.with_mode("SubagentStop");
+        phantom["agent_id"] = json!(format!("afaux{n}interne"));
+        phantom["agent_type"] = json!("");
+        phantom["background_tasks"] = json!([]);
+        self.hook("SubagentStop", phantom);
+        sub_stop(a, "# README\nPremière ligne : DevMaestro");
+        self.prompt_submit(&notification(a));
+        self.stop_with(&[(b, agents[1].1)]);
+        sub_stop(b, "44");
+        // Plus rien ne tourne, mais la notification de `b` doit suivre.
+        self.stop_with(&[]);
+        self.prompt_submit(&notification(b));
+        out("Les deux sous-agents ont fini.\r\n");
+        self.end_turn();
     }
 
     fn pre_tool(&self, tool: &str, input: &Value, tool_use_id: &str) {
@@ -1088,6 +1198,7 @@ fn main() {
                         out("pied retiré\r\n");
                     }
                     "/ask" => fake.ask(&mut keys, text),
+                    "/agents" => fake.agents(&mut keys, text),
                     t if t == "/perm" || t.starts_with("/perm ") => fake.perm(&mut keys, t),
                     "" => {}
                     t => fake.turn(&mut keys, t),

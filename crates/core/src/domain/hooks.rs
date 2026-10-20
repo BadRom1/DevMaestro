@@ -49,6 +49,27 @@ pub struct ToolCall {
     /// permissions que Claude Code propose pour cette demande (entrées
     /// `addRules`, `setMode`…), gardées brutes. Vide ailleurs ou si absent.
     pub permission_suggestions: Vec<Value>,
+    /// `tool_response` de `PostToolUse`, gardée brute (`Value::Null` si
+    /// absente). Pour l'outil `Agent`, elle porte `agentId`, `description`,
+    /// `resolvedModel` et `status` (prototype n° 1, Q12).
+    pub tool_response: Value,
+}
+
+/// Tâche de fond listée par `background_tasks` (`Stop`, `SubagentStop`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackgroundTask {
+    pub id: String,
+    /// `subagent` pour un sous-agent ; les autres types sont ignorés.
+    pub task_type: Option<String>,
+    /// `running`…
+    pub status: Option<String>,
+}
+
+impl BackgroundTask {
+    /// Sous-agent encore en cours ?
+    pub fn is_running_subagent(&self) -> bool {
+        self.task_type.as_deref() == Some("subagent") && self.status.as_deref() == Some("running")
+    }
 }
 
 /// Événement, avec ses champs propres.
@@ -81,7 +102,12 @@ pub enum HookKind {
         notification_type: Option<String>,
         message: Option<String>,
     },
-    Stop,
+    Stop {
+        /// `background_tasks` : tâches de fond encore listées par Claude Code
+        /// à la fin du tour. `None` si le champ est absent (version de Claude
+        /// Code qui ne l'envoie pas) : rien n'en est déduit.
+        background_tasks: Option<Vec<BackgroundTask>>,
+    },
     StopFailure,
     SessionEnd {
         /// `prompt_input_exit` pour `/exit` comme pour un double Ctrl+C.
@@ -91,9 +117,16 @@ pub enum HookKind {
         agent_id: Option<String>,
         agent_type: Option<String>,
     },
+    /// Fin d'un sous-agent. Son `background_tasks` n'est pas lu : il liste
+    /// encore l'agent qui s'arrête (prototype n° 1, Q12).
     SubagentStop {
         agent_id: Option<String>,
         agent_type: Option<String>,
+        /// `last_assistant_message` : le rapport du sous-agent (absent pour
+        /// certains agents internes de Claude Code).
+        last_assistant_message: Option<String>,
+        /// `agent_transcript_path` : transcript du sous-agent.
+        agent_transcript_path: Option<String>,
     },
     /// Événement que le domaine ne connaît pas (encore).
     Other {
@@ -125,7 +158,7 @@ impl HookKind {
             HookKind::PermissionRequest(_) => "PermissionRequest",
             HookKind::PermissionDenied { .. } => "PermissionDenied",
             HookKind::Notification { .. } => "Notification",
-            HookKind::Stop => "Stop",
+            HookKind::Stop { .. } => "Stop",
             HookKind::StopFailure => "StopFailure",
             HookKind::SessionEnd { .. } => "SessionEnd",
             HookKind::SubagentStart { .. } => "SubagentStart",
@@ -201,7 +234,9 @@ impl HookEvent {
                 notification_type: str_field(obj, "notification_type"),
                 message: str_field(obj, "message"),
             },
-            "Stop" => HookKind::Stop,
+            "Stop" => HookKind::Stop {
+                background_tasks: background_tasks(obj),
+            },
             "StopFailure" => HookKind::StopFailure,
             "SessionEnd" => HookKind::SessionEnd {
                 reason: str_field(obj, "reason"),
@@ -213,6 +248,8 @@ impl HookEvent {
             "SubagentStop" => HookKind::SubagentStop {
                 agent_id: str_field(obj, "agent_id"),
                 agent_type: str_field(obj, "agent_type"),
+                last_assistant_message: str_field(obj, "last_assistant_message"),
+                agent_transcript_path: str_field(obj, "agent_transcript_path"),
             },
             _ => HookKind::Other { name },
         };
@@ -222,6 +259,12 @@ impl HookEvent {
 
 fn str_field(obj: &Map<String, Value>, key: &str) -> Option<String> {
     obj.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// Champ texte `key` d'une valeur JSON brute (`tool_input`, `tool_response`) ;
+/// absent si la valeur n'est pas un objet ou si le champ n'est pas un texte.
+pub(crate) fn str_in(value: &Value, key: &str) -> Option<String> {
+    value.as_object().and_then(|o| str_field(o, key))
 }
 
 /// `model` est une chaîne dans `SessionStart` ; on accepte aussi un objet
@@ -244,7 +287,26 @@ fn tool_call(obj: &Map<String, Value>) -> Result<ToolCall, HookParseError> {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default(),
+        tool_response: obj.get("tool_response").cloned().unwrap_or(Value::Null),
     })
+}
+
+/// `background_tasks` : tableau d'objets ; une entrée sans `id` texte est
+/// ignorée, un champ qui n'est pas un tableau vaut absent.
+fn background_tasks(obj: &Map<String, Value>) -> Option<Vec<BackgroundTask>> {
+    let list = obj.get("background_tasks")?.as_array()?;
+    Some(
+        list.iter()
+            .filter_map(Value::as_object)
+            .filter_map(|t| {
+                Some(BackgroundTask {
+                    id: str_field(t, "id")?,
+                    task_type: str_field(t, "type"),
+                    status: str_field(t, "status"),
+                })
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -313,7 +375,12 @@ mod tests {
     #[test]
     fn event_name_falls_back_to_hint() {
         let ev = HookEvent::parse(&format!(r#"{{"session_id":"{SID}"}}"#), Some("Stop")).unwrap();
-        assert_eq!(ev.kind, HookKind::Stop);
+        assert_eq!(
+            ev.kind,
+            HookKind::Stop {
+                background_tasks: None
+            }
+        );
         // Le nom présent dans le JSON l'emporte sur l'indice.
         let ev = HookEvent::parse(
             &format!(r#"{{"session_id":"{SID}","hook_event_name":"StopFailure"}}"#),
@@ -445,5 +512,73 @@ mod tests {
             panic!("PostToolUse attendu");
         };
         assert_eq!(call.tool_input, Value::Null);
+    }
+    #[test]
+    fn parses_subagent_fields_tolerantly() {
+        let ev = HookEvent::parse(
+            &format!(
+                r#"{{"session_id":"{SID}","hook_event_name":"Stop","stop_hook_active":false,
+                "background_tasks":[{{"id":"a1","type":"subagent","status":"running",
+                "description":"Lire","agent_type":"general-purpose"}},{{"type":"subagent"}},3,
+                {{"id":"c1","type":"cron"}}],"session_crons":[]}}"#
+            ),
+            None,
+        )
+        .unwrap();
+        let HookKind::Stop {
+            background_tasks: Some(tasks),
+        } = ev.kind
+        else {
+            panic!("Stop avec background_tasks attendu");
+        };
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks[0].is_running_subagent());
+        assert_eq!(tasks[0].id, "a1");
+        assert!(!tasks[1].is_running_subagent());
+
+        let ev = HookEvent::parse(
+            &format!(r#"{{"session_id":"{SID}","hook_event_name":"Stop","background_tasks":"x"}}"#),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            ev.kind,
+            HookKind::Stop {
+                background_tasks: None
+            }
+        );
+
+        let ev = HookEvent::parse(
+            &format!(
+                r#"{{"session_id":"{SID}","hook_event_name":"SubagentStop","agent_id":"a1",
+                "agent_type":"general-purpose","agent_transcript_path":"/t/agent-a1.jsonl",
+                "last_assistant_message":"Fini.","background_tasks":[]}}"#
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            ev.kind,
+            HookKind::SubagentStop {
+                agent_id: Some("a1".into()),
+                agent_type: Some("general-purpose".into()),
+                last_assistant_message: Some("Fini.".into()),
+                agent_transcript_path: Some("/t/agent-a1.jsonl".into()),
+            }
+        );
+
+        let ev = HookEvent::parse(
+            &format!(
+                r#"{{"session_id":"{SID}","hook_event_name":"PostToolUse","tool_name":"Agent",
+                "tool_input":{{"description":"Lire"}},"tool_use_id":"toolu_1",
+                "tool_response":{{"agentId":"a1","status":"async_launched"}}}}"#
+            ),
+            None,
+        )
+        .unwrap();
+        let HookKind::PostToolUse(call) = ev.kind else {
+            panic!("PostToolUse attendu");
+        };
+        assert_eq!(call.tool_response["agentId"], "a1");
     }
 }

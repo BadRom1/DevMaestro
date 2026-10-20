@@ -449,6 +449,8 @@ impl Connection {
             }
             "transcripts.hide" => d.set_transcript_hidden(params, true)?,
             "transcripts.unhide" => d.set_transcript_hidden(params, false)?,
+            "sessions.subagents" => d.subagents_list(params)?,
+            "sessions.subagent" => d.subagent_detail(params)?,
             "sessions.answerPermission" => d.answer_permission(params)?,
             "sessions.answerQuestion" => d.answer_question(params)?,
             "transcripts.list" => {
@@ -631,6 +633,13 @@ fn queue_event(daemon: &Daemon, queue: &mut VecDeque<Event>, ev: Event) {
     {
         return;
     }
+    if let Event::SubagentsChanged(id) = &ev
+        && queue
+            .iter()
+            .any(|e| matches!(e, Event::SubagentsChanged(other) if other == id))
+    {
+        return; // Regroupé : la liste est relue au moment d'envoyer.
+    }
     if let Event::Updated(id) = &ev
         && queue
             .iter()
@@ -656,6 +665,12 @@ fn resync_events(daemon: &Daemon, queue: &mut VecDeque<Event>) {
     queue.extend(ids.iter().copied().map(Event::Updated));
     // Un client en retard a pu manquer des changements de diff.
     queue.extend(ids.into_iter().map(Event::DiffChanged));
+    queue.extend(
+        daemon
+            .sessions_with_subagents()
+            .into_iter()
+            .map(Event::SubagentsChanged),
+    );
     queue.push_back(Event::Quotas);
 }
 
@@ -671,6 +686,9 @@ fn event_frame(daemon: &Daemon, ev: Event) -> Option<Frame> {
         Event::Removed(id) => notification("session.removed", json!({"id": id})),
         Event::Quotas => notification("quotas.updated", daemon.quotas_json()),
         Event::DiffChanged(id) => notification("session.diff_changed", json!({"id": id})),
+        Event::SubagentsChanged(id) => {
+            notification("session.subagents_changed", daemon.subagents_json(&id)?)
+        }
     };
     Some(Frame::rpc(&value))
 }

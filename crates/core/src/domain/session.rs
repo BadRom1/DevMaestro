@@ -10,6 +10,7 @@ use super::hooks::{HookEvent, HookKind};
 use super::metrics::{Metrics, ModelInfo};
 use super::state::{Applied, Effect, SessionState, apply_tracked};
 use super::statusline::Statusline;
+use super::subagents::is_task_notification;
 use super::transcript::{PROMPT_PREVIEW_CHARS, display_label, short_id, truncate_chars};
 
 /// Une session : un processus `claude` lancé ou repris par l'app.
@@ -168,7 +169,10 @@ impl Session {
         if let HookKind::UserPromptSubmit {
             prompt: Some(prompt),
         } = &event.kind
+            && !is_task_notification(prompt)
         {
+            // Une `<task-notification>` est injectée par Claude Code : ce
+            // n'est pas un prompt de l'utilisateur.
             self.note_prompt(prompt);
         }
         if let HookKind::SessionStart { model, .. } = &event.kind {

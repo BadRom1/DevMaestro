@@ -1,6 +1,6 @@
 import { useCallback, useId, useState, type ReactNode } from 'react'
 
-import type { Profile, ProjectInfo, Session } from '../../../shared/protocol'
+import type { Profile, ProjectInfo, Session, Subagent } from '../../../shared/protocol'
 import { errorText } from '../api'
 import { PAST_SECTION, browserStorage, loadCollapsed, saveCollapsed, toggleCollapsed } from '../state/collapse'
 import {
@@ -20,6 +20,10 @@ import { PathLabel, ProfileBadge, StatusGlyph } from './common'
 import { useSettings } from '../settings'
 import { ForgetConfirm, HideConfirm } from './ForgetConfirm'
 import { ColorBar } from './SessionIdentity'
+import { SidebarAgents } from './Subagents'
+
+/** Aucun sous-agent (référence stable). */
+const NO_AGENTS: readonly Subagent[] = []
 
 /** Groupes et sections repliés, retenus dans `localStorage`. */
 function useCollapsed() {
@@ -89,6 +93,10 @@ export function Sidebar(props: {
   onResumePast: (p: PastEntry) => Promise<void>
   onForget: (id: string) => Promise<void>
   onHidePast: (p: PastEntry) => Promise<void>
+  /** Sous-agents connus, par session. */
+  subagents: Record<string, Subagent[]>
+  /** Ouvre l'onglet « Agents » de la session (sur cet agent, ou sans choix). */
+  onOpenAgent: (sessionId: string, agentId: string | null) => void
 }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -132,6 +140,7 @@ export function Sidebar(props: {
     const missing = folderMissing(s, props.projects[s.cwd])
     return (
       <li key={s.id} className="srow-wrap">
+        <div className="srow-line">
         <button
           className="srow"
           aria-current={s.id === props.selectedId}
@@ -174,6 +183,14 @@ export function Sidebar(props: {
             ×
           </button>
         )}
+        </div>
+        <SidebarAgents
+          session={s}
+          agents={props.subagents[s.id] ?? NO_AGENTS}
+          open={!isCollapsed(`agents:${s.id}`)}
+          onToggle={() => toggle(`agents:${s.id}`)}
+          onOpen={(agentId) => props.onOpenAgent(s.id, agentId)}
+        />
         {confirm === s.id && (
           <ForgetConfirm
             name={name}

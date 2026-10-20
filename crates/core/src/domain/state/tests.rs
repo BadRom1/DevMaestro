@@ -28,7 +28,14 @@ fn call(tool: &str, input: Value, id: Option<&str>) -> ToolCall {
         tool_input: input,
         tool_use_id: id.map(str::to_owned),
         permission_suggestions: Vec::new(),
+        tool_response: Value::Null,
     }
+}
+
+fn stop() -> HookEvent {
+    ev(HookKind::Stop {
+        background_tasks: None,
+    })
 }
 
 fn pre(tool: &str, input: Value, id: &str) -> HookEvent {
@@ -302,6 +309,8 @@ fn subagent_question_stays_on_parent_session() {
             &ev(HookKind::SubagentStop {
                 agent_id: Some("agent-1".into()),
                 agent_type: None,
+                last_assistant_message: None,
+                agent_transcript_path: None,
             }),
             t(3),
         )
@@ -317,7 +326,7 @@ fn turn_end_clears_every_request() {
             ev(HookKind::UserPromptSubmit { prompt: None }),
             SessionStatus::Running,
         ),
-        (ev(HookKind::Stop), SessionStatus::Idle),
+        (stop(), SessionStatus::Idle),
         (ev(HookKind::StopFailure), SessionStatus::Error),
     ] {
         let mut s = running();
@@ -367,7 +376,7 @@ fn undetailed_wait_ends_with_next_tool_event() {
 fn late_notifications_are_ignored() {
     // Depuis Idle (après Stop) : ignorée.
     let mut s = running();
-    apply(&mut s, &ev(HookKind::Stop), t(1));
+    apply(&mut s, &stop(), t(1));
     assert!(apply(&mut s, &notif("permission_prompt"), t(2)).is_empty());
     assert_eq!(s.status(), SessionStatus::Idle);
 
@@ -432,7 +441,7 @@ fn idle_prompt_does_not_hide_an_error() {
 fn stop_without_prior_events() {
     let mut s = SessionState::default();
     assert_eq!(s.status(), SessionStatus::Starting);
-    assert!(apply(&mut s, &ev(HookKind::Stop), t(1)).is_empty());
+    assert!(apply(&mut s, &stop(), t(1)).is_empty());
     assert_eq!(s.status(), SessionStatus::Idle);
 }
 
@@ -453,7 +462,7 @@ fn stopped_is_left_only_by_session_start() {
     for e in [
         ev(HookKind::UserPromptSubmit { prompt: None }),
         notif("permission_prompt"),
-        ev(HookKind::Stop),
+        stop(),
     ] {
         assert!(apply(&mut s, &e, t(2)).is_empty());
         assert_eq!(s.status(), stopped);
@@ -489,7 +498,7 @@ fn compact_session_start_keeps_status() {
 #[test]
 fn permission_mode_kept_when_absent() {
     let mut s = running();
-    let mut e = ev(HookKind::Stop);
+    let mut e = stop();
     e.common.permission_mode = Some(PermissionMode::Auto);
     apply(&mut s, &e, t(1));
     apply(&mut s, &notif("idle_prompt"), t(61));

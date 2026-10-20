@@ -84,6 +84,7 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `-32015` | `sessions.resume` impossible : Claude Code n'a pas de transcript pour cette session (message : « Claude Code n'a pas de transcript pour cette session : impossible de la reprendre ») |
 | `-32016` | `sessions.resume` impossible : le dossier de travail n'existe plus (message : « Le dossier de la session n'existe plus (worktree supprimé ?) : <cwd> ») ; aussi `sessions.diff`, `sessions.diffFile`, `sessions.sendReview` |
 | `-32017` | diff impossible : « la session n'est pas dans un dépôt git » |
+| `-32018` | sous-agent inconnu dans cette session (`sessions.subagent`) |
 
 ## 4. Méthodes
 
@@ -115,6 +116,8 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `sessions.sendReview` | `{id, comments: [{path, line, side, text}], general?}` | `{sent: true}` |
 | `files.list` | `{id, path?}` | `{root, path, entries, truncated}` (voir « Fichiers d'une session ») |
 | `files.read` | `{id, path}` | `{path, size, binary, too_large, content}` |
+| `sessions.subagents` | `{id}` | `{agents: [Sous-agent]}`, ordre de lancement, **sans** `report` (voir « Sous-agents ») |
+| `sessions.subagent` | `{id, agent_id}` | `Sous-agent` **avec** `report` |
 
 Détails :
 
@@ -268,6 +271,21 @@ Le démon calcule le diff du worktree de la session par la CLI `git` (arguments 
 - Un fichier ignoré par `.gitignore` reste lisible par son chemin (seule la liste le masque).
 - « Mentionner à Claude » : le front tape `@<path> ` par `sessions.input` (sans Entrée).
 
+### Sous-agents d'une session (v0.2, lot 5)
+
+Les agents que Claude lance avec l'outil `Agent` sont suivis par leurs hooks (`SubagentStart`, `SubagentStop`, et `agent_id` des hooks lancés dans un sous-agent ; prototype n° 1, Q12). Le contrat de construction est dans `docs/v0.2.md` (« Contrat du lot 5 ») ; règles de statut de la session dans l'en-tête de `domain/state.rs`.
+
+- **`sessions.subagents {id}`** → `{agents: [Sous-agent]}` : tous les sous-agents connus de la session (au plus 100, les plus anciens finis oubliés d'abord), dans l'ordre de lancement, sans le champ `report`. Marche pour une session arrêtée. Erreurs : `-32602` (`id` absent ou invalide), `-32001` (session inconnue).
+- **`sessions.subagent {id, agent_id}`** → l'objet `Sous-agent` avec `report`. Erreurs : `-32602` (`agent_id` absent, vide ou pas un texte), `-32001`, `-32018` (sous-agent inconnu dans cette session).
+- **`session.subagents_changed {id, agents}`** (§ 5) : la liste complète, sans `report`, envoyée à tous les clients à chaque création d'un sous-agent ou changement de son statut ou de ses champs (description, modèle, rapport…), et **au plus une fois toutes les 500 ms** par session quand seuls les compteurs d'outils changent (`tool_count`, `current_tool`, `last_tool` ; la liste envoyée est relue au moment de l'envoi). Un client en retard (resynchronisation) en reçoit une par session qui a des sous-agents.
+- **`Session.subagents_running`** / **`Session.subagents_total`** : nombre de sous-agents en cours / connus (dans chaque `session.updated`).
+- **Statut de la session** : tant qu'un sous-agent tourne, ou qu'un sous-agent fini en arrière-plan attend encore sa `task-notification`, un `Stop` (ou une `Notification` `idle_prompt`) laisse la session `running` : elle ne passe `idle` (et la notification « terminé » ne part) qu'au `Stop` suivant sans rien en cours ni en attente. Le prompt `<task-notification>…` que Claude Code injecte à la fin d'un sous-agent n'est pas un prompt de l'utilisateur (`first_prompt` inchangé, demandes en attente gardées) ; la session repasse `running`. Un même prompt peut porter plusieurs notifications : toutes sont lues ; une notification arrivée avant que son agent soit connu est gardée (64 au plus) et appliquée à sa création. L'attente est bornée : un vrai prompt de l'utilisateur la lève, et elle expire **5 min** après la fin de l'agent (réévalué à chaque hook et toutes les 5 s par le démon : la session passe alors `idle`). Même règle de retenue pour `SessionStart` (`/clear`) et pour Échap (`PostToolUseFailure` avec `is_interrupt`) : les sous-agents en arrière-plan continuent (Q12).
+- Un `SubagentStart` d'un agent déjà connu et fini (agent repris) le remet `running` (`ended_at: null`) : sa nouvelle fin et sa nouvelle notification sont attendues.
+- **Reprise** (`sessions.resume`) : les sous-agents de la session sont gardés (ceux qui tournaient sont déjà `interrupted`), les nouveaux suivent dans l'ordre de lancement ; un `session.subagents_changed` est envoyé.
+- Les hooks d'un sous-agent (portant `agent_id`) ne changent pas le statut de la session. Une demande de permission ou une question venue d'un sous-agent porte son `agent_id` (`pending[].agent_id`) et survit à la fin du tour principal tant que ce sous-agent tourne. Le rapprochement d'une demande avec son `PreToolUse` et avec l'événement qui la clôt se fait **à agent égal** (`agent_id`, ou aucun pour la conversation principale) : deux sous-agents qui lancent le même outil avec la même entrée ne se volent pas leurs demandes.
+- `agent_type`, `description`, `model`, `current_tool`, `last_tool` et `transcript_path` sont coupés à 500 caractères ; `subagent_type` absent de l'outil `Agent` vaut `general-purpose`.
+- `description`, `report`, `agent_type`, `current_tool`… viennent de Claude : ce sont des **données**, transmises telles quelles, jamais interprétées par le démon ; le front affiche le rapport avec le même rendu Markdown sûr que l'onglet Fichiers.
+
 ### Changer de mode (`sessions.setMode`)
 
 **Contournement** : Claude Code n'a pas d'API pour changer le mode d'une session en cours. Le démon écrit dans le PTY autant de Shift+Tab (`ESC [ Z`) qu'il en faut pour aller du mode courant connu (champ `mode` de la session : dernier `permission_mode` reçu dans un hook, ou dernier mode lu dans le pied de la TUI, voir plus bas) au mode visé, le long du cycle relevé avec **Claude Code 2.1.303** (prototype n° 1, Q9) : `default` (`manual`) → `acceptEdits` → `plan` → `auto` → `default`.
@@ -306,6 +324,7 @@ Le démon calcule le diff du worktree de la session par la CLI `git` (arguments 
 | `quotas.updated` | `{profiles: {"<profil>": Quotas}}` | les quotas d'un profil ont changé (même forme que `quotas.get`) |
 | `session.diff_changed` | `{id}` | la liste des fichiers changés ou leurs compteurs ont changé : relire `sessions.diff` (et le fichier affiché) |
 | `session.removed` | `{id}` | la session a été oubliée (`sessions.forget`) : elle n'existe plus ; aucun `session.updated` ne suit pour elle |
+| `session.subagents_changed` | `{id, agents: [Sous-agent sans report]}` | un sous-agent a été créé ou a changé de statut (ou d'un autre champ) ; compteurs d'outils : au plus une fois toutes les 500 ms par session (§ 4, « Sous-agents ») |
 
 Pour un client lent, les `session.updated` en attente d'une même session sont **regroupés** : il reçoit l'état le plus récent au moment de l'envoi, pas chaque étape. Les `session.effect` ne sont pas regroupés ; si plus de 4 096 événements attendent (ou si le client a pris trop de retard sur le démon), la file est remplacée par un `session.removed` pour chacune des dernières sessions oubliées (jusqu'à 1 024, éventuellement déjà connues du client : à ignorer si l'`id` est inconnu) puis un `session.updated` par session, et les effets en trop sont perdus. Le dernier `session.updated` reçu fait toujours foi.
 
@@ -371,6 +390,7 @@ Règles :
   "pending": [{"request_id": 1, "answerable": true, "pending": Demande,
                "tool_use_id": "toolu_…", "agent_id": null, "since": "RFC 3339"}],
   "possibly_stale": false,
+  "subagents_running": 1, "subagents_total": 3,   // sous-agents en cours / connus (§ 4)
   "metrics": {"model": {"id": "…", "display_name": "…"}, "cost_usd": 0.22,
               "context_used_pct": 3, "context_window_size": 1000000, "total_tokens": 26720,
               "rate_limits": {"five_hour": {"used_pct": 2, "resets_at": "RFC 3339"}, "seven_day": null},
@@ -413,6 +433,28 @@ Un processus sorti avec un code non nul ou tué par un signal inattendu, sans `S
 `answerable` (dans `pending`) : un relais `PermissionRequest` attend la décision ; l'app peut répondre.
 
 `always_rules` : les `suggestions` de type `addRules`, de comportement `allow`, vers `session`, `localSettings` (`.claude/settings.local.json`) ou `projectSettings` (`.claude/settings.json`). Les autres sont écartées : changement de mode (« Toujours » ne fait jamais passer en `acceptEdits` ou `auto`), dossiers, règles `deny`/`ask`, et `userSettings` (`~/.claude/settings.json` : « Toujours pour ce projet » ne touche pas à la configuration de l'utilisateur). Exemple d'entrée : `{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm test"}], "behavior": "allow", "destination": "localSettings"}`.
+
+### Sous-agent
+
+```json
+{
+  "agent_id": "aa98c9444728c5039",
+  "agent_type": "general-purpose" | null,
+  "description": "Première ligne README.md" | null,   // null si le rattachement au lancement est ambigu
+  "model": "claude-opus-5-5" | null,                 // resolvedModel
+  "tool_use_id": "toolu_…" | null,                   // appel à l'outil Agent
+  "status": "running" | "done" | "failed" | "interrupted",
+  "started_at": "RFC 3339", "ended_at": "RFC 3339" | null,
+  "tool_count": 3, "current_tool": "Bash" | null, "last_tool": "Bash" | null,
+  "report": "…" | null,              // seulement dans sessions.subagent
+  "report_truncated": false,         // rapport coupé à 64 Kio
+  "transcript_path": "…/subagents/agent-aa98c9444728c5039.jsonl" | null   // gardé, pas lu
+}
+```
+
+- `done` : `SubagentStop` reçu ; `failed` : `task-notification` de statut `failed` (ou échec de l'outil `Agent`) ; `interrupted` : fin de la session (ou du processus, ou du démon) pendant qu'il tournait, `task-notification` `killed`, ou `Stop` dont `background_tasks` ne le liste plus sans `SubagentStop`. Un `SubagentStop` arrivé ensuite le fait passer `done`.
+- `report` : `last_assistant_message` du `SubagentStop`, coupé à 64 Kio (sur une limite de caractère) avec `report_truncated: true`. C'est un texte de Claude, à afficher comme une donnée.
+- Les `SubagentStop` d'agents internes de Claude Code (sans `SubagentStart`, `agent_type` vide) sont ignorés.
 
 ### Profil, ancienne session
 
@@ -472,8 +514,11 @@ Toute autre variable `ORCH_*` ou `DEVMAESTRO_*` héritée du démon est retirée
 | `CLAUDE_CODE_SIMPLE` | réglage documenté (mode dépouillé) qui risque de désactiver les hooks et le plugin dont dépend le suivi |
 | préfixes `CLAUDE_CODE_SESSION_*`, `CLAUDE_CODE_PARENT_*` | identifiant et état de la session parente (`CLAUDE_CODE_SESSION_ID`, `…_ATTENDED`…) |
 | préfixe `CLAUDE_CODE_SDK_*` | posées par un hôte Agent SDK (app de bureau…) pour son processus (rafraîchissement de l'authentification par l'hôte…) |
+| préfixes `CLAUDE_AGENT_SDK_*`, `CLAUDE_CODE_DESKTOP_*`, `CLAUDE_PREVIEW_*` | posées par l'app de bureau Claude (Claude Desktop) et son Agent SDK pour **leur** session : version du SDK et de l'app, nommage des outils MCP, réglages de préversion (relevé en vrai : app DevMaestro lancée depuis une session Claude Desktop) |
+| `CLAUDE_CODE_ACCOUNT_UUID`, `CLAUDE_CODE_ORGANIZATION_UUID`, `CLAUDE_CODE_USER_EMAIL`, `CLAUDE_CODE_OAUTH_SCOPES` | compte et organisation de l'hôte Claude Desktop : ils pourraient contredire le profil (le profil est la seule source de compte) |
+| `CLAUDE_CODE_DISABLE_CRON`, `CLAUDE_CODE_DISABLE_TERMINAL_TITLE`, `CLAUDE_CODE_EAGER_FLUSH`, `CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES`, `CLAUDE_CODE_ENABLE_ASK_USER_QUESTION_TOOL`, `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `CLAUDE_CODE_REPORT_FINDINGS`, `CLAUDE_CODE_STARTUP_FAILURE_RESULTS`, `CLAUDE_CODE_TERMINAL_MCP_TOOLS` | réglages de comportement posés par l'hôte Claude Desktop pour sa session, pas par l'utilisateur |
 
-Les préfixes gardent leur `_` final : `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` est un réglage. Les variables de **configuration** documentées sont transmises telles quelles (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `ANTHROPIC_*`, mandataires `HTTP(S)_PROXY`, clés d'API…). Le `claude` lancé pose ensuite ses propres marqueurs pour ses hooks et sa statusline (dont nos relais), comme d'habitude.
+Les préfixes gardent leur `_` final : `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` est un réglage. Les autres `CLAUDE_CODE_*` (réglages que l'utilisateur peut poser dans son shell) sont gardés. Les variables de **configuration** documentées sont transmises telles quelles (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `ANTHROPIC_*`, mandataires `HTTP(S)_PROXY`, clés d'API…). Le `claude` lancé pose ensuite ses propres marqueurs pour ses hooks et sa statusline (dont nos relais), comme d'habitude.
 
 Le démon rattache une trame à sa session **par le jeton** (comparé en temps constant), jamais par le `session_id` du JSON (qui change sur `/clear`). Jeton inconnu (session terminée, faux jeton) : trame ignorée.
 
@@ -482,7 +527,7 @@ Le démon rattache une trame à sa session **par le jeton** (comparé en temps c
   1. envoie la trame `0x10` et garde la connexion ouverte ;
   2. le démon applique l'événement, puis rattache le relais à la demande créée ou retrouvée (même demande déjà connue : il s'y ajoute) ; la demande passe `answerable: true` ;
   3. réponse de l'app → trame `0x13` : le relais écrit ce JSON (suivi d'un saut de ligne) sur sa sortie standard, puis sort en 0. Forme : `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow" | "deny", …}}}` (§ 4) ;
-  4. libération **sans décision** → trame `0x12`, rien n'est écrit, sortie en 0 : demande close par un autre chemin (`PostToolUse` après une réponse dans la TUI, `PostToolUseFailure`, `PermissionDenied`, `Stop`, `StopFailure`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`), processus `claude` terminé, session arrêtée, arrêt du démon (les relais sont libérés dès le début de l'arrêt), ou trame que le démon ne peut rattacher (jeton inconnu, JSON illisible, session arrêtée) ;
+  4. libération **sans décision** → trame `0x12`, rien n'est écrit, sortie en 0 : demande close par un autre chemin (`PostToolUse` après une réponse dans la TUI, `PostToolUseFailure`, `PermissionDenied`, `Stop`, `StopFailure`, `UserPromptSubmit`, `SessionStart`, `SessionEnd` ; une demande d'un sous-agent qui tourne encore survit à `Stop`, `StopFailure` et `UserPromptSubmit`), processus `claude` terminé, session arrêtée, arrêt du démon (les relais sont libérés dès le début de l'arrêt), ou trame que le démon ne peut rattacher (jeton inconnu, JSON illisible, session arrêtée) ;
   5. délai `--wait` dépassé ou démon disparu (fin de connexion) : rien n'est écrit, sortie en 0. Le démon voit la connexion se fermer et détache le relais (`answerable: false`) ; la demande reste affichée (la TUI la montre toujours).
 
   Le relais n'autorise **jamais** rien de lui-même. Le `timeout` du hook est écrit dans `hooks.json` (600 s, le défaut de Claude Code) et `--wait` vaut ce délai moins une marge (5 s ; un quart du délai, au moins 1 s, pour un délai court) : le relais rend la main avant que Claude Code ne le tue. La variable `DEVMAESTRO_PERMISSION_TIMEOUT_SECS` du **démon** (2 à 3600) change ce délai, pour les tests ; elle n'est jamais transmise à `claude`.
@@ -498,7 +543,7 @@ Fichiers générés (au démarrage du démon et avant chaque lancement) :
 - **Scope systemd** : si `systemd-run --user --scope` fonctionne au démarrage du démon (gestionnaire systemd utilisateur joignable ; désactivable par `DEVMAESTRO_SYSTEMD_SCOPE=off`), chaque lancement devient `systemd-run --user --scope --quiet --collect --unit=devmaestro-session-<id8>-<alea8>.scope -- claude …` : `systemd-run` s'inscrit dans le scope puis exécute `claude` à sa place (même pid, même PTY, même environnement et dossier). Sinon, lancement direct. Le mode est écrit au journal au démarrage et dans `Session.scope`. Pour les tests seulement, `DEVMAESTRO_SYSTEMD_RUNTIME_DIR` donne à `systemd-run` le vrai `XDG_RUNTIME_DIR` quand celui du démon est temporaire.
 - Lancement : `claude (--session-id <uuid> | --resume <id>) [--permission-mode <mode>] [--model <m>] --plugin-dir <plugin> --settings <réglages du profil> [-- "<prompt>"]` dans un PTY, `cwd` = le dossier demandé, avec `TERM=xterm-256color`, `COLORTERM=truecolor`, les variables du § 8 (marqueurs de session Claude Code hérités retirés), et `CLAUDE_CONFIG_DIR` pour les profils autres que `default` (retiré de l'environnement hérité pour `default`). Le mode `default` s'écrit `manual` sur la ligne de commande. Le binaire vient de `DEVMAESTRO_CLAUDE_BIN`, sinon du `PATH` du démon. Le prompt suit `--` (fin des options façon commander.js, d'après `claude --help`) : un prompt comme `--dangerously-skip-permissions` ou `- liste` n'est pas lu comme une option. **À vérifier avec le vrai CLI** : que `--` est accepté et qu'un prompt égal au nom d'une sous-commande (`mcp`, `update`…) n'est pas lancé comme telle.
 - À la fin du processus `claude`, son groupe de processus reçoit `SIGHUP` (outils restés en arrière-plan), comme à la fermeture d'un terminal.
-- Les sessions sont enregistrées dans `$XDG_DATA_HOME/devmaestro/state.db` (SQLite, WAL, `synchronous=NORMAL`) : identifiants, profil, dossiers, branche, modèle, mode, statut, dates, pid, (schéma v2) date de démarrage du processus et scope systemd, (schéma v3) titre, couleur, premier prompt et dernier `session_name` de la statusline, et (schéma v4) la table `hidden_transcripts (profile, claude_session_id, hidden_at)` des transcripts masqués. Au redémarrage après un plantage, les processus `claude` relus dont des processus vivent encore (eux-mêmes, ou d'autres dans leur groupe ou leur session) restent refusés au socket de contrôle (§ 10). Écriture à chaque changement de statut ou de champ ; une session qui ne change que par sa dernière activité est réécrite au plus toutes les 30 s. Le schéma est versionné (`PRAGMA user_version`, migrations pas à pas) : une base d'une version plus récente est refusée (le démon ne démarre pas, message en français) ; une base illisible ou corrompue est renommée `state.db.corrupt-<horodatage>` et remplacée par une base vide (avertissement au journal).
+- Les sessions sont enregistrées dans `$XDG_DATA_HOME/devmaestro/state.db` (SQLite, WAL, `synchronous=NORMAL`) : identifiants, profil, dossiers, branche, modèle, mode, statut, dates, pid, (schéma v2) date de démarrage du processus et scope systemd, (schéma v3) titre, couleur, premier prompt et dernier `session_name` de la statusline, (schéma v4) la table `hidden_transcripts (profile, claude_session_id, hidden_at)` des transcripts masqués, et (schéma v5) la table `subagents` (clé `(session, agent_id)`, ordre de lancement `seq`, champs de l'objet `Sous-agent` dont le rapport) : au plus les **100** derniers par session, écrits à chaque création ou changement de statut ou de champ ; les **compteurs d'outils** (`tool_count`, `current_tool`, `last_tool`) ne sont écrits qu'avec ces changements (après un plantage du démon, ils peuvent donc être en retard). Le plafond suit la même règle en mémoire et en base : les plus anciens finis partent d'abord, jamais un `running` ; un sous-agent oublié en mémoire est retiré de la base. Supprimés avec la session (`sessions.forget`). Au démarrage du démon, les sous-agents restés `running` sont relus `interrupted`, avec `ended_at` = dernière activité de la session (ou l'instant de la relecture). Au redémarrage après un plantage, les processus `claude` relus dont des processus vivent encore (eux-mêmes, ou d'autres dans leur groupe ou leur session) restent refusés au socket de contrôle (§ 10). Écriture à chaque changement de statut ou de champ ; une session qui ne change que par sa dernière activité est réécrite au plus toutes les 30 s. Le schéma est versionné (`PRAGMA user_version`, migrations pas à pas) : une base d'une version plus récente est refusée (le démon ne démarre pas, message en français) ; une base illisible ou corrompue est renommée `state.db.corrupt-<horodatage>` et remplacée par une base vide (avertissement au journal).
 - Droits : dossiers `$XDG_RUNTIME_DIR/devmaestro`, `$XDG_DATA_HOME/devmaestro` et `$XDG_STATE_HOME/devmaestro` en 0700 (refusés s'ils sont un lien symbolique ou appartiennent à un autre utilisateur), base, journal, plugin et réglages en 0600.
 - **Arrêter le démon termine les sessions** : `SIGTERM`, `SIGINT` ou `SIGHUP` → `SIGHUP` à chaque session (le socket reste ouvert pour recevoir les `SessionEnd`), `SIGKILL` au bout de 3 s, puis fin. Un second signal pendant cet arrêt envoie `SIGKILL` à toutes les sessions et sort aussitôt. Les sessions restent reprenables. Après un plantage du démon, les sessions qui étaient en démarrage, en cours, à répondre ou inactives sont relues arrêtées (`daemon_restart`) ; celles déjà arrêtées ou en erreur sont relues telles quelles (statut et date inchangés).
 - Journal : sortie d'erreur et `$XDG_STATE_HOME/devmaestro/orchd.log`.

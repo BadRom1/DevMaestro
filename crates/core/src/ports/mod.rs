@@ -14,7 +14,7 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::domain::{PastSession, Profile, QuotaReading};
+use crate::domain::{PastSession, Profile, QuotaReading, Subagent};
 
 /// Source de l'heure courante (remplaçable dans les tests).
 pub trait Clock {
@@ -249,8 +249,19 @@ pub trait SessionStore: Send {
     fn upsert(&self, record: &SessionRecord) -> io::Result<()>;
     /// Toutes les sessions, de la plus récente à la plus ancienne (`updated_at`).
     fn load_all(&self) -> io::Result<Vec<SessionRecord>>;
-    /// Retire une session (`sessions.forget`) ; absente : rien à faire.
+    /// Retire une session (`sessions.forget`) et ses sous-agents ; absente :
+    /// rien à faire.
     fn delete(&self, id: &Uuid) -> io::Result<()>;
+    /// Écrit (ou remplace) ces sous-agents de la session `session`, puis
+    /// ramène la session à [`crate::domain::subagents::MAX_SUBAGENTS`]
+    /// sous-agents en base avec la même règle qu'en mémoire : les plus anciens
+    /// finis d'abord (ordre de lancement), jamais un `running`.
+    /// `background`, `notified` et `guessed_link` ne sont pas gardés.
+    fn upsert_subagents(&self, session: &Uuid, agents: &[Subagent]) -> io::Result<()>;
+    /// Sous-agents d'une session, dans l'ordre de lancement.
+    fn load_subagents(&self, session: &Uuid) -> io::Result<Vec<Subagent>>;
+    /// Retire ces sous-agents de la session (oubliés en mémoire : plafond).
+    fn delete_subagents(&self, session: &Uuid, agent_ids: &[String]) -> io::Result<()>;
     /// Masque un transcript de `transcripts.list` (déjà masqué : rien à faire).
     fn hide_transcript(
         &self,

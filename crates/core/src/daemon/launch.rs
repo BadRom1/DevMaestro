@@ -71,7 +71,19 @@ use crate::protocol::{ENV_SESSION, ENV_SOCKET, ENV_TOKEN};
 ///   sessions au compte de l'hôte, quel que soit le profil choisi
 ///   (`CLAUDE_CONFIG_DIR`) : les profils sont la seule source de compte ;
 /// - `CLAUDE_CODE_SIMPLE` : réglage documenté (mode dépouillé), qui risque de
-///   désactiver les hooks et le plugin dont dépend le suivi des sessions.
+///   désactiver les hooks et le plugin dont dépend le suivi des sessions ;
+/// - variables posées par l'app de bureau Claude (Claude Desktop) pour **sa**
+///   session, relevées en vrai quand l'app DevMaestro est lancée depuis une
+///   session Claude Desktop : compte et organisation de l'hôte
+///   (`CLAUDE_CODE_ACCOUNT_UUID`, `CLAUDE_CODE_ORGANIZATION_UUID`,
+///   `CLAUDE_CODE_USER_EMAIL`, `CLAUDE_CODE_OAUTH_SCOPES`), qui peuvent
+///   contredire le profil, et réglages de comportement propres à cet hôte
+///   (`CLAUDE_CODE_DISABLE_CRON`, `CLAUDE_CODE_DISABLE_TERMINAL_TITLE`,
+///   `CLAUDE_CODE_EAGER_FLUSH`, `CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES`,
+///   `CLAUDE_CODE_ENABLE_ASK_USER_QUESTION_TOOL`,
+///   `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`,
+///   `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `CLAUDE_CODE_REPORT_FINDINGS`,
+///   `CLAUDE_CODE_STARTUP_FAILURE_RESULTS`, `CLAUDE_CODE_TERMINAL_MCP_TOOLS`).
 ///
 /// Les variables de **configuration** documentées (`CLAUDE_CODE_USE_BEDROCK`,
 /// `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `ANTHROPIC_*`, mandataires, clés d'API,
@@ -97,19 +109,40 @@ pub const CLAUDE_SESSION_MARKERS: &[&str] = &[
     "CLAUDE_CODE_OAUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
     "CLAUDE_CODE_SIMPLE",
+    "CLAUDE_CODE_ACCOUNT_UUID",
+    "CLAUDE_CODE_ORGANIZATION_UUID",
+    "CLAUDE_CODE_USER_EMAIL",
+    "CLAUDE_CODE_OAUTH_SCOPES",
+    "CLAUDE_CODE_DISABLE_CRON",
+    "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+    "CLAUDE_CODE_EAGER_FLUSH",
+    "CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES",
+    "CLAUDE_CODE_ENABLE_ASK_USER_QUESTION_TOOL",
+    "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+    "CLAUDE_CODE_REPORT_FINDINGS",
+    "CLAUDE_CODE_STARTUP_FAILURE_RESULTS",
+    "CLAUDE_CODE_TERMINAL_MCP_TOOLS",
 ];
 
 /// Préfixes des marqueurs de session Claude Code (voir
 /// [`CLAUDE_SESSION_MARKERS`]) : `CLAUDE_CODE_SESSION_*` (identifiant de la
 /// session parente, `…_ATTENDED`…), `CLAUDE_CODE_PARENT_*`, et
-/// `CLAUDE_CODE_SDK_*` (posées par un hôte Agent SDK, comme l'app de bureau,
-/// pour **son** processus : rafraîchissement de l'authentification par
-/// l'hôte, lecture de l'état de session…). Toujours avec le `_` final :
-/// `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` est un réglage, gardé.
+/// `CLAUDE_CODE_SDK_*` et `CLAUDE_AGENT_SDK_*` (posées par un hôte Agent SDK,
+/// comme l'app de bureau, pour **son** processus : rafraîchissement de
+/// l'authentification par l'hôte, version du SDK, nommage des outils MCP…),
+/// `CLAUDE_CODE_DESKTOP_*` (version de l'app de bureau hôte) et
+/// `CLAUDE_PREVIEW_*` (réglages de préversion de l'hôte). Toujours avec le
+/// `_` final : `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` est un réglage,
+/// gardé. Les autres `CLAUDE_CODE_*` sont des réglages que l'utilisateur peut
+/// poser dans son shell : gardés.
 pub const CLAUDE_SESSION_MARKER_PREFIXES: &[&str] = &[
     "CLAUDE_CODE_SESSION_",
     "CLAUDE_CODE_PARENT_",
     "CLAUDE_CODE_SDK_",
+    "CLAUDE_AGENT_SDK_",
+    "CLAUDE_CODE_DESKTOP_",
+    "CLAUDE_PREVIEW_",
 ];
 
 /// Marqueur de session Claude Code (voir [`CLAUDE_SESSION_MARKERS`]) ?
@@ -400,6 +433,44 @@ mod tests {
     }
 
     #[test]
+    fn claude_desktop_host_variables_are_markers() {
+        // Relevées dans une session lancée par l'app, elle-même démarrée
+        // depuis une session Claude Desktop.
+        for k in [
+            "CLAUDE_AGENT_SDK_MCP_NO_PREFIX",
+            "CLAUDE_AGENT_SDK_VERSION",
+            "CLAUDE_CODE_ACCOUNT_UUID",
+            "CLAUDE_CODE_DESKTOP_APP_VERSION",
+            "CLAUDE_CODE_DISABLE_CRON",
+            "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+            "CLAUDE_CODE_EAGER_FLUSH",
+            "CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES",
+            "CLAUDE_CODE_ENABLE_ASK_USER_QUESTION_TOOL",
+            "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
+            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+            "CLAUDE_CODE_OAUTH_SCOPES",
+            "CLAUDE_CODE_ORGANIZATION_UUID",
+            "CLAUDE_CODE_REPORT_FINDINGS",
+            "CLAUDE_CODE_STARTUP_FAILURE_RESULTS",
+            "CLAUDE_CODE_TERMINAL_MCP_TOOLS",
+            "CLAUDE_CODE_USER_EMAIL",
+            "CLAUDE_PREVIEW_CLASSIFIER_FLOOR",
+        ] {
+            assert!(is_claude_session_marker(k), "{k} doit être retirée");
+        }
+        // Réglages que l'utilisateur pose lui-même : gardés.
+        for k in [
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            "CLAUDE_AGENT_SDK",
+            "CLAUDE_CONFIG_DIR",
+        ] {
+            assert!(!is_claude_session_marker(k), "{k} doit être gardée");
+        }
+    }
+
+    #[test]
     fn inherited_claude_code_session_markers_are_removed() {
         let p = Profile::default_for("/home/u/.claude");
         let markers = [
@@ -423,7 +494,8 @@ mod tests {
             "CLAUDE_CODE_USE_BEDROCK",
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
             "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS",
-            "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+            "CLAUDE_CODE_DISABLE_AUTOUPDATER",
+            "CLAUDE_CODE_DESKTOP",
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_BASE_URL",
             "HTTPS_PROXY",

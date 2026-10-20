@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
+use crate::domain::subagents::{MAX_SUBAGENTS, Subagent, SubagentStatus};
 use crate::ports::{SessionRecord, SessionStore};
 
 /// Migrations, de la version `i` à `i + 1` (`PRAGMA user_version`).
@@ -54,6 +55,30 @@ const MIGRATIONS: &[&str] = &[
         hidden_at         TEXT NOT NULL,
         PRIMARY KEY (profile, claude_session_id)
     );
+    ",
+    // v4 → v5 : sous-agents des sessions (v0.2, lot 5), au plus 100 par
+    // session (`seq` : ordre de lancement).
+    "
+    CREATE TABLE subagents (
+        session           TEXT NOT NULL,
+        agent_id          TEXT NOT NULL,
+        seq               INTEGER NOT NULL,
+        agent_type        TEXT,
+        description       TEXT,
+        model             TEXT,
+        tool_use_id       TEXT,
+        status            TEXT NOT NULL,
+        started_at        TEXT NOT NULL,
+        ended_at          TEXT,
+        tool_count        INTEGER NOT NULL DEFAULT 0,
+        current_tool      TEXT,
+        last_tool         TEXT,
+        report            TEXT,
+        report_truncated  INTEGER NOT NULL DEFAULT 0,
+        transcript_path   TEXT,
+        PRIMARY KEY (session, agent_id)
+    );
+    CREATE INDEX subagents_session_seq ON subagents (session, seq);
     ",
 ];
 
@@ -241,6 +266,35 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
     }))
 }
 
+fn subagent_from_row(row: &Row<'_>) -> rusqlite::Result<Option<Subagent>> {
+    let Some(status) = SubagentStatus::parse(&row.get::<_, String>("status")?) else {
+        return Ok(None);
+    };
+    let Some(started_at) = parse_time(row.get("started_at")?) else {
+        return Ok(None);
+    };
+    let mut a = Subagent::new(
+        row.get::<_, String>("agent_id")?,
+        row.get::<_, i64>("seq")?.max(0) as u64,
+        started_at,
+    );
+    a.agent_type = row.get("agent_type")?;
+    a.description = row.get("description")?;
+    a.model = row.get("model")?;
+    a.tool_use_id = row.get("tool_use_id")?;
+    a.status = status;
+    a.ended_at = parse_time(row.get("ended_at")?);
+    a.tool_count = row.get::<_, i64>("tool_count")?.max(0) as u64;
+    a.current_tool = row.get("current_tool")?;
+    a.last_tool = row.get("last_tool")?;
+    a.report = row.get("report")?;
+    a.report_truncated = row.get::<_, i64>("report_truncated")? != 0;
+    a.transcript_path = row.get("transcript_path")?;
+    // Rien n'est plus attendu d'un sous-agent relu.
+    a.notified = true;
+    Ok(Some(a))
+}
+
 impl SessionStore for SqliteStore {
     fn upsert(&self, r: &SessionRecord) -> io::Result<()> {
         let conn = self.conn.lock().map_err(other)?;
@@ -294,7 +348,90 @@ impl SessionStore for SqliteStore {
             params![id.to_string()],
         )
         .map_err(other)?;
+        conn.execute(
+            "DELETE FROM subagents WHERE session = ?1",
+            params![id.to_string()],
+        )
+        .map_err(other)?;
         Ok(())
+    }
+
+    fn upsert_subagents(&self, session: &Uuid, agents: &[Subagent]) -> io::Result<()> {
+        let mut conn = self.conn.lock().map_err(other)?;
+        let tx = conn.transaction().map_err(other)?;
+        let sid = session.to_string();
+        for a in agents {
+            tx.execute(
+                "INSERT INTO subagents (session, agent_id, seq, agent_type, description, model,
+                    tool_use_id, status, started_at, ended_at, tool_count, current_tool, last_tool,
+                    report, report_truncated, transcript_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                 ON CONFLICT(session, agent_id) DO UPDATE SET
+                    seq = excluded.seq, agent_type = excluded.agent_type,
+                    description = excluded.description, model = excluded.model,
+                    tool_use_id = excluded.tool_use_id, status = excluded.status,
+                    started_at = excluded.started_at, ended_at = excluded.ended_at,
+                    tool_count = excluded.tool_count, current_tool = excluded.current_tool,
+                    last_tool = excluded.last_tool, report = excluded.report,
+                    report_truncated = excluded.report_truncated,
+                    transcript_path = excluded.transcript_path",
+                params![
+                    sid,
+                    a.agent_id,
+                    a.seq as i64,
+                    a.agent_type,
+                    a.description,
+                    a.model,
+                    a.tool_use_id,
+                    a.status.as_str(),
+                    fmt_time(a.started_at),
+                    a.ended_at.map(fmt_time),
+                    a.tool_count as i64,
+                    a.current_tool,
+                    a.last_tool,
+                    a.report,
+                    a.report_truncated as i64,
+                    a.transcript_path,
+                ],
+            )
+            .map_err(other)?;
+        }
+        // Même règle qu'en mémoire : les plus anciens finis partent d'abord,
+        // jamais un sous-agent en cours.
+        tx.execute(
+            "DELETE FROM subagents WHERE session = ?1 AND seq IN
+                (SELECT seq FROM subagents WHERE session = ?1 AND status != 'running'
+                 ORDER BY seq ASC
+                 LIMIT max(0, (SELECT COUNT(*) FROM subagents WHERE session = ?1) - ?2))",
+            params![sid, MAX_SUBAGENTS as i64],
+        )
+        .map_err(other)?;
+        tx.commit().map_err(other)
+    }
+
+    fn delete_subagents(&self, session: &Uuid, agent_ids: &[String]) -> io::Result<()> {
+        let mut conn = self.conn.lock().map_err(other)?;
+        let tx = conn.transaction().map_err(other)?;
+        for id in agent_ids {
+            tx.execute(
+                "DELETE FROM subagents WHERE session = ?1 AND agent_id = ?2",
+                params![session.to_string(), id],
+            )
+            .map_err(other)?;
+        }
+        tx.commit().map_err(other)
+    }
+
+    fn load_subagents(&self, session: &Uuid) -> io::Result<Vec<Subagent>> {
+        let conn = self.conn.lock().map_err(other)?;
+        let mut stmt = conn
+            .prepare("SELECT * FROM subagents WHERE session = ?1 ORDER BY seq")
+            .map_err(other)?;
+        let rows = stmt
+            .query_map(params![session.to_string()], subagent_from_row)
+            .map_err(other)?;
+        // Une ligne illisible est ignorée, pas fatale.
+        Ok(rows.flatten().flatten().collect())
     }
 
     fn hide_transcript(
@@ -565,6 +702,98 @@ mod tests {
         store.upsert(&r).unwrap();
         drop(store);
         assert_eq!(SqliteStore::open(&path).unwrap().load_all().unwrap()[0], r);
+    }
+
+    fn agent(id: &str, seq: u64) -> Subagent {
+        let mut a = Subagent::new(id, seq, OffsetDateTime::from_unix_timestamp(100).unwrap());
+        a.agent_type = Some("general-purpose".into());
+        a.description = Some("Première ligne".into());
+        a.model = Some("claude-opus-5-5".into());
+        a.tool_use_id = Some(format!("toolu_{id}"));
+        a.status = SubagentStatus::Done;
+        a.ended_at = Some(OffsetDateTime::from_unix_timestamp(110).unwrap());
+        a.tool_count = 3;
+        a.last_tool = Some("Read".into());
+        a.report = Some("# Rapport\nfini".into());
+        a.report_truncated = true;
+        a.transcript_path = Some("/t/agent.jsonl".into());
+        a.notified = true;
+        a
+    }
+
+    #[test]
+    fn subagents_roundtrip_capped_and_deleted_with_their_session() {
+        let store = SqliteStore::in_memory().unwrap();
+        let (s1, s2) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        store.upsert(&record(1, "running", 10)).unwrap();
+        let mut running = agent("a0", 0);
+        running.status = SubagentStatus::Running;
+        running.ended_at = None;
+        running.current_tool = Some("Bash".into());
+        store
+            .upsert_subagents(&s1, &[running.clone(), agent("a1", 1)])
+            .unwrap();
+        store.upsert_subagents(&s2, &[agent("b0", 0)]).unwrap();
+        assert_eq!(
+            store.load_subagents(&s1).unwrap(),
+            [running.clone(), agent("a1", 1)]
+        );
+        // Mise à jour d'un agent existant.
+        let mut done = running.clone();
+        done.status = SubagentStatus::Interrupted;
+        store.upsert_subagents(&s1, &[done.clone()]).unwrap();
+        assert_eq!(store.load_subagents(&s1).unwrap()[0], done);
+        // Au plus MAX_SUBAGENTS par session : les plus anciens partent.
+        let many: Vec<Subagent> = (2..MAX_SUBAGENTS as u64 + 5)
+            .map(|i| agent(&format!("a{i}"), i))
+            .collect();
+        store.upsert_subagents(&s1, &many).unwrap();
+        let kept = store.load_subagents(&s1).unwrap();
+        assert_eq!(kept.len(), MAX_SUBAGENTS);
+        assert_eq!(kept[0].agent_id, "a5");
+        // Un agent en cours n'est jamais retiré par le plafond.
+        let mut old_running = agent("vieux", 0);
+        old_running.status = SubagentStatus::Running;
+        store.upsert_subagents(&s1, &[old_running]).unwrap();
+        let kept = store.load_subagents(&s1).unwrap();
+        assert_eq!(kept.len(), MAX_SUBAGENTS);
+        assert_eq!(kept[0].agent_id, "vieux");
+        assert_eq!(kept[1].agent_id, "a6");
+        store.delete_subagents(&s1, &["vieux".to_owned()]).unwrap();
+        assert_eq!(store.load_subagents(&s1).unwrap().len(), MAX_SUBAGENTS - 1);
+        assert_eq!(store.load_subagents(&s2).unwrap().len(), 1);
+        store.delete(&s1).unwrap();
+        assert!(store.load_subagents(&s1).unwrap().is_empty());
+        assert_eq!(store.load_subagents(&s2).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migrates_a_v4_database_keeping_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for m in &MIGRATIONS[..4] {
+                conn.execute_batch(m).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 4).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, claude_session_id, profile, cwd, project_root,
+                    status, created_at, updated_at)
+                 VALUES (?1, 'c', 'default', '/p', '/p', 'idle', ?2, ?2)",
+                params![
+                    Uuid::from_u128(9).to_string(),
+                    fmt_time(OffsetDateTime::UNIX_EPOCH)
+                ],
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.load_all().unwrap().len(), 1);
+        let id = Uuid::from_u128(9);
+        assert!(store.load_subagents(&id).unwrap().is_empty());
+        store.upsert_subagents(&id, &[agent("a", 0)]).unwrap();
+        assert_eq!(store.load_subagents(&id).unwrap().len(), 1);
     }
 
     #[test]

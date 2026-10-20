@@ -5,7 +5,8 @@
  * « peut-être obsolètes », retrait immédiat d'une demande résolue).
  */
 import type { ConnectionState } from '../../../shared/bridge'
-import type { DaemonProfileQuota, Effect, PastSession, Profile, ProjectInfo, QuotasReport, Session } from '../../../shared/protocol'
+import type { DaemonProfileQuota, Effect, PastSession, Profile, ProjectInfo, QuotasReport, Session, Subagent } from '../../../shared/protocol'
+import { normalizeAgents } from './subagents'
 
 export interface AppState {
   connection: ConnectionState
@@ -31,6 +32,13 @@ export interface AppState {
   quotasSeq: Record<string, number>
   /** Demandes signalées « peut-être obsolètes » par effet, par session. */
   stale: Record<string, number[]>
+  /** Sous-agents connus, par session (liste complète du démon, sans rapport). */
+  subagents: Record<string, Subagent[]>
+  /**
+   * Nombre de `session.subagents_changed` reçus par session : une réponse de
+   * `sessions.subagents` partie avant une notification est plus ancienne qu'elle.
+   */
+  subagentsSeq: Record<string, number>
   selectedId: string | null
 }
 
@@ -45,6 +53,8 @@ export const initialState: AppState = {
   quotasSeq: {},
   diffSeq: {},
   stale: {},
+  subagents: {},
+  subagentsSeq: {},
   selectedId: null,
 }
 
@@ -72,6 +82,13 @@ export type Action =
   | { type: 'past.hidden'; profile: string; claude_session_id: string }
   | { type: 'past'; profile: string; sessions: PastSession[] }
   | { type: 'select'; id: string | null }
+  /** `session.subagents_changed` : la liste reçue remplace la précédente. */
+  | { type: 'subagents.changed'; id: string; agents: unknown }
+  /**
+   * Réponse de `sessions.subagents`, demandée quand `subagentsSeq[id]` valait
+   * `seq` : ignorée si une notification est arrivée entre-temps.
+   */
+  | { type: 'subagents.loaded'; id: string; agents: unknown; seq: number }
 
 function pruneStale(stale: Record<string, number[]>, s: Session): Record<string, number[]> {
   const ids = stale[s.id]
@@ -105,7 +122,9 @@ export function reducer(state: AppState, action: Action): AppState {
         if (state.stale[s.id]) stale[s.id] = state.stale[s.id]!
         stale = pruneStale(stale, s)
       }
-      return { ...state, sessions, stale }
+      // Sous-agents des sessions absentes de la liste : retirés (notification reçue avant la liste, session oubliée).
+      const keep = <T,>(m: Record<string, T>) => Object.fromEntries(Object.entries(m).filter(([id]) => sessions[id]))
+      return { ...state, sessions, stale, subagents: keep(state.subagents), subagentsSeq: keep(state.subagentsSeq) }
     }
     case 'session.updated': {
       const s = action.session
@@ -137,7 +156,11 @@ export function reducer(state: AppState, action: Action): AppState {
       }
       const stale = { ...state.stale }
       delete stale[action.id]
-      return { ...state, sessions, stale, past, selectedId: state.selectedId === action.id ? null : state.selectedId }
+      const subagents = { ...state.subagents }
+      delete subagents[action.id]
+      const subagentsSeq = { ...state.subagentsSeq }
+      delete subagentsSeq[action.id]
+      return { ...state, sessions, stale, past, subagents, subagentsSeq, selectedId: state.selectedId === action.id ? null : state.selectedId }
     }
     case 'session.effect':
       return applyEffect(state, action.id, action.effect)
@@ -182,6 +205,17 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, past: { ...state.past, [action.profile]: action.sessions.filter((p) => !p.hidden) } }
     case 'select':
       return { ...state, selectedId: action.id }
+    case 'subagents.changed':
+      // Session inconnue (retirée, ou pas encore listée) : rien à garder ; la liste sera demandée avec elle.
+      if (!state.sessions[action.id]) return state
+      return {
+        ...state,
+        subagents: { ...state.subagents, [action.id]: normalizeAgents(action.agents) },
+        subagentsSeq: { ...state.subagentsSeq, [action.id]: (state.subagentsSeq[action.id] ?? 0) + 1 },
+      }
+    case 'subagents.loaded':
+      if (!state.sessions[action.id] || (state.subagentsSeq[action.id] ?? 0) !== action.seq) return state
+      return { ...state, subagents: { ...state.subagents, [action.id]: normalizeAgents(action.agents) } }
   }
 }
 

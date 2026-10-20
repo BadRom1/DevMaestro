@@ -131,6 +131,10 @@ export interface Session {
   resumable?: boolean
   /** Raison pour laquelle la reprise est impossible (absent : démon plus ancien). */
   resume_blocker?: ResumeBlocker | null
+  /** Sous-agents en cours (v0.2, lot 5) ; absent avec un démon plus ancien (0). */
+  subagents_running?: number | null
+  /** Sous-agents connus de la session (au plus les 100 derniers gardés). */
+  subagents_total?: number | null
 }
 
 export type ResumeBlocker = 'transcript_missing' | 'cwd_missing'
@@ -310,6 +314,29 @@ export interface FileContent {
   content: string | null
 }
 
+/* ---------- Sous-agents (v0.2, lot 5) ---------- */
+
+export type SubagentStatus = 'running' | 'done' | 'failed' | 'interrupted'
+
+/** Sous-agent lancé par la session (outil `Agent`). Champs inconnus à `null`. */
+export interface Subagent {
+  agent_id: string
+  agent_type: string | null
+  description: string | null
+  model: string | null
+  tool_use_id: string | null
+  status: SubagentStatus
+  started_at: string | null
+  ended_at: string | null
+  tool_count: number | null
+  current_tool: string | null
+  last_tool: string | null
+  /** Dernier message de l'agent (`sessions.subagent` seulement), coupé à 64 Kio. */
+  report?: string | null
+  report_truncated?: boolean | null
+  transcript_path: string | null
+}
+
 export type PermissionDecision = 'allow' | 'allow_always' | 'deny'
 /** Modes que l'app sait demander (`sessions.setMode`). */
 export type SettableMode = 'default' | 'acceptEdits' | 'plan' | 'auto'
@@ -385,6 +412,10 @@ export interface Methods {
   'sessions.input': { params: { id: string; data: string }; result: unknown }
   'files.list': { params: { id: string; path?: string }; result: FilesList }
   'files.read': { params: { id: string; path: string }; result: FileContent }
+  /** Sous-agents de la session, par ordre de lancement, sans `report`. */
+  'sessions.subagents': { params: { id: string }; result: { agents: Subagent[] } }
+  /** Un sous-agent avec son `report`. */
+  'sessions.subagent': { params: { id: string; agent_id: string }; result: Subagent }
   'quotas.get': { params: { refresh?: boolean }; result: QuotasReport }
   'transcripts.hide': { params: { profile: string; claude_session_id: string }; result: { hidden: boolean } }
   'transcripts.unhide': { params: { profile: string; claude_session_id: string }; result: { hidden: boolean } }
@@ -417,6 +448,8 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'files.list',
   'files.read',
   'sessions.input',
+  'sessions.subagents',
+  'sessions.subagent',
 ]
 
 /** Codes d'erreur JSON-RPC du démon (protocole § 3). */
@@ -445,3 +478,5 @@ export type Notification =
   | { method: 'quotas.updated'; params: QuotasReport }
   /** Les fichiers changés d'une session ont changé (liste ou compteurs). */
   | { method: 'session.diff_changed'; params: { id: string } }
+  /** Sous-agents de la session : liste complète, sans `report`. */
+  | { method: 'session.subagents_changed'; params: { id: string; agents: Subagent[] } }

@@ -17,6 +17,16 @@ import { SettingsDialog } from './components/SettingsDialog'
 import { useSettings } from './settings'
 import { buildProjectChoices } from './state/newSession'
 import { emptyDraft, reviewReducer, type ReviewAction, type ReviewDraft } from './state/review'
+import {
+  initialLoad,
+  loadFailed,
+  loadPhase,
+  loadSucceeded,
+  retryNow,
+  sessionsToLoad,
+  startLoad,
+  type LoadState,
+} from './state/subagentsLoad'
 import { resolveScheme } from './state/themeTokens'
 import { applyTheme, systemPrefersLight, terminalTheme, type ThemeMode } from './theme'
 
@@ -117,7 +127,9 @@ export function App() {
       else if (n.method === 'session.effect') dispatch({ type: 'session.effect', id: n.params.id, effect: n.params.effect })
       else if (n.method === 'session.removed') dispatch({ type: 'session.removed', id: n.params.id })
       else if (n.method === 'session.diff_changed') dispatch({ type: 'diff.changed', id: n.params.id })
-      else if (n.method === 'quotas.updated') dispatch({ type: 'quotas', report: n.params, notified: true })
+      else if (n.method === 'session.subagents_changed') {
+        if (typeof n.params?.id === 'string') dispatch({ type: 'subagents.changed', id: n.params.id, agents: n.params.agents })
+      } else if (n.method === 'quotas.updated') dispatch({ type: 'quotas', report: n.params, notified: true })
     })
     return () => {
       alive = false
@@ -155,8 +167,18 @@ export function App() {
     }
   }, [])
 
+  /** Amorçage des listes de sous-agents (voir `subagentsLoad`) ; `loadVer` fait re-rendre. */
+  const agentsLoad = useRef<LoadState>(initialLoad())
+  const [loadVer, setLoadVer] = useState(0)
+  const setAgentsLoad = useCallback((next: LoadState) => {
+    agentsLoad.current = next
+    setLoadVer((n) => n + 1)
+  }, [])
+
   useEffect(() => {
     if (state.connection.state !== 'connected') return
+    // Nouvelle connexion : les listes de sous-agents seront redemandées.
+    setAgentsLoad(initialLoad())
     let alive = true
     void (async () => {
       try {
@@ -173,9 +195,35 @@ export function App() {
     return () => {
       alive = false
     }
-  }, [state.connection, loadPast, loadQuotas])
+  }, [state.connection, loadPast, loadQuotas, setAgentsLoad])
 
   const sessions = useMemo(() => Object.values(state.sessions), [state.sessions])
+
+  /**
+   * Sous-agents : `sessions.subagents` pour les sessions qui en ont, puis les
+   * notifications `session.subagents_changed`. `clock` (30 s) relance les
+   * demandes en échec, sans boucle serrée.
+   */
+  const seqRef = useRef(state.subagentsSeq)
+  seqRef.current = state.subagentsSeq
+  useEffect(() => {
+    if (state.connection.state !== 'connected') return
+    for (const id of sessionsToLoad(agentsLoad.current, sessions, Date.now())) {
+      const { state: next, seq } = startLoad(agentsLoad.current, id, seqRef.current)
+      setAgentsLoad(next)
+      call('sessions.subagents', { id })
+        .then((r) => {
+          dispatch({ type: 'subagents.loaded', id, agents: r, seq })
+          setAgentsLoad(loadSucceeded(agentsLoad.current, id))
+        })
+        .catch((e: unknown) => {
+          const code = e instanceof CallError ? e.failure.code : null
+          if (code !== ErrorCode.MethodNotFound) console.warn('[devmaestro] sessions.subagents :', e)
+          setAgentsLoad(loadFailed(agentsLoad.current, id, code, Date.now()))
+        })
+    }
+  }, [sessions, state.connection, loadVer, clock, setAgentsLoad])
+  const retryAgents = useCallback((id: string) => setAgentsLoad(retryNow(agentsLoad.current, id)), [setAgentsLoad])
 
 
   const past = useMemo(() => pastToOffer(state.past, sessions, PAST_LIMIT), [state.past, sessions])
@@ -297,6 +345,22 @@ export function App() {
     [selectedId],
   )
 
+  /** Agent choisi dans l'onglet « Agents », par session. */
+  const [agentSel, setAgentSel] = useState<Record<string, string>>({})
+  /** Demandes d'ouverture de l'onglet « Agents » (clic dans la barre latérale). */
+  const [openAgents, setOpenAgents] = useState(0)
+  const selectAgent = useCallback(
+    (agentId: string) => {
+      if (selectedId) setAgentSel((m) => ({ ...m, [selectedId]: agentId }))
+    },
+    [selectedId],
+  )
+  const openAgent = useCallback((sessionId: string, agentId: string | null) => {
+    dispatch({ type: 'select', id: sessionId })
+    if (agentId) setAgentSel((m) => ({ ...m, [sessionId]: agentId }))
+    setOpenAgents((n) => n + 1)
+  }, [])
+
   const onSessionUpdated = useCallback((s: Session) => dispatch({ type: 'session.response', session: s }), [])
 
   const onTermSize = useCallback((cols: number, rows: number) => setTermSize({ cols, rows }), [])
@@ -340,6 +404,7 @@ export function App() {
           projects={state.projects}
           profiles={state.profiles}
           stale={state.stale}
+          subagents={state.subagents}
           onOpen={(id) => {
             dispatch({ type: 'select', id })
             updateSettings({ view: 'projet' })
@@ -359,6 +424,8 @@ export function App() {
           selectedId={state.selectedId}
           onSelect={select}
           onResumePast={resumePast}
+          subagents={state.subagents}
+          onOpenAgent={openAgent}
         />
         <SessionPane
           session={selected}
@@ -376,6 +443,12 @@ export function App() {
           review={reviewSelected}
           seen={(selected && seenFiles[selected.id]) || NO_SEEN}
           onSeen={seeSelected}
+          agents={selected ? state.subagents[selected.id] : undefined}
+          agentsLoad={selected ? loadPhase(agentsLoad.current, selected.id) : null}
+          onRetryAgents={retryAgents}
+          agentId={(selected && agentSel[selected.id]) || null}
+          onSelectAgent={selectAgent}
+          openAgents={openAgents}
         />
       </main>
       )}

@@ -5,17 +5,18 @@
  */
 import { useState } from 'react'
 
-import type { PendingRequest, ProjectInfo, Profile, Session } from '../../../shared/protocol'
-
-const NO_STALE: readonly number[] = []
+import type { PendingRequest, ProjectInfo, Profile, Session, Subagent } from '../../../shared/protocol'
 import { call, errorCode, errorText } from '../api'
 import { ALREADY_CLOSED } from '../state/errors'
 import { basename, formatPct, formatUsd, relativeTime, sessionColor, sessionDisplayName } from '../state/format'
 import { COLUMNS, demandSummary, firstPending, kanbanColumns, oneClickAllowed } from '../state/kanban'
 import { answerability } from '../state/requests'
 import { glyphFor } from '../state/status'
+import { runningCount, runningLabel } from '../state/subagents'
 import { ProfileBadge, StatusGlyph } from './common'
 import { ColorBar } from './SessionIdentity'
+
+const NO_STALE: readonly number[] = []
 
 /** Actions d'une demande ; à monter avec `key = request_id` (état remis à zéro pour une nouvelle demande). */
 function PermissionActions({
@@ -78,12 +79,15 @@ function PermissionActions({
 
 function Card({
   session,
+  agents,
   project,
   profiles,
   stale,
   onOpen,
 }: {
   session: Session
+  /** Liste connue, ou `undefined` (le compteur de la session sert alors de repli). */
+  agents: readonly Subagent[] | undefined
   project: ProjectInfo | undefined
   profiles: Profile[]
   stale: readonly number[]
@@ -94,6 +98,7 @@ function Card({
   const projectName = project?.name ?? basename(project?.root ?? session.project_root ?? session.cwd)
   const req = firstPending(session)
   const m = session.metrics
+  const agentsRunning = runningLabel(runningCount(session, agents))
   return (
     <li className={`kcard${glyph.kind === 'waiting' ? ' wait' : ''}`}>
       <div className="khead">
@@ -122,6 +127,11 @@ function Card({
         </span>
       )}
       {req && <PermissionActions key={req.request_id} session={session} req={req} stale={stale} onOpen={onOpen} />}
+      {agentsRunning && (
+        <span className="chip ag-chip">
+          <span className="st running" aria-hidden="true" /> {agentsRunning}
+        </span>
+      )}
       <div className="kmeta hint">
         <span>contexte {formatPct(m?.context_used_pct)}</span>
         <span>{formatUsd(m?.cost_usd)}</span>
@@ -136,9 +146,12 @@ export function KanbanView({
   projects,
   profiles,
   stale,
+  subagents,
   onOpen,
 }: {
   sessions: Session[]
+  /** Sous-agents connus, par session. */
+  subagents: Record<string, Subagent[]>
   projects: Record<string, ProjectInfo>
   profiles: Profile[]
   /** Demandes signalées « peut-être obsolètes », par session. */
@@ -160,6 +173,7 @@ export function KanbanView({
               <Card
                 key={s.id}
                 session={s}
+                agents={subagents[s.id]}
                 project={projects[s.cwd]}
                 profiles={profiles}
                 stale={stale[s.id] ?? NO_STALE}

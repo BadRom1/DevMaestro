@@ -10,6 +10,9 @@ export class ValidationError extends Error {
   override name = 'ValidationError'
 }
 
+/** Identifiant de sous-agent de Claude Code (« a1dcf2f8a7682d931 ») : pas un UUID. */
+const AGENT_ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const MAX_PATH = 4096
@@ -210,8 +213,16 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       optional(o, out, 'include_hidden', (x, k) => bool(x, k))
       return out
     case 'sessions.diff':
+    case 'sessions.subagents':
       out.id = uuid(o, 'id')
       return out
+    case 'sessions.subagent': {
+      out.id = uuid(o, 'id')
+      const a = o.agent_id
+      if (typeof a !== 'string' || !AGENT_ID_RE.test(a)) throw new ValidationError('« agent_id » doit être un identifiant de sous-agent')
+      out.agent_id = a
+      return out
+    }
     case 'files.list':
       out.id = uuid(o, 'id')
       // Racine : chemin absent ou vide.

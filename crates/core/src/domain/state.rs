@@ -27,20 +27,21 @@
 //!
 //! | Événement | Demandes | Activité |
 //! |---|---|---|
-//! | `SessionStart` (`startup`, `resume`, `clear`, `fork`) | toutes retirées (`Cleared`) | → `Idle` |
+//! | `SessionStart` (`startup`, `resume`, `clear`, `fork`) | toutes retirées (`Cleared`)¹ | → `Idle`, sauf sous-agent en cours ou attendu³ |
 //! | `SessionStart` (`compact`) | inchangées | inchangée (compaction en plein tour) |
-//! | `UserPromptSubmit` | toutes retirées (`Cleared`) | → `Running` |
-//! | `PreToolUse` `AskUserQuestion` | + une question | → `Running` |
-//! | `PreToolUse` autre outil | attentes sans détails retirées | → `Running` |
+//! | `UserPromptSubmit` | toutes retirées (`Cleared`)¹ | → `Running` |
+//! | `UserPromptSubmit` `<task-notification>…` | inchangées | → `Running` |
+//! | `PreToolUse` `AskUserQuestion` | + une question | → `Running`² |
+//! | `PreToolUse` autre outil | attentes sans détails retirées | → `Running`² |
 //! | `PermissionRequest` | + une permission (ou une question pour `AskUserQuestion`), sauf si c'est la même demande ; remplace une attente sans détails du même genre (`Superseded`) | inchangée |
-//! | `PostToolUse` | retire **sa** demande (`Answered`) et les attentes sans détails | → `Running` |
-//! | `PostToolUseFailure` | retire sa demande (`Failed`) et les attentes sans détails | → `Running`, ou `Idle` si `is_interrupt` |
-//! | `PermissionDenied` | retire sa demande (`Denied`) et les attentes sans détails | → `Running` |
+//! | `PostToolUse` | retire **sa** demande (`Answered`) et les attentes sans détails | → `Running`² |
+//! | `PostToolUseFailure` | retire sa demande (`Failed`) et les attentes sans détails | → `Running`, ou `Idle` si `is_interrupt` (sauf sous-agent en cours ou attendu³)² |
+//! | `PermissionDenied` | retire sa demande (`Denied`) et les attentes sans détails | → `Running`² |
 //! | `Notification` `permission_prompt` / `elicitation_dialog` | + une attente sans détails, voir « Notifications » | inchangée |
-//! | `Notification` `idle_prompt` | voir « Interruption par Échap » | → `Idle` depuis `Starting` ou `Running` |
+//! | `Notification` `idle_prompt` | voir « Interruption par Échap » ; rien si un sous-agent est en cours ou attendu³ | → `Idle` depuis `Starting` ou `Running`, sauf sous-agent en cours ou attendu³ |
 //! | `Notification` autre | inchangées | inchangée |
-//! | `Stop` | toutes retirées (`Cleared`) | → `Idle` |
-//! | `StopFailure` | toutes retirées (`Cleared`) | → `Error` |
+//! | `Stop` | toutes retirées (`Cleared`)¹ | → `Idle`, ou reste `Running` si un sous-agent est en cours ou attendu³ |
+//! | `StopFailure` | toutes retirées (`Cleared`)¹ | → `Error` |
 //! | `SessionEnd` | toutes retirées (`Cleared`) | → `Stopped { reason }` |
 //! | `SubagentStart`, `SubagentStop`, autres | inchangées | inchangée |
 //! | Réponse de l'app ([`SessionState::resolve_by_app`]) | retire **cette** demande (`AnsweredByApp`) | → `Running` |
@@ -54,7 +55,49 @@
 //! jour que l'activité et le mode.
 //!
 //! Une demande venue d'un sous-agent (`agent_id` présent) reste rattachée à
-//! la session parente : c'est elle qui attend.
+//! la session parente : c'est elle qui attend. Tous les rapprochements
+//! ci-dessous se font **à agent égal** (`agent_id`, `None` pour la
+//! conversation principale) : deux sous-agents qui appellent le même outil
+//! avec la même entrée ne se confondent pas.
+//!
+//! ## Sous-agents (v0.2, lot 5)
+//!
+//! Les sous-agents sont construits par [`super::subagents`] (contrat :
+//! `docs/v0.2.md`, « Contrat du lot 5 », d'après la Q12 du prototype n° 1),
+//! appelé pour chaque événement ; [`Applied::subagents`] dit ce qui a changé
+//! (création ou statut : tout de suite ; compteurs d'outils : notification
+//! limitée en fréquence par le démon).
+//!
+//! ¹ Fin de tour : les demandes (et les `PreToolUse` gardés) d'un sous-agent
+//! qui **tourne encore** restent : il travaille en arrière-plan, sa demande
+//! est toujours affichée par la TUI. `SessionEnd` et la fin du processus
+//! retirent tout (les sous-agents passent d'abord `interrupted`).
+//!
+//! ² Un hook qui porte un `agent_id` (lancé dans un sous-agent) ne change
+//! **jamais** l'activité de la session : les sous-agents tournent en
+//! arrière-plan, leurs hooks arrivent aussi après le `Stop` du tour
+//! principal. Ses demandes, elles, sont créées et closes comme les autres.
+//!
+//! ³ « En cours ou attendu » : un `Stop` dont `background_tasks` liste une
+//! entrée `type: "subagent"` `running`, ou un sous-agent connu `running`, ou
+//! un sous-agent fini en arrière-plan dont la `task-notification` n'est pas
+//! encore arrivée. La session reste `Running` (pas de passage `Idle`, donc
+//! pas de notification « terminé ») ; seul un `Stop` suivant sans rien en
+//! cours ni en attente la rend `Idle`. L'attente de la `task-notification`
+//! est bornée : un vrai prompt de l'utilisateur la lève, et elle expire
+//! [`super::subagents::NOTIFICATION_GRACE`] après la fin de l'agent : la
+//! session retenue passe alors `Idle` au prochain événement ou au tic du
+//! démon ([`SessionState::tick`]). `SessionStart` (hors compaction) et Échap
+//! (`PostToolUseFailure` `is_interrupt`) suivent la même règle : les
+//! sous-agents en arrière-plan continuent. Avant cette décision, un `Stop` dont
+//! `background_tasks` est présent fait passer `interrupted` les sous-agents
+//! `running` qu'il ne liste plus (sans `SubagentStop`).
+//!
+//! Le prompt `<task-notification>…` injecté par Claude Code à la fin d'un
+//! sous-agent en arrière-plan est une notification interne : il met à jour
+//! ce sous-agent (`failed`, `killed`…), relance l'activité (`Running`, Claude
+//! reprend) mais ne retire aucune demande et n'est pas retenu comme premier
+//! prompt de l'utilisateur ([`super::session::Session::apply_hook_tracked`]).
 //!
 //! ## Rapprocher une demande de l'événement qui la clôt
 //!
@@ -116,6 +159,7 @@ use super::session::{
     ASK_USER_QUESTION, Pending, PermissionMode, PermissionPending, QuestionPending, SessionStatus,
     WaitKind,
 };
+use super::subagents::{SubagentChange, Subagents, parse_task_notifications};
 
 /// Délai pendant lequel une notification d'attente arrivée après la clôture
 /// d'une demande du même genre est ignorée.
@@ -183,6 +227,8 @@ pub enum Effect {
 /// `PreToolUse` vu, gardé pour retrouver le `tool_use_id` d'un `PermissionRequest`.
 #[derive(Debug, Clone, PartialEq)]
 struct SeenToolUse {
+    /// Sous-agent qui a appelé l'outil (gardé après un `Stop` s'il tourne).
+    agent_id: Option<String>,
     tool_use_id: Option<String>,
     tool_name: String,
     tool_input: Value,
@@ -204,6 +250,16 @@ pub struct SessionState {
     seen_tool_uses: Vec<SeenToolUse>,
     /// Dernière clôture d'une demande détaillée, par genre (permission, question).
     last_resolved: [Option<OffsetDateTime>; 2],
+    /// Sous-agents de la session (lot 5).
+    subagents: Subagents,
+    /// Le tour principal est fini mais des sous-agents retiennent la session
+    /// `Running` : elle passe `Idle` dès qu'ils ne la retiennent plus
+    /// ([`SessionState::tick`]).
+    held: bool,
+    /// Le dernier `Stop` listait un sous-agent `running` dans
+    /// `background_tasks` (connu ou non) : la session reste retenue jusqu'au
+    /// `Stop` suivant.
+    listed_running: bool,
 }
 
 impl SessionState {
@@ -212,6 +268,54 @@ impl SessionState {
         match self.pending.last() {
             Some(r) => SessionStatus::Waiting(r.pending.kind()),
             None => self.activity.clone(),
+        }
+    }
+
+    /// Sous-agents de la session.
+    pub fn subagents(&self) -> &Subagents {
+        &self.subagents
+    }
+
+    /// Remet les sous-agents relus en base (voir [`Subagents::restore`]).
+    pub fn restore_subagents(&mut self, agents: Vec<super::subagents::Subagent>) {
+        self.subagents.restore(agents);
+    }
+
+    /// Reprend les sous-agents d'un état précédent (reprise de la session :
+    /// nouveau processus). Ceux qui tournaient encore passent `interrupted` ;
+    /// l'ordre de lancement continue. Renvoie le changement.
+    pub fn carry_subagents_from(
+        &mut self,
+        previous: SessionState,
+        now: OffsetDateTime,
+    ) -> SubagentChange {
+        self.subagents = previous.subagents;
+        self.subagents.on_session_end(now)
+    }
+
+    /// Réévalue l'attente des sous-agents à `now` (délai de grâce de la
+    /// `task-notification`) : vrai si la session vient de passer `Idle`.
+    pub fn tick(&mut self, now: OffsetDateTime) -> bool {
+        if self.held
+            && self.activity == SessionStatus::Running
+            && !self.listed_running
+            && !self.subagents.busy(now)
+        {
+            self.held = false;
+            self.activity = SessionStatus::Idle;
+            return true;
+        }
+        false
+    }
+
+    /// Activité de fin de tour : `Running` (retenue par les sous-agents) ou
+    /// `Idle`.
+    fn turn_end_activity(&mut self, now: OffsetDateTime) -> SessionStatus {
+        self.held = self.subagents.busy(now);
+        if self.held {
+            SessionStatus::Running
+        } else {
+            SessionStatus::Idle
         }
     }
 
@@ -308,14 +412,24 @@ impl SessionState {
         self.remove_where(|r| !r.pending.is_detailed(), Resolution::Cleared, now, fx);
     }
 
-    /// Fin de tour (ou de session) : tout est retiré.
+    /// Fin de tour (ou de session) : tout est retiré, sauf ce qui vient d'un
+    /// sous-agent qui tourne encore (il travaille en arrière-plan, sa demande
+    /// reste posée).
     fn end_turn(&mut self, activity: SessionStatus, now: OffsetDateTime, fx: &mut Vec<Effect>) {
-        self.remove_where(|_| true, Resolution::Cleared, now, fx);
-        self.seen_tool_uses.clear();
+        let subagents = &self.subagents;
+        let live = |a: &Option<String>| a.as_deref().is_some_and(|id| subagents.is_running(id));
+        let keep: Vec<RequestId> = self
+            .pending
+            .iter()
+            .filter(|r| live(&r.agent_id))
+            .map(|r| r.id)
+            .collect();
+        self.seen_tool_uses.retain(|s| live(&s.agent_id));
+        self.remove_where(|r| !keep.contains(&r.id), Resolution::Cleared, now, fx);
         self.activity = activity;
     }
 
-    fn remember(&mut self, call: &ToolCall, claimed: bool) {
+    fn remember(&mut self, call: &ToolCall, agent_id: Option<String>, claimed: bool) {
         if call.tool_use_id.is_some()
             && self
                 .seen_tool_uses
@@ -328,6 +442,7 @@ impl SessionState {
             self.seen_tool_uses.remove(0);
         }
         self.seen_tool_uses.push(SeenToolUse {
+            agent_id,
             tool_use_id: call.tool_use_id.clone(),
             tool_name: call.tool_name.clone(),
             tool_input: call.tool_input.clone(),
@@ -335,11 +450,12 @@ impl SessionState {
         });
     }
 
-    /// `tool_use_id` du `PreToolUse` le plus récent, non rattaché, qui
-    /// correspond à cet appel.
-    fn claim_tool_use(&mut self, call: &ToolCall) -> Option<String> {
+    /// `tool_use_id` du `PreToolUse` le plus récent, non rattaché, du même
+    /// agent (`None` : conversation principale), qui correspond à cet appel.
+    fn claim_tool_use(&mut self, call: &ToolCall, agent_id: &Option<String>) -> Option<String> {
         let seen = self.seen_tool_uses.iter_mut().rev().find(|s| {
             !s.claimed
+                && &s.agent_id == agent_id
                 && s.tool_name == call.tool_name
                 && input_matches(&call.tool_input, &s.tool_input)
         })?;
@@ -367,6 +483,7 @@ impl SessionState {
     ) -> RequestId {
         let same = self.pending.iter_mut().find(|r| {
             r.pending.tool_name() == Some(call.tool_name.as_str())
+                && r.agent_id == agent_id
                 && same_origin(&r.tool_use_id, &tool_use_id)
                 && r.pending
                     .tool_input()
@@ -392,13 +509,18 @@ impl SessionState {
     }
 
     /// Clôture d'un appel d'outil : retire sa demande, s'il y en a une.
+    /// `agent_id` : agent qui a appelé l'outil (`None` : conversation
+    /// principale) ; le repli sur l'entrée ne retient que ses demandes, et
+    /// l'activité de la session n'est pas touchée pour un sous-agent.
     fn close(
         &mut self,
         call: &ToolCall,
         how: Resolution,
+        agent_id: &Option<String>,
         now: OffsetDateTime,
         fx: &mut Vec<Effect>,
     ) {
+        let from_subagent = agent_id.is_some();
         self.forget_tool_use(&call.tool_use_id);
         let by_id = self
             .pending
@@ -407,6 +529,7 @@ impl SessionState {
         let index = by_id.or_else(|| {
             self.pending.iter().position(|r| {
                 r.pending.tool_name() == Some(call.tool_name.as_str())
+                    && &r.agent_id == agent_id
                     && !(r.tool_use_id.is_some() && call.tool_use_id.is_some())
                     && r.pending
                         .tool_input()
@@ -417,7 +540,10 @@ impl SessionState {
             self.remove(i, how, now, fx);
         }
         self.clear_undetailed(now, fx);
-        self.activity = SessionStatus::Running;
+        if !from_subagent {
+            self.activity = SessionStatus::Running;
+            self.held = false;
+        }
     }
 
     /// Attente signalée par une `Notification`, sans détails.
@@ -434,6 +560,13 @@ impl SessionState {
     }
 
     fn idle_prompt(&mut self, now: OffsetDateTime, fx: &mut Vec<Effect>) {
+        if self.subagents.busy(now) {
+            // Claude attend ses sous-agents : rien n'a changé.
+            if self.activity == SessionStatus::Running {
+                self.held = true;
+            }
+            return;
+        }
         self.clear_undetailed(now, fx);
         if !self.pending.is_empty() && !self.possibly_stale {
             self.possibly_stale = true;
@@ -514,6 +647,7 @@ impl SessionState {
         };
         let was_waiting = !self.pending.is_empty();
         let mut fx = Vec::new();
+        self.subagents.on_session_end(now);
         self.end_turn(activity, now, &mut fx);
         self.possibly_stale = false;
         if was_waiting {
@@ -542,6 +676,8 @@ pub struct Applied {
     /// la demande à laquelle il se rattache, nouvelle ou déjà connue. C'est
     /// à elle que le démon accroche le relais qui attend la décision.
     pub request: Option<RequestId>,
+    /// Ce que l'événement a changé dans les sous-agents.
+    pub subagents: SubagentChange,
 }
 
 /// Comme [`apply`], en indiquant la demande créée ou retrouvée.
@@ -555,9 +691,12 @@ pub fn apply_tracked(state: &mut SessionState, event: &HookEvent, now: OffsetDat
         return Applied {
             effects: Vec::new(),
             request: None,
+            subagents: SubagentChange::None,
         };
     }
     let mut request = None;
+    let mut subagents = SubagentChange::None;
+    let from_subagent = event.common.agent_id.is_some();
 
     let was_waiting = !state.pending.is_empty();
     let agent_id = event.common.agent_id.clone();
@@ -566,14 +705,38 @@ pub fn apply_tracked(state: &mut SessionState, event: &HookEvent, now: OffsetDat
     match &event.kind {
         HookKind::SessionStart { source, .. } => {
             if source.as_deref() != Some("compact") {
-                state.end_turn(SessionStatus::Idle, now, &mut fx);
+                state.subagents.forget_launches();
+                // Les sous-agents en arrière-plan survivent à `/clear` (Q12).
+                let activity = state.turn_end_activity(now);
+                state.end_turn(activity, now, &mut fx);
             }
         }
-        HookKind::UserPromptSubmit { .. } => state.end_turn(SessionStatus::Running, now, &mut fx),
+        HookKind::UserPromptSubmit { prompt } => {
+            state.held = false;
+            match prompt.as_deref().and_then(parse_task_notifications) {
+                // Notification interne de Claude Code (fin d'un sous-agent en
+                // arrière-plan) : Claude reprend, rien n'est retiré.
+                Some(list) => {
+                    for n in &list {
+                        subagents = subagents.max(state.subagents.on_task_notification(n, now));
+                    }
+                    state.activity = SessionStatus::Running;
+                }
+                None => {
+                    // L'utilisateur reprend la main : plus de notification attendue.
+                    state.subagents.on_user_prompt();
+                    state.end_turn(SessionStatus::Running, now, &mut fx)
+                }
+            }
+        }
         HookKind::PreToolUse(call) => {
-            state.activity = SessionStatus::Running;
+            subagents = state.subagents.on_pre_tool_use(agent_id.as_deref(), call);
+            if !from_subagent {
+                state.activity = SessionStatus::Running;
+                state.held = false;
+            }
             if call.tool_name == ASK_USER_QUESTION {
-                state.remember(call, true);
+                state.remember(call, agent_id.clone(), true);
                 let tool_use_id = call.tool_use_id.clone();
                 request = Some(state.request(
                     question_from(call),
@@ -584,7 +747,7 @@ pub fn apply_tracked(state: &mut SessionState, event: &HookEvent, now: OffsetDat
                     &mut fx,
                 ));
             } else {
-                state.remember(call, false);
+                state.remember(call, agent_id, false);
                 state.clear_undetailed(now, &mut fx);
             }
         }
@@ -592,7 +755,7 @@ pub fn apply_tracked(state: &mut SessionState, event: &HookEvent, now: OffsetDat
             let tool_use_id = call
                 .tool_use_id
                 .clone()
-                .or_else(|| state.claim_tool_use(call));
+                .or_else(|| state.claim_tool_use(call, &agent_id));
             let pending = if call.tool_name == ASK_USER_QUESTION {
                 question_from(call)
             } else {
@@ -604,17 +767,29 @@ pub fn apply_tracked(state: &mut SessionState, event: &HookEvent, now: OffsetDat
             };
             request = Some(state.request(pending, call, tool_use_id, agent_id, now, &mut fx));
         }
-        HookKind::PostToolUse(call) => state.close(call, Resolution::Answered, now, &mut fx),
+        HookKind::PostToolUse(call) => {
+            subagents = state
+                .subagents
+                .on_post_tool_use(agent_id.as_deref(), call, None, now);
+            state.close(call, Resolution::Answered, &agent_id, now, &mut fx)
+        }
         HookKind::PostToolUseFailure {
             call, is_interrupt, ..
         } => {
-            state.close(call, Resolution::Failed, now, &mut fx);
-            if *is_interrupt {
-                state.activity = SessionStatus::Idle;
+            subagents = state.subagents.on_post_tool_use(
+                agent_id.as_deref(),
+                call,
+                Some(*is_interrupt),
+                now,
+            );
+            state.close(call, Resolution::Failed, &agent_id, now, &mut fx);
+            // Échap n'arrête pas un sous-agent en arrière-plan (Q12).
+            if *is_interrupt && !from_subagent {
+                state.activity = state.turn_end_activity(now);
             }
         }
         HookKind::PermissionDenied { call, .. } => {
-            state.close(call, Resolution::Denied, now, &mut fx)
+            state.close(call, Resolution::Denied, &agent_id, now, &mut fx)
         }
         HookKind::Notification {
             notification_type, ..
@@ -624,18 +799,65 @@ pub fn apply_tracked(state: &mut SessionState, event: &HookEvent, now: OffsetDat
             Some("idle_prompt") => state.idle_prompt(now, &mut fx),
             _ => {}
         },
-        HookKind::Stop => state.end_turn(SessionStatus::Idle, now, &mut fx),
-        HookKind::StopFailure => state.end_turn(SessionStatus::Error, now, &mut fx),
-        HookKind::SessionEnd { reason } => state.end_turn(
-            SessionStatus::Stopped {
-                reason: reason.clone(),
-            },
-            now,
-            &mut fx,
-        ),
-        HookKind::SubagentStart { .. } | HookKind::SubagentStop { .. } | HookKind::Other { .. } => {
+        HookKind::Stop { background_tasks } => {
+            subagents = state
+                .subagents
+                .on_turn_stop(background_tasks.as_deref(), now);
+            // Un sous-agent tourne (ou sa `task-notification` doit suivre) :
+            // la session reste en cours, seul un `Stop` suivant la rendra
+            // inactive.
+            let mut activity = state.turn_end_activity(now);
+            state.listed_running = background_tasks
+                .iter()
+                .flatten()
+                .any(|t| t.is_running_subagent());
+            if state.listed_running {
+                state.held = true;
+                activity = SessionStatus::Running;
+            }
+            state.end_turn(activity, now, &mut fx)
         }
+        HookKind::StopFailure => {
+            state.held = false;
+            state.end_turn(SessionStatus::Error, now, &mut fx)
+        }
+        HookKind::SessionEnd { reason } => {
+            state.held = false;
+            subagents = state.subagents.on_session_end(now);
+            state.end_turn(
+                SessionStatus::Stopped {
+                    reason: reason.clone(),
+                },
+                now,
+                &mut fx,
+            )
+        }
+        HookKind::SubagentStart {
+            agent_id,
+            agent_type,
+        } => {
+            subagents = state
+                .subagents
+                .on_start(agent_id.as_deref(), agent_type.as_deref(), now);
+        }
+        HookKind::SubagentStop {
+            agent_id,
+            last_assistant_message,
+            agent_transcript_path,
+            ..
+        } => {
+            subagents = state.subagents.on_stop(
+                agent_id.as_deref(),
+                last_assistant_message.as_deref(),
+                agent_transcript_path.as_deref(),
+                now,
+            );
+        }
+        HookKind::Other { .. } => {}
     }
+    // Délai de grâce de la `task-notification` écoulé : la session n'est
+    // plus retenue (évalué à chaque événement, et par le tic du démon).
+    state.tick(now);
 
     if state.pending.is_empty() {
         state.possibly_stale = false;
@@ -646,6 +868,7 @@ pub fn apply_tracked(state: &mut SessionState, event: &HookEvent, now: OffsetDat
     Applied {
         effects: fx,
         request,
+        subagents,
     }
 }
 
@@ -688,5 +911,7 @@ fn input_matches(actual: &Value, expected: &Value) -> bool {
     }
 }
 
+#[cfg(test)]
+mod subagent_tests;
 #[cfg(test)]
 mod tests;

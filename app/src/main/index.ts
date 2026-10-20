@@ -153,7 +153,14 @@ client.on('notification', (n) => {
       if (decider.stale(id, null)) closeNotification(id)
     }
   }
-  if (n.method === 'session.updated' || n.method === 'session.effect' || n.method === 'session.removed' || n.method === 'quotas.updated' || n.method === 'session.diff_changed') {
+  if (
+    n.method === 'session.updated' ||
+    n.method === 'session.effect' ||
+    n.method === 'session.removed' ||
+    n.method === 'quotas.updated' ||
+    n.method === 'session.diff_changed' ||
+    n.method === 'session.subagents_changed'
+  ) {
     toPage(Ipc.notification, { method: n.method, params: n.params })
   }
 })

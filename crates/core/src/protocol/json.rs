@@ -8,7 +8,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::domain::{
     Effect, Metrics, PastSession, Pending, PendingRequest, Profile, RateLimitWindow, Resolution,
-    SessionStatus, WaitKind,
+    SessionStatus, Subagent, WaitKind,
 };
 
 /// Date au format RFC 3339, `null` si inconnue.
@@ -136,6 +136,31 @@ pub fn effect_json(e: &Effect) -> Value {
             "request_ids": request_ids.iter().map(|r| r.0).collect::<Vec<_>>(),
         }),
     }
+}
+
+/// Sous-agent (objet `Subagent`). `with_report` : avec le champ `report`
+/// (`sessions.subagent`) ; sinon il est absent (liste, notification). Les
+/// textes viennent de Claude : ce sont des données, transmises telles quelles.
+pub fn subagent_json(a: &Subagent, with_report: bool) -> Value {
+    let mut v = json!({
+        "agent_id": a.agent_id,
+        "agent_type": a.agent_type,
+        "description": a.description,
+        "model": a.model,
+        "tool_use_id": a.tool_use_id,
+        "status": a.status.as_str(),
+        "started_at": time_json(Some(a.started_at)),
+        "ended_at": time_json(a.ended_at),
+        "tool_count": a.tool_count,
+        "current_tool": a.current_tool,
+        "last_tool": a.last_tool,
+        "report_truncated": a.report_truncated,
+        "transcript_path": a.transcript_path,
+    });
+    if with_report {
+        v["report"] = json!(a.report);
+    }
+    v
 }
 
 pub fn profile_json(p: &Profile) -> Value {

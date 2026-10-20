@@ -7,6 +7,7 @@ import {
   type Session,
   type SessionColor,
   type SettableMode,
+  type Subagent,
 } from '../../../shared/protocol'
 import { CallError, call, errorCode, errorText } from '../api'
 import {
@@ -34,8 +35,10 @@ import { PermissionCard, QuestionCard } from './RequestCards'
 import { activeComments, type ReviewAction, type ReviewDraft } from '../state/review'
 import { DiffView, useSessionDiff } from './DiffView'
 import { FilesView } from './FilesView'
+import { AgentsView } from './Subagents'
+import { runningCount, runningLabel } from '../state/subagents'
 
-type Tab = 'terminal' | 'diff' | 'files'
+type Tab = 'terminal' | 'diff' | 'files' | 'agents'
 import { ForgetConfirm } from './ForgetConfirm'
 import { ColorBar, ColorPicker, RenameField } from './SessionIdentity'
 
@@ -90,6 +93,7 @@ const OLD_DAEMON = 'Le démon ne gère pas encore le nommage des sessions : mets
 
 function Header({
   session,
+  agents,
   project,
   profiles,
   termSize,
@@ -97,6 +101,7 @@ function Header({
   onForget,
 }: {
   session: Session
+  agents: readonly Subagent[] | undefined
   project: ProjectInfo | undefined
   profiles: Profile[]
   termSize: { cols: number; rows: number } | null
@@ -123,6 +128,7 @@ function Header({
   const name = sessionDisplayName(session)
   const naming = supportsNaming(session)
   const color = sessionColor(session)
+  const agentsRunning = runningLabel(runningCount(session, agents))
 
   async function run(kind: 'stop' | 'resume', f: () => Promise<unknown>, what: string) {
     setBusy(kind)
@@ -274,6 +280,11 @@ function Header({
       )}
       <div className="sh-2">
         <span>{glyph.label}</span>
+        {agentsRunning && (
+          <span className="chip ag-chip">
+            <span className="st running" aria-hidden="true" /> {agentsRunning}
+          </span>
+        )}
         <span
           title={
             m?.context_window_size ? `Fenêtre de contexte : ${formatNumber(m.context_window_size)} tokens` : 'Fenêtre de contexte'
@@ -342,8 +353,24 @@ export function SessionPane({
   review,
   seen: seenFiles,
   onSeen,
+  agents,
+  agentsLoad,
+  onRetryAgents,
+  agentId,
+  onSelectAgent,
+  openAgents,
 }: {
   session: Session | null
+  /** Sous-agents de la session affichée ; `undefined` tant que la liste est inconnue. */
+  agents: readonly Subagent[] | undefined
+  /** Amorçage de la liste (« Chargement », « indisponible »…), ou `null`. */
+  agentsLoad: 'loading' | 'failed' | 'unsupported' | null
+  onRetryAgents: (sessionId: string) => void
+  /** Agent choisi dans l'onglet « Agents » (gardé par session). */
+  agentId: string | null
+  onSelectAgent: (agentId: string) => void
+  /** Augmente à chaque demande d'ouverture de l'onglet « Agents » (clic dans la barre latérale). */
+  openAgents: number
   /** Nombre de `session.diff_changed` reçus pour la session affichée. */
   diffSeq: number
   /** Revue en cours de la session affichée. */
@@ -385,7 +412,26 @@ export function SessionPane({
     ['terminal', 'Terminal'],
     ['diff', 'Diff'],
     ['files', 'Fichiers'],
+    ['agents', 'Agents'],
   ] as const
+  const agentsRunning = session ? runningCount(session, agents) : 0
+
+  // Clic sur un sous-agent dans la barre latérale : onglet « Agents » (pas au montage du volet),
+  // puis focus sur l'agent choisi.
+  const openedAgents = useRef(openAgents)
+  const focusAgent = useRef(false)
+  useEffect(() => {
+    if (openAgents === openedAgents.current) return
+    openedAgents.current = openAgents
+    focusAgent.current = true
+    setTab('agents')
+  }, [openAgents])
+  useEffect(() => {
+    if (!focusAgent.current || tab !== 'agents') return
+    focusAgent.current = false
+    const panel = document.getElementById(`${tabsId}-agents-panel`)
+    panel?.querySelector<HTMLElement>('.ag-item[aria-current="true"]')?.focus()
+  }, [tab, openAgents, agentId, tabsId])
 
   // Nouvelle demande : le focus va à la carte, sauf si l'utilisateur tape (terminal ou champ).
   useEffect(() => {
@@ -403,6 +449,7 @@ export function SessionPane({
         <Header
           key={session.id}
           session={session}
+          agents={agents}
           project={project}
           profiles={profiles}
           termSize={termSize}
@@ -446,6 +493,11 @@ export function SessionPane({
             {k === 'diff' && fileCount !== null && fileCount > 0 && (
               <span className="badge" aria-label={`${fileCount} fichier${fileCount > 1 ? 's' : ''} changé${fileCount > 1 ? 's' : ''}`}>
                 {fileCount}
+              </span>
+            )}
+            {k === 'agents' && agentsRunning > 0 && (
+              <span className="badge" aria-label={runningLabel(agentsRunning) ?? undefined}>
+                {agentsRunning}
               </span>
             )}
             {k === 'diff' && pendingComments > 0 && (
@@ -518,6 +570,24 @@ export function SessionPane({
               />
             ) : (
               <p className="empty">Choisis une session pour parcourir ses fichiers.</p>
+            )}
+          </div>
+        )}
+        {tab === 'agents' && (
+          <div className="diff-layer" role="tabpanel" id={`${tabsId}-agents-panel`} aria-labelledby={`${tabsId}-agents`}>
+            {session ? (
+              <AgentsView
+                key={session.id}
+                session={session}
+                agents={agents}
+                load={agentsLoad}
+                onRetry={() => onRetryAgents(session.id)}
+                selectedId={agentId}
+                onSelect={onSelectAgent}
+                onLink={onLink}
+              />
+            ) : (
+              <p className="empty">Choisis une session pour suivre ses sous-agents.</p>
             )}
           </div>
         )}
