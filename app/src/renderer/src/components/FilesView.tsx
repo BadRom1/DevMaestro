@@ -1,14 +1,17 @@
 /**
  * Onglet « Fichiers » (maquette) : arborescence de la session chargée à la
  * demande (fichiers modifiés marqués, dossiers ouverts vers eux), filtre,
- * lecteur Markdown avec sommaire ou texte en lecture seule, « Mentionner à
- * Claude » et « Voir le diff ».
+ * lecteur Markdown avec sommaire ou code coloré en lecture seule, « Mentionner
+ * à Claude » et « Voir le diff ». Une sélection de lignes (code) ou de blocs
+ * (Markdown rendu) s'ajoute au brouillon de revue de la session, le même que
+ * celui de l'onglet Diff, et part avec « Envoyer la revue ».
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 
 import { ErrorCode, type DiffSummary, type FileContent, type FileEntry, type Session } from '../../../shared/protocol'
 import { call, errorCode, errorText } from '../api'
-import { STATUS_LABELS } from '../state/diff'
+import { awaitingAnswer } from '../state/status'
+import { STATUS_LABELS, sortFiles } from '../state/diff'
 import {
   ancestorDirs,
   defaultFile,
@@ -19,7 +22,24 @@ import {
   type DirCache,
   type TreeRow,
 } from '../state/fileTree'
+import { languageForPath, lineCount, withinHighlightLimits } from '../state/highlight'
 import { classifyLink, renderMarkdown } from '../state/markdown'
+import {
+  MAX_COMMENTS,
+  activeComments,
+  fileComments,
+  fileSelectionError,
+  hasDraft,
+  type ReviewAction,
+  type ReviewDraft,
+} from '../state/review'
+import { markdownSelection } from '../state/domSelection'
+import type { LineSpan } from '../state/sourceSelection'
+import { CodeView, lineGeometry, type SelectionPoint } from './CodeView'
+import { CommentBox, ReviewBar, linesLabel } from './ReviewBar'
+
+/** Aucun fichier dans le diff (référence stable). */
+const NO_FILES: DiffSummary['files'] = []
 
 /** Anti-rebond des rechargements après `session.diff_changed`. */
 const TREE_REFRESH_MS = 1000
@@ -34,6 +54,8 @@ interface FilesMemory {
   raw: boolean
   scroll: number
   autoOpened: boolean
+  /** Dernière demande « montrer cet extrait » traitée (consommée une seule fois). */
+  focusN: number
 }
 
 /** État de l'onglet par session, gardé hors du composant (démonté au changement d'onglet). */
@@ -42,10 +64,15 @@ const memory = new Map<string, FilesMemory>()
 function memoryFor(id: string): FilesMemory {
   let m = memory.get(id)
   if (!m) {
-    m = { cache: {}, open: new Set(), root: null, truncated: new Set(), filter: '', file: null, raw: false, scroll: 0, autoOpened: false }
+    m = { cache: {}, open: new Set(), root: null, truncated: new Set(), filter: '', file: null, raw: false, scroll: 0, autoOpened: false, focusN: 0 }
     memory.set(id, m)
   }
   return m
+}
+
+/** Session oubliée : son état d'onglet n'a plus à être gardé. */
+export function forgetFilesMemory(id: string): void {
+  memory.delete(id)
 }
 
 export const OLD_DAEMON_FILES = 'Le démon ne sait pas encore lister les fichiers : mets orchd à jour.'
@@ -60,6 +87,13 @@ function icon(r: Pick<TreeRow, 'kind' | 'path' | 'expanded'>): string {
   return isMarkdown(r.path) ? '¶' : '·'
 }
 
+interface PendingSelection {
+  span: LineSpan
+  /** Position dans le contenu défilant (`.fbody`). */
+  top: number
+  left: number
+}
+
 export function FilesView({
   session,
   diff,
@@ -67,8 +101,19 @@ export function FilesView({
   onMentioned,
   onShowDiff,
   onLink,
+  draft,
+  review,
+  onSent,
+  focusFile,
 }: {
   session: Session
+  /** Brouillon de revue de la session (partagé avec l'onglet Diff). */
+  draft: ReviewDraft
+  review: (a: ReviewAction) => void
+  /** Revue envoyée : retour au terminal. */
+  onSent: () => void
+  /** Fichier et ligne à montrer (extrait cliqué dans la revue) ; `n` augmente à chaque demande. */
+  focusFile?: { sessionId: string; path: string; line: number; n: number } | null
   /** Liste du diff (fichiers modifiés), si chargée. */
   diff: DiffSummary | null
   /** Change à chaque nouvelle liste du diff : marques rafraîchies. */
@@ -92,7 +137,19 @@ export function FilesView({
   const [raw, setRaw] = useState(memo.raw)
   const [mentionError, setMentionError] = useState<string | null>(null)
   const [pendingAnchor, setPendingAnchor] = useState<string | null>(null)
+  /** Ligne à montrer une fois le contenu affiché. */
+  const [pendingLine, setPendingLine] = useState<{ path: string; line: number } | null>(null)
+  /** Lignes choisies (bouton « Commenter ») et commentaire en cours de saisie. */
+  const [pick, setPick] = useState<PendingSelection | null>(null)
+  const [commentText, setCommentText] = useState<string | null>(null)
+  /** Le fichier a été relu (changé) pendant la saisie du commentaire. */
+  const [pickStale, setPickStale] = useState(false)
+  const commentRef = useRef(commentText)
+  commentRef.current = commentText
+  const contentRef = useRef(content)
+  contentRef.current = content
   const body = useRef<HTMLDivElement>(null)
+  const article = useRef<HTMLElement>(null)
   /** Défilement à rendre après le prochain chargement du contenu. */
   const restoreScroll = useRef<number | null>(memo.file ? memo.scroll : null)
 
@@ -109,6 +166,8 @@ export function FilesView({
 
   const changedFiles = useMemo(() => (diff?.files ?? []).map((f) => ({ path: f.path, status: f.status })), [diff])
   const changedPaths = useMemo(() => changedFiles.map((f) => f.path), [changedFiles])
+  /** Liste du diff dans l'ordre de l'onglet Diff : la revue part dans le même ordre d'où qu'on l'envoie. */
+  const sortedDiffFiles = useMemo(() => (diff ? sortFiles(diff.files) : NO_FILES), [diff])
 
   /** Numéro du dernier appel par dossier (une réponse plus ancienne est ignorée) et appels en cours. */
   const dirSeq = useRef(new Map<string, number>())
@@ -212,6 +271,11 @@ export function FilesView({
         .then((c) => {
           if (!alive) return
           restoreScroll.current = scroll
+          // Contenu changé pendant une sélection : lignes peut-être décalées.
+          if (c.content !== contentRef.current?.content) {
+            if (commentRef.current !== null) setPickStale(true)
+            else setPick(null)
+          }
           setContent(c)
         })
         .catch(() => undefined)
@@ -227,6 +291,21 @@ export function FilesView({
     [content, file, raw],
   )
 
+  // Autre fichier ou autre affichage : la sélection en cours est abandonnée.
+  useEffect(() => {
+    setPick(null)
+    setCommentText(null)
+    setPickStale(false)
+  }, [file, raw])
+
+  // Extrait cliqué dans la revue : fichier ouvert puis ligne montrée (une fois par demande, pour cette session).
+  useEffect(() => {
+    if (!focusFile || focusFile.sessionId !== session.id || focusFile.n <= memo.focusN) return
+    memo.focusN = focusFile.n
+    if (focusFile.path !== file) openFile(focusFile.path)
+    setPendingLine({ path: focusFile.path, line: focusFile.line })
+  }, [focusFile?.n])
+
   // Position de lecture rendue après un rechargement ou un retour sur l'onglet.
   useLayoutEffect(() => {
     if (restoreScroll.current === null || !content || !body.current) return
@@ -240,6 +319,84 @@ export function FilesView({
     document.getElementById(pendingAnchor)?.scrollIntoView({ block: 'start' })
     setPendingAnchor(null)
   }, [rendered, pendingAnchor])
+
+  // Ligne demandée : défilement une fois le contenu là (code : position calculée ; Markdown : premier bloc qui la couvre).
+  useLayoutEffect(() => {
+    const el = body.current
+    // Contenu encore celui du fichier précédent : on attend le bon.
+    if (pendingLine === null || !content || content.path !== pendingLine.path || !el) return
+    const line = pendingLine.line
+    setPendingLine(null)
+    if (article.current) {
+      const blocks = [...article.current.querySelectorAll<HTMLElement>('[data-source-start]')]
+      const hit = blocks.find((b) => Number(b.dataset.sourceEnd) >= line)
+      hit?.scrollIntoView({ block: 'center' })
+      return
+    }
+    const gutter = el.querySelector<HTMLElement>('.codeview .gutter')
+    if (!gutter || content.content == null) return
+    const g = lineGeometry(gutter, lineCount(content.content))
+    const y = g.top - el.getBoundingClientRect().top + el.scrollTop + g.padTop + (line - 1) * g.lineHeight
+    el.scrollTop = Math.max(0, y - el.clientHeight / 3)
+  }, [pendingLine, content, raw])
+
+  /** Sélection (vue code ou Markdown) : bouton « Commenter » placé sous sa fin. */
+  const choose = useCallback((span: LineSpan | null, at: SelectionPoint | null) => {
+    const el = body.current
+    setPickStale(false)
+    // Fichier vide : rien à commenter.
+    if (!span || !at || !el || !contentRef.current?.content) {
+      setPick(null)
+      return
+    }
+    const r = el.getBoundingClientRect()
+    setPick({ span, top: at.y - r.top + el.scrollTop + 4, left: Math.max(8, at.x - r.left + el.scrollLeft) })
+  }, [])
+
+  function onArticleUp() {
+    // Pendant la saisie d'un commentaire, une nouvelle sélection ne remplace pas l'extrait.
+    if (commentRef.current !== null) return
+    const sel = window.getSelection()
+    const a = article.current
+    if (!a || !sel || sel.rangeCount === 0 || sel.isCollapsed) return
+    const range = sel.getRangeAt(0)
+    const span = markdownSelection(a, range)
+    if (!span) return
+    const rect = range.getBoundingClientRect()
+    choose(span, { x: rect.left, y: rect.bottom })
+  }
+
+  // Maj+flèches dans le Markdown rendu : même bouton qu'à la souris.
+  const articleUpRef = useRef(onArticleUp)
+  articleUpRef.current = onArticleUp
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.shiftKey || /^(Arrow|Home|End|Page)/.test(e.key)) articleUpRef.current()
+    }
+    document.addEventListener('keyup', key)
+    return () => document.removeEventListener('keyup', key)
+  }, [])
+
+  function onBodyDown(e: MouseEvent<HTMLDivElement>) {
+    // Nouvelle sélection : l'ancien bouton disparaît (pas pendant la saisie d'un commentaire).
+    if (commentText !== null || (e.target as HTMLElement).closest('.selfloat')) return
+    if (!(e.target as HTMLElement).closest('.gutter')) setPick(null)
+  }
+
+  function saveComment() {
+    if (!pick || !file) return
+    review({ type: 'addFile', path: file, line: pick.span.line, lineEnd: pick.span.lineEnd, text: commentText ?? '' })
+    setPick(null)
+    setCommentText(null)
+    setPickStale(false)
+    window.getSelection()?.removeAllRanges()
+  }
+
+  function cancelComment() {
+    setPick(null)
+    setCommentText(null)
+    setPickStale(false)
+  }
 
   function toggle(r: TreeRow) {
     if (r.kind !== 'dir') {
@@ -296,11 +453,18 @@ export function FilesView({
     }
   }
 
-  const waiting = session.status.state === 'waiting' || session.pending.length > 0
+  const waiting = awaitingAnswer(session)
   const rows = filter.trim() ? filterFiles(cache, changedFiles, filter) : visibleRows(cache, open, changedPaths)
   const changed = file ? (changedFiles.find((f) => f.path === file)?.status ?? null) : null
   const rootName = root ? root.split('/').filter(Boolean).pop() : null
   const showToc = !!rendered && rendered.outline.length > 1
+  const text = content && !content.binary && !content.too_large ? content.content : null
+  const language = file ? (isMarkdown(file) ? 'markdown' : languageForPath(file)) : null
+  const highlightOk = useMemo(() => (text != null ? withinHighlightLimits(text) : true), [text])
+  const tooBigToColor = text != null && ((!rendered && language !== null && !highlightOk) || (rendered !== null && !rendered.highlighted))
+  const hereComments = file ? fileComments(draft, file) : []
+  const pickError = pick ? fileSelectionError(pick.span.line, pick.span.lineEnd) : null
+  const draftFull = activeComments(draft).length >= MAX_COMMENTS
 
   return (
     <div className={`fpane${showToc ? '' : ' notoc'}`}>
@@ -408,8 +572,13 @@ export function FilesView({
               {mentionError}
             </span>
           )}
+          {tooBigToColor && (
+            <span className="hint">
+              {rendered ? 'Blocs de code non colorés' : 'Coloration désactivée'} : fichier de plus de 200 Kio ou 5 000 lignes.
+            </span>
+          )}
         </div>
-        <div className="fbody" ref={body} tabIndex={0} aria-label={file ? `Contenu de ${file}` : 'Contenu'}>
+        <div className="fbody" ref={body} tabIndex={0} aria-label={file ? `Contenu de ${file}` : 'Contenu'} onMouseDown={onBodyDown}>
           {!file && <p className="empty">Choisis un fichier à gauche.</p>}
           {viewError && (
             <p className="inline-err pad" role="alert">
@@ -419,15 +588,73 @@ export function FilesView({
           {file && !content && !viewError && <p className="empty">Chargement…</p>}
           {content?.binary && <p className="empty">Fichier binaire : pas d’aperçu.</p>}
           {content?.too_large && <p className="empty">Fichier trop volumineux pour être affiché (2 Mio au plus).</p>}
-          {content && !content.binary && !content.too_large && content.content != null && (
-            // HTML produit par markdown-it sans HTML brut (échappé) ni image chargée.
-            rendered ? (
-              <article className="md" onClick={onArticleClick} dangerouslySetInnerHTML={{ __html: rendered.html }} />
+          {text != null &&
+            (rendered ? (
+              // HTML produit par markdown-it sans HTML brut (échappé) ni image chargée ; code coloré par highlight.js (échappé).
+              <article
+                ref={article}
+                className="md"
+                onClick={onArticleClick}
+                onMouseUp={onArticleUp}
+                dangerouslySetInnerHTML={{ __html: rendered.html }}
+              />
             ) : (
-              <pre className="srcview">{content.content}</pre>
-            )
+              <CodeView
+                text={text}
+                language={language}
+                highlight={highlightOk}
+                selection={pick?.span ?? null}
+                comments={hereComments}
+                onSelect={commentText === null ? choose : () => undefined}
+              />
+            ))}
+          {pick && file && (
+            <div className="selfloat" style={{ top: pick.top, left: pick.left }}>
+              {commentText !== null ? (
+                <CommentBox
+                  title={`${file}:${linesLabel(pick.span.line, pick.span.lineEnd)}${pickStale ? ' · le fichier a changé depuis la sélection : vérifie les lignes avant d’ajouter' : ''}`}
+                  text={commentText}
+                  onText={setCommentText}
+                  onSave={saveComment}
+                  onCancel={cancelComment}
+                  label={`Commentaire sur les lignes ${linesLabel(pick.span.line, pick.span.lineEnd)}`}
+                  placeholder="Ta remarque sur ces lignes (facultatif)… (Entrée : ajouter, Maj+Entrée : nouvelle ligne, Échap : annuler)"
+                />
+              ) : pickError ? (
+                <span className="inline-err" role="alert">
+                  Impossible de commenter : {pickError}.
+                </span>
+              ) : draftFull ? (
+                <span className="inline-err" role="alert">
+                  Limite de {MAX_COMMENTS} commentaires atteinte.
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="btn sm pri"
+                  // Garder la sélection visible au clic.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => setCommentText('')}
+                >
+                  Commenter {pick.span.lineEnd > pick.span.line ? `les lignes ${linesLabel(pick.span.line, pick.span.lineEnd)}` : `la ligne ${pick.span.line}`}
+                </button>
+              )}
+            </div>
           )}
         </div>
+        {hasDraft(draft) && (
+          <ReviewBar
+            session={session}
+            draft={draft}
+            review={review}
+            files={sortedDiffFiles}
+            onSent={onSent}
+            onOpenFile={(path, line) => {
+              if (path !== file) openFile(path)
+              setPendingLine({ path, line })
+            }}
+          />
+        )}
       </div>
       {showToc && rendered && (
         <nav className="toc" aria-label="Sur cette page">

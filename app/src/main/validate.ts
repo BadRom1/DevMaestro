@@ -135,6 +135,8 @@ function title(o: Obj, k: string): string {
 /** Limites du démon pour une revue : 200 commentaires, 4 000 caractères chacun (et le général). */
 const MAX_REVIEW_COMMENTS = 200
 const MAX_REVIEW_TEXT = 4000
+/** Commentaire de fichier : 400 lignes au plus (`line_end - line + 1`). */
+const MAX_REVIEW_FILE_LINES = 400
 
 /** Chemin d'un fichier du diff (relatif au dépôt, tel que donné par `sessions.diff`). */
 function relPath(o: Obj, k: string): string {
@@ -250,6 +252,20 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
         const x = obj(c)
         const where = `commentaire ${i + 1}`
         try {
+          if (x.kind === 'file') {
+            // Commentaire de fichier : lignes relues par le démon, remarque facultative.
+            // `line_end` absent : une seule ligne ; `text` absent : extrait sans remarque.
+            const line = int(x, 'line', 1, 10_000_000)
+            const lineEnd = x.line_end === undefined ? line : int(x, 'line_end', line, line + MAX_REVIEW_FILE_LINES - 1)
+            return {
+              kind: 'file',
+              path: relPath(x, 'path'),
+              line,
+              line_end: lineEnd,
+              text: x.text === undefined ? '' : str(x, 'text', MAX_REVIEW_TEXT, { codePoints: true }),
+            }
+          }
+          if (x.kind !== undefined && x.kind !== 'diff') throw new ValidationError('« kind » doit valoir diff ou file')
           return {
             path: relPath(x, 'path'),
             line: int(x, 'line', 1, 10_000_000),

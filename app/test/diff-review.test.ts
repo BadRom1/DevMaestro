@@ -12,6 +12,7 @@ import {
   emptyDraft,
   findAnchor,
   hasDraft,
+  isDiffComment,
   reviewReducer,
   type ReviewAction,
   type ReviewDraft,
@@ -180,7 +181,7 @@ describe('commentaires de revue', () => {
     const rows = diffRows(fd)
     expect(findAnchor(rows, 'new', 10, 'foo()')).toBe(12)
     const r = run([{ type: 'reanchor', path: 'a.ts', rows }], d)
-    expect(r.comments.map((c) => [c.text, c.line, !!c.stale])).toEqual([
+    expect(r.comments.map((c) => [c.text, c.line, isDiffComment(c) && !!c.stale])).toEqual([
       ['sur foo', 12, false],
       ['sur bar', 4, false],
       ['disparu', 20, true],

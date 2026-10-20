@@ -14,5 +14,8 @@
     "src/main/**/*.ts",
     "src/shared/**/*.ts",
     "test/**/*.ts"
+  ],
+  "exclude": [
+    "test/dom/**"
   ]
 }

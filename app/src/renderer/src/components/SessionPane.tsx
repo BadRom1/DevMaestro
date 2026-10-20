@@ -32,7 +32,8 @@ import { TerminalView } from '../terminal/TerminalView'
 import { Meter, ProfileChip, StatusGlyph } from './common'
 import { useSettings } from '../settings'
 import { PermissionCard, QuestionCard } from './RequestCards'
-import { activeComments, type ReviewAction, type ReviewDraft } from '../state/review'
+import { ViewBoundary } from './ViewBoundary'
+import { activeComments, fileComments, type ReviewAction, type ReviewDraft } from '../state/review'
 import { DiffView, useSessionDiff } from './DiffView'
 import { FilesView } from './FilesView'
 import { AgentsView } from './Subagents'
@@ -398,7 +399,9 @@ export function SessionPane({
   const keysSig = keys.join(',')
   const [tab, setTab] = useState<Tab>('terminal')
   /** Fichier à montrer dans le diff (« Voir le diff » depuis l'onglet Fichiers). */
-  const [diffFocus, setDiffFocus] = useState<{ path: string; n: number } | null>(null)
+  const [diffFocus, setDiffFocus] = useState<{ sessionId: string; path: string; n: number } | null>(null)
+  /** Extrait à montrer dans l'onglet Fichiers (clic dans la liste de la revue). */
+  const [filesFocus, setFilesFocus] = useState<{ sessionId: string; path: string; line: number; n: number } | null>(null)
   // Le diff n'est calculé qu'une fois l'onglet ouvert pour la session (puis tenu à jour pour le badge).
   const [diffOpened, setDiffOpened] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => {
@@ -407,7 +410,12 @@ export function SessionPane({
   const diff = useSessionDiff(session?.id ?? null, diffSeq, tab !== 'terminal' || (!!session && diffOpened.has(session.id)))
   const fileCount = diff.summary?.files.length ?? null
   const pendingComments = activeComments(draft).length
+  const fileExtracts = fileComments(draft).length
   const tabsId = useId()
+  const backToTerminal = () => {
+    setTab('terminal')
+    document.getElementById(`${tabsId}-terminal`)?.focus()
+  }
   const tabs = [
     ['terminal', 'Terminal'],
     ['diff', 'Diff'],
@@ -505,6 +513,11 @@ export function SessionPane({
                 💬{pendingComments}
               </span>
             )}
+            {k === 'files' && fileExtracts > 0 && (
+              <span className="badge pend" aria-label={`${fileExtracts} extrait${fileExtracts > 1 ? 's' : ''} de fichier dans la revue`}>
+                💬{fileExtracts}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -530,20 +543,23 @@ export function SessionPane({
         {tab === 'diff' && (
           <div className="diff-layer" role="tabpanel" id={`${tabsId}-diff-panel`} aria-labelledby={`${tabsId}-diff`}>
             {session ? (
-              <DiffView
-                key={session.id}
-                focusPath={diffFocus}
-                session={session}
-                diff={diff}
-                draft={draft}
-                review={review}
-                seen={seenFiles}
-                onSeen={onSeen}
-                onSent={() => {
-                  setTab('terminal')
-                  document.getElementById(`${tabsId}-terminal`)?.focus()
-                }}
-              />
+              <ViewBoundary key={session.id} label="Diff">
+                <DiffView
+                  key={session.id}
+                  focusPath={diffFocus}
+                  session={session}
+                  diff={diff}
+                  draft={draft}
+                  review={review}
+                  seen={seenFiles}
+                  onSeen={onSeen}
+                  onSent={backToTerminal}
+                  onOpenFile={(path, line) => {
+                    setFilesFocus((f) => ({ sessionId: session.id, path, line, n: (f?.n ?? 0) + 1 }))
+                    setTab('files')
+                  }}
+                />
+              </ViewBoundary>
             ) : (
               <p className="empty">Choisis une session pour voir ce qu’elle a changé.</p>
             )}
@@ -552,22 +568,28 @@ export function SessionPane({
         {tab === 'files' && (
           <div className="diff-layer" role="tabpanel" id={`${tabsId}-files-panel`} aria-labelledby={`${tabsId}-files`}>
             {session ? (
-              <FilesView
-                key={session.id}
-                session={session}
-                diff={diff.summary}
-                diffVersion={diff.version}
-                onLink={onLink}
-                onShowDiff={(path) => {
-                  setDiffFocus((f) => ({ path, n: (f?.n ?? 0) + 1 }))
-                  setTab('diff')
-                }}
-                onMentioned={() => {
-                  setTab('terminal')
-                  // Le terminal reprend le focus pour continuer le message.
-                  requestAnimationFrame(() => termHost.current?.querySelector<HTMLElement>('.xterm-helper-textarea')?.focus())
-                }}
-              />
+              <ViewBoundary key={session.id} label="Fichiers">
+                <FilesView
+                  key={session.id}
+                  session={session}
+                  diff={diff.summary}
+                  diffVersion={diff.version}
+                  draft={draft}
+                  review={review}
+                  onSent={backToTerminal}
+                  focusFile={filesFocus}
+                  onLink={onLink}
+                  onShowDiff={(path) => {
+                    setDiffFocus((f) => ({ sessionId: session.id, path, n: (f?.n ?? 0) + 1 }))
+                    setTab('diff')
+                  }}
+                  onMentioned={() => {
+                    setTab('terminal')
+                    // Le terminal reprend le focus pour continuer le message.
+                    requestAnimationFrame(() => termHost.current?.querySelector<HTMLElement>('.xterm-helper-textarea')?.focus())
+                  }}
+                />
+              </ViewBoundary>
             ) : (
               <p className="empty">Choisis une session pour parcourir ses fichiers.</p>
             )}
@@ -576,16 +598,18 @@ export function SessionPane({
         {tab === 'agents' && (
           <div className="diff-layer" role="tabpanel" id={`${tabsId}-agents-panel`} aria-labelledby={`${tabsId}-agents`}>
             {session ? (
-              <AgentsView
-                key={session.id}
-                session={session}
-                agents={agents}
-                load={agentsLoad}
-                onRetry={() => onRetryAgents(session.id)}
-                selectedId={agentId}
-                onSelect={onSelectAgent}
-                onLink={onLink}
-              />
+              <ViewBoundary key={session.id} label="Agents">
+                <AgentsView
+                  key={session.id}
+                  session={session}
+                  agents={agents}
+                  load={agentsLoad}
+                  onRetry={() => onRetryAgents(session.id)}
+                  selectedId={agentId}
+                  onSelect={onSelectAgent}
+                  onLink={onLink}
+                />
+              </ViewBoundary>
             ) : (
               <p className="empty">Choisis une session pour suivre ses sous-agents.</p>
             )}

@@ -10,7 +10,7 @@
  * | arrêtée | rond gris « ✓ » |
  * | erreur | rond rouge « × » |
  */
-import type { SessionStatus } from '../../../shared/protocol'
+import type { Session, SessionStatus } from '../../../shared/protocol'
 
 export type GlyphKind = 'waiting' | 'running' | 'idle' | 'stopped' | 'error'
 
@@ -53,4 +53,12 @@ export const STATUS_ORDER: Record<GlyphKind, number> = {
   idle: 2,
   error: 3,
   stopped: 4,
+}
+
+/**
+ * Une demande (permission ou question) attend une réponse : rien ne doit être
+ * tapé dans la session (l'Entrée validerait le dialogue de la TUI).
+ */
+export function awaitingAnswer(s: Pick<Session, 'status' | 'pending'>): boolean {
+  return s.status.state === 'waiting' || s.pending.length > 0
 }

@@ -18,31 +18,34 @@ import {
   totals,
   type LineAnchor,
 } from '../state/diff'
-import {
-  MAX_COMMENTS,
-  MAX_COMMENT_CHARS,
-  activeComments,
-  buildReview,
-  commentsAt,
-  hasDraft,
-  type ReviewAction,
-  type ReviewDraft,
-} from '../state/review'
-import { ConfirmBar } from './ForgetConfirm'
+import { MAX_COMMENTS, activeComments, commentsAt, isDiffComment, type ReviewAction, type ReviewDraft } from '../state/review'
 import { PathLabel } from './common'
+import { CommentBox, ReviewBar } from './ReviewBar'
 
 const DEBOUNCE_MS = 400
 
 /** Fichier choisi et défilement, par session (gardés hors du composant). */
-const diffMemory = new Map<string, { selected: string | null; scroll: number }>()
+interface DiffMemory {
+  selected: string | null
+  scroll: number
+  /** Dernière demande « Voir le diff » traitée (consommée une seule fois). */
+  focusN: number
+}
 
-function diffMemoryFor(id: string): { selected: string | null; scroll: number } {
+const diffMemory = new Map<string, DiffMemory>()
+
+function diffMemoryFor(id: string): DiffMemory {
   let m = diffMemory.get(id)
   if (!m) {
-    m = { selected: null, scroll: 0 }
+    m = { selected: null, scroll: 0, focusN: 0 }
     diffMemory.set(id, m)
   }
   return m
+}
+
+/** Session oubliée : son état d'onglet n'a plus à être gardé. */
+export function forgetDiffMemory(id: string): void {
+  diffMemory.delete(id)
 }
 
 export const OLD_DAEMON_DIFF = 'Le démon ne sait pas encore calculer le diff : mets orchd à jour.'
@@ -113,55 +116,6 @@ function typing(t: EventTarget | null): boolean {
   return t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement
 }
 
-/** Boîte de commentaire : son texte vit dans la revue (un rechargement du diff ne le perd pas). */
-function CommentBox({
-  text,
-  onText,
-  onSave,
-  onCancel,
-}: {
-  text: string
-  onText: (t: string) => void
-  onSave: () => void
-  onCancel: () => void
-}) {
-  const ref = useRef<HTMLTextAreaElement>(null)
-  useEffect(() => ref.current?.focus(), [])
-  const n = [...text].length
-  return (
-    <div className="cbox">
-      <textarea
-        ref={ref}
-        value={text}
-        placeholder="Ton commentaire sur cette ligne… (Entrée : ajouter, Maj+Entrée : nouvelle ligne, Échap : annuler)"
-        aria-label="Commentaire sur la ligne"
-        onChange={(e) => onText(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault()
-            onSave()
-          } else if (e.key === 'Escape') {
-            e.preventDefault()
-            e.stopPropagation()
-            onCancel()
-          }
-        }}
-      />
-      <div className="row">
-        <span className="hint counter" aria-live="polite">
-          {n > MAX_COMMENT_CHARS * 0.9 ? `${n}/${MAX_COMMENT_CHARS}` : ''}
-        </span>
-        <button type="button" className="btn sm ghost" onClick={onCancel}>
-          Annuler
-        </button>
-        <button type="button" className="btn sm pri" onClick={onSave}>
-          Ajouter à la revue
-        </button>
-      </div>
-    </div>
-  )
-}
-
 export function DiffView({
   session,
   diff,
@@ -170,11 +124,12 @@ export function DiffView({
   seen,
   onSeen,
   onSent,
+  onOpenFile,
   focusPath,
 }: {
   session: Session
   /** Fichier à sélectionner (« Voir le diff » de l'onglet Fichiers) ; `n` change à chaque demande. */
-  focusPath?: { path: string; n: number } | null
+  focusPath?: { sessionId: string; path: string; n: number } | null
   diff: DiffState & { reload: () => void }
   draft: ReviewDraft
   review: (a: ReviewAction) => void
@@ -182,12 +137,16 @@ export function DiffView({
   onSeen: (path: string, value: boolean) => void
   /** Revue envoyée : retour au terminal. */
   onSent: () => void
+  /** Extrait de fichier cliqué dans la liste de la revue : onglet Fichiers. */
+  onOpenFile?: (path: string, line: number) => void
 }) {
   const files = useMemo(() => sortFiles(diff.summary?.files ?? []), [diff.summary])
   const memo = diffMemoryFor(session.id)
-  const [selected, setSelected] = useState<string | null>(focusPath?.path ?? memo.selected)
+  /** Demande « Voir le diff » pour cette session, pas encore traitée. */
+  const freshFocus = focusPath && focusPath.sessionId === session.id && focusPath.n > memo.focusN ? focusPath : null
+  const [selected, setSelected] = useState<string | null>(freshFocus?.path ?? memo.selected)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const restoreScroll = useRef<number | null>(focusPath ? null : memo.scroll)
+  const restoreScroll = useRef<number | null>(freshFocus ? null : memo.scroll)
   // Fichier et défilement gardés par session (l'onglet est démonté quand on en change).
   useEffect(() => {
     memo.selected = selected
@@ -199,13 +158,12 @@ export function DiffView({
     }
   }, [memo])
   useEffect(() => {
-    if (focusPath) setSelected(focusPath.path)
+    if (!freshFocus) return
+    memo.focusN = freshFocus.n
+    setSelected(freshFocus.path)
   }, [focusPath?.n])
   const [fileDiff, setFileDiff] = useState<{ path: string; data: FileDiff } | null>(null)
   const [fileError, setFileError] = useState<string | null>(null)
-  const [sending, setSending] = useState(false)
-  const [sendError, setSendError] = useState<string | null>(null)
-  const [confirmClear, setConfirmClear] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
 
   // Fichier choisi : le premier, ou le même s'il est toujours dans la liste.
@@ -253,10 +211,8 @@ export function DiffView({
     }
   }, [rows])
 
-  const built = useMemo(() => buildReview(draft, files), [draft, files])
   const count = activeComments(draft).length
-  const waiting = session.status.state === 'waiting' || session.pending.length > 0
-  const staleHere = selected ? draft.comments.filter((c) => c.stale && c.path === selected) : []
+  const staleHere = selected ? draft.comments.filter(isDiffComment).filter((c) => c.stale && c.path === selected) : []
   const full = count >= MAX_COMMENTS
   const seenCount = files.filter((f) => seen[f.path]).length
   const t = totals(files)
@@ -277,33 +233,6 @@ export function DiffView({
     } else if (e.key === 'k' || (inList && e.key === 'ArrowUp')) {
       e.preventDefault()
       move(-1)
-    }
-  }
-
-  async function send() {
-    if (!built || !session.alive || waiting || sending) return
-    setSending(true)
-    setSendError(null)
-    try {
-      await call('sessions.sendReview', {
-        id: session.id,
-        comments: built.comments,
-        ...(built.general ? { general: built.general } : {}),
-      })
-      // Seuls les commentaires envoyés partent ; les autres restent avec leur avertissement.
-      review({ type: 'sent', ids: built.ids, general: !!built.general })
-      onSent()
-    } catch (e) {
-      const code = errorCode(e)
-      setSendError(
-        code === ErrorCode.MethodNotFound
-          ? 'Le démon ne sait pas encore envoyer une revue : mets orchd à jour.'
-          : code === ErrorCode.InvalidState
-            ? `Revue non envoyée : Claude attend une réponse (permission ou question), ou la session ne tourne plus. Réponds d’abord à la demande en attente, puis renvoie la revue. (${e instanceof Error ? e.message : ''})`
-            : `Revue non envoyée : ${errorText(e)}`,
-      )
-    } finally {
-      setSending(false)
     }
   }
 
@@ -367,7 +296,7 @@ export function DiffView({
         {files.length === 0 && <p className="hint pad">Aucune modification depuis la base.</p>}
         <ul role="list">
           {files.map((f) => {
-            const n = draft.comments.filter((c) => c.path === f.path && !c.stale).length
+            const n = draft.comments.filter(isDiffComment).filter((c) => c.path === f.path && !c.stale).length
             return (
               <li key={f.path}>
                 <button
@@ -531,75 +460,14 @@ export function DiffView({
             </section>
           )}
         </div>
-        <div className="dfoot">
-          {built && built.dropped.length > 0 && (
-            <span className="hint warnline">
-              {built.dropped.length} commentaire{built.dropped.length > 1 ? 's' : ''} ne {built.dropped.length > 1 ? 'seront' : 'sera'} pas
-              envoyé{built.dropped.length > 1 ? 's' : ''} (ligne modifiée, ou fichier qui n’est plus dans le diff) : ils restent ici.
-            </span>
-          )}
-          {full && <span className="hint warnline">Limite de {MAX_COMMENTS} commentaires atteinte.</span>}
-          <input
-            value={draft.general}
-            maxLength={MAX_COMMENT_CHARS * 2}
-            onChange={(e) => review({ type: 'general', text: e.target.value })}
-            onKeyDown={(e) => {
-              if (e.key !== 'Enter') return
-              // Entrée seule n'envoie rien ; Ctrl+Entrée envoie la revue.
-              e.preventDefault()
-              if (e.ctrlKey || e.metaKey) void send()
-            }}
-            placeholder="Commentaire général (facultatif)"
-            aria-label="Commentaire général de la revue"
-            aria-describedby="review-send-hint"
-          />
-          {[...draft.general].length > MAX_COMMENT_CHARS * 0.9 && (
-            <span className="hint counter">
-              {[...draft.general].length}/{MAX_COMMENT_CHARS}
-            </span>
-          )}
-          {hasDraft(draft) && (
-            <button type="button" className="btn ghost" onClick={() => setConfirmClear(true)} disabled={sending}>
-              Effacer
-            </button>
-          )}
-          <span className="hint" id="review-send-hint">
-            <kbd>Ctrl</kbd>+<kbd>Entrée</kbd> pour envoyer
-          </span>
-          <button
-            type="button"
-            className="btn pri"
-            disabled={!built || !session.alive || waiting || sending}
-            onClick={() => void send()}
-            title={
-              !session.alive
-                ? 'La session ne tourne pas : reprends-la pour lui envoyer la revue.'
-                : waiting
-                  ? 'Réponds d’abord à la demande en attente (permission ou question).'
-                  : undefined
-            }
-          >
-            {sending ? 'Envoi…' : `Envoyer la revue à Claude${count ? ` (${count})` : ''}`}
-          </button>
-          {sendError && (
-            <span className="inline-err" role="alert">
-              {sendError}
-            </span>
-          )}
-          {confirmClear && (
-            <ConfirmBar
-              message={`Effacer la revue en cours (${draft.comments.length} commentaire${draft.comments.length > 1 ? 's' : ''}${draft.general.trim() ? ' et le commentaire général' : ''}) ?`}
-              confirmLabel="Effacer"
-              busyLabel="Effacement…"
-              errorPrefix="Effacement impossible"
-              onConfirm={async () => {
-                review({ type: 'clear' })
-                setConfirmClear(false)
-              }}
-              onCancel={() => setConfirmClear(false)}
-            />
-          )}
-        </div>
+        <ReviewBar
+          session={session}
+          draft={draft}
+          review={review}
+          files={files}
+          onSent={onSent}
+          {...(onOpenFile ? { onOpenFile } : {})}
+        />
       </div>
     </div>
   )

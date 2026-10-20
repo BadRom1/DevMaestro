@@ -71,6 +71,8 @@ pub const MODES: &[&str] = &[
 pub struct RpcError {
     pub code: i64,
     pub message: String,
+    /// Détails structurés (champ `data` de l'erreur JSON-RPC), s'il y en a.
+    pub data: Option<Value>,
 }
 
 impl RpcError {
@@ -78,7 +80,12 @@ impl RpcError {
         Self {
             code,
             message: message.into(),
+            data: None,
         }
+    }
+    pub fn with_data(mut self, data: Value) -> Self {
+        self.data = Some(data);
+        self
     }
     pub fn params(message: impl Into<String>) -> Self {
         Self::new(error_code::INVALID_PARAMS, message)
@@ -270,8 +277,19 @@ struct DiffWatch {
 /// Verrou des écritures dans le PTY d'une session.
 pub type PtyLock = Arc<tokio::sync::Mutex<()>>;
 
-/// Revue prête à envoyer : file d'entrée du PTY, son verrou, texte à coller.
-pub type ReviewToSend = (mpsc::Sender<Vec<u8>>, PtyLock, String);
+/// Revue prête à envoyer.
+#[derive(Debug)]
+pub struct ReviewToSend {
+    pub id: Uuid,
+    /// File d'entrée du PTY de la session.
+    pub input: mpsc::Sender<Vec<u8>>,
+    /// Verrou des écritures dans ce PTY.
+    pub lock: PtyLock,
+    /// Consigne à taper.
+    pub instruction: &'static str,
+    /// Texte à coller (au plus [`crate::domain::diff::MAX_REVIEW_BYTES`]).
+    pub text: String,
+}
 
 /// Âge maximal de la liste réutilisée par `sessions.diffFile` et
 /// `sessions.sendReview` pour valider un chemin.
@@ -1587,13 +1605,62 @@ impl Daemon {
         Ok((e.session.cwd.clone(), run.input.clone(), e.pty_lock.clone()))
     }
 
-    /// `sessions.sendReview` : valide la revue, la met en forme (Markdown,
-    /// extraits du diff) et renvoie la file d'entrée du PTY, son verrou et le
-    /// texte à coller. Bloquant (`git`).
+    /// Revérifie, verrou du PTY pris et juste avant d'écrire, qu'une revue
+    /// préparée peut toujours partir : même processus, toujours en vie, et
+    /// aucune demande apparue pendant la préparation (lecture du disque,
+    /// `git`). Mêmes erreurs que [`Self::review_target`].
+    pub fn recheck_review(&self, review: &ReviewToSend) -> Result<(), RpcError> {
+        let (_, input, _) = self.review_target(&review.id)?;
+        if !input.same_channel(&review.input) {
+            return Err(RpcError::new(
+                error_code::INVALID_STATE,
+                "la session ne tourne plus",
+            ));
+        }
+        Ok(())
+    }
+
+    /// `sessions.sendReview` : valide la revue (commentaires de diff et de
+    /// fichier), la met en forme (Markdown, extraits du diff et lignes des
+    /// fichiers relues ici, au plus 256 Kio collés) et renvoie de quoi
+    /// l'envoyer. Bloquant (`git`, disque).
     pub fn prepare_review(&self, params: &Value) -> Result<ReviewToSend, RpcError> {
         use crate::domain::diff::{
-            MAX_REVIEW_COMMENTS, MAX_REVIEW_TEXT_CHARS, ReviewComment, Side, excerpt, format_review,
+            FileComment, MAX_REVIEW_BYTES, MAX_REVIEW_COMMENTS, MAX_REVIEW_TEXT_CHARS,
+            ReviewBuilder, ReviewComment, ReviewEntry, Side, excerpt, file_excerpt, line_count,
+            looks_binary, review_instruction, validate_file_range,
         };
+        use crate::domain::files::{MAX_READ_BYTES, normalize_rel};
+        /// Commentaire validé, pas encore accompagné de son extrait.
+        enum Parsed {
+            Diff(ReviewComment),
+            File(FileComment),
+        }
+        /// Erreur sur un commentaire de fichier : rang, chemin et lignes
+        /// demandés dans le message, et `data: {index, path, line,
+        /// line_end}` (valeurs telles que reçues ; `index` à partir de 0).
+        fn file_comment_error(
+            code: i64,
+            index: usize,
+            (path, line, line_end): (&Value, &Value, &Value),
+            message: &str,
+        ) -> RpcError {
+            let shown = path.as_str().unwrap_or("?");
+            let lines = match (line.as_u64(), line_end.as_u64()) {
+                (Some(a), Some(b)) if a == b => format!("ligne {a}"),
+                (Some(a), Some(b)) => format!("lignes {a}-{b}"),
+                (Some(a), None) => format!("ligne {a}"),
+                _ => "lignes ?".to_owned(),
+            };
+            RpcError::new(
+                code,
+                format!(
+                    "commentaire {} (« {shown} », {lines}) : {message}",
+                    index + 1
+                ),
+            )
+            .with_data(json!({"index": index, "path": path, "line": line, "line_end": line_end}))
+        }
         let id = session_id_param(params)?;
         let text_param = |v: &Value, what: &str| -> Result<String, RpcError> {
             let t = v
@@ -1622,9 +1689,58 @@ impl Daemon {
                 raw.len()
             )));
         }
-        let mut comments = Vec::with_capacity(raw.len());
+        let mut parsed = Vec::with_capacity(raw.len());
         for (i, c) in raw.iter().enumerate() {
             let at = |m: &str| RpcError::params(format!("commentaire {} : {m}", i + 1));
+            let kind = match c.get("kind") {
+                None | Some(Value::Null) => "diff",
+                Some(Value::String(k)) if k == "diff" || k == "file" => k.as_str(),
+                Some(_) => return Err(at("« kind » : « diff » ou « file » attendu")),
+            };
+            if kind == "file" {
+                let raw_path = c.get("path").unwrap_or(&Value::Null);
+                let raw_line = c.get("line").unwrap_or(&Value::Null);
+                // `line_end` absent : une seule ligne.
+                let raw_end = match c.get("line_end") {
+                    None | Some(Value::Null) => raw_line,
+                    Some(v) => v,
+                };
+                let at = |m: &str| {
+                    file_comment_error(
+                        error_code::INVALID_PARAMS,
+                        i,
+                        (raw_path, raw_line, raw_end),
+                        m,
+                    )
+                };
+                let path = raw_path
+                    .as_str()
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| at("« path » manquant"))?;
+                let rel = normalize_rel(path).map_err(at)?;
+                if rel.is_empty() {
+                    return Err(at("« path » : un fichier attendu"));
+                }
+                let line = raw_line
+                    .as_u64()
+                    .ok_or_else(|| at("« line » : entier positif attendu"))?;
+                let line_end = raw_end.as_u64().ok_or_else(|| {
+                    at("« line_end » : entier supérieur ou égal à « line » attendu")
+                })?;
+                validate_file_range(line, line_end).map_err(|m| at(&m))?;
+                // Commentaire facultatif pour une sélection de fichier.
+                let text = match c.get("text") {
+                    None | Some(Value::Null) => String::new(),
+                    Some(v) => text_param(v, "text").map_err(|e| at(&e.message))?,
+                };
+                parsed.push(Parsed::File(FileComment {
+                    path: rel,
+                    line: line as u32,
+                    line_end: line_end as u32,
+                    text,
+                }));
+                continue;
+            }
             let path = c
                 .get("path")
                 .and_then(Value::as_str)
@@ -1646,43 +1762,115 @@ impl Daemon {
             if text.trim().is_empty() {
                 return Err(at("« text » vide"));
             }
-            comments.push(ReviewComment {
+            parsed.push(Parsed::Diff(ReviewComment {
                 path,
                 line,
                 side,
                 text,
-            });
+            }));
         }
-        if comments.is_empty() && general.is_none() {
+        if parsed.is_empty() && general.is_none() {
             return Err(RpcError::params(
                 "revue vide : au moins un commentaire ou « general » attendu",
             ));
         }
         let (cwd, input, lock) = self.review_target(&id)?;
-        let changes = self.recent_changes(id, &cwd)?;
+        // Diff : seulement s'il y a des commentaires de diff (une sélection
+        // de fichier marche aussi hors dépôt).
+        let has_diff = parsed.iter().any(|p| matches!(p, Parsed::Diff(_)));
+        let has_file = parsed.iter().any(|p| matches!(p, Parsed::File(_)));
+        let changes = if has_diff {
+            Some(self.recent_changes(id, &cwd)?)
+        } else {
+            None
+        };
+        let root = if has_file {
+            Some(self.files_root(&id)?.1)
+        } else {
+            None
+        };
+        let count = parsed.len();
         let mut diffs: HashMap<String, crate::domain::diff::FileDiff> = HashMap::new();
-        for c in &comments {
-            let file = changes.file(&c.path).ok_or_else(|| {
-                RpcError::params(format!(
-                    "« {} » ne fait pas partie du diff de la session",
-                    c.path
-                ))
-            })?;
-            if !diffs.contains_key(&c.path) {
-                let d = self.deps.diff.file_diff(&changes, file).unwrap_or_default();
-                diffs.insert(c.path.clone(), d);
+        // Dernier fichier lu (les sélections d'un même fichier se suivent
+        // en général) : toujours lu par le démon, jamais de texte d'extrait
+        // venu du client ; un seul fichier de 2 Mio au plus en mémoire.
+        let mut last_file: Option<(String, String)> = None;
+        // Revue bornée : au-delà de 256 Kio, les éléments sont comptés, plus
+        // gardés.
+        let mut review = ReviewBuilder::new(general.as_deref());
+        for (i, p) in parsed.into_iter().enumerate() {
+            match p {
+                Parsed::Diff(c) => {
+                    let changes = changes.as_ref().expect("diff calculé");
+                    let file = changes.file(&c.path).ok_or_else(|| {
+                        RpcError::params(format!(
+                            "« {} » ne fait pas partie du diff de la session",
+                            c.path
+                        ))
+                    })?;
+                    if !diffs.contains_key(&c.path) {
+                        let d = self.deps.diff.file_diff(changes, file).unwrap_or_default();
+                        diffs.insert(c.path.clone(), d);
+                    }
+                    let ex = excerpt(&diffs[&c.path], c.line, c.side);
+                    review.push(&ReviewEntry::Diff(c, ex));
+                }
+                Parsed::File(c) => {
+                    let (path_v, line_v, end_v) = (json!(c.path), json!(c.line), json!(c.line_end));
+                    let fail = |code: i64, m: &str| {
+                        file_comment_error(code, i, (&path_v, &line_v, &end_v), m)
+                    };
+                    if last_file.as_ref().is_none_or(|(p, _)| *p != c.path) {
+                        let root = root.as_ref().expect("racine résolue");
+                        let f = self
+                            .deps
+                            .files
+                            .read_beneath(root, &c.path, MAX_READ_BYTES)
+                            .map_err(|e| {
+                                let e = file_error(e, &c.path);
+                                fail(e.code, &e.message)
+                            })?;
+                        let bytes = f.bytes.ok_or_else(|| {
+                            fail(
+                                error_code::INVALID_PARAMS,
+                                &format!(
+                                    "fichier trop gros (plus de {} Mio)",
+                                    MAX_READ_BYTES / (1024 * 1024)
+                                ),
+                            )
+                        })?;
+                        if looks_binary(&bytes) {
+                            return Err(fail(error_code::INVALID_PARAMS, "fichier binaire"));
+                        }
+                        last_file =
+                            Some((c.path.clone(), String::from_utf8_lossy(&bytes).into_owned()));
+                    }
+                    let text = &last_file.as_ref().expect("fichier lu").1;
+                    let lines = file_excerpt(text, c.line, c.line_end).ok_or_else(|| {
+                        fail(
+                            error_code::INVALID_PARAMS,
+                            &format!("hors du fichier ({} ligne(s))", line_count(text)),
+                        )
+                    })?;
+                    review.push(&ReviewEntry::File(c, lines));
+                }
             }
         }
-        let excerpts: Vec<_> = comments
-            .iter()
-            .map(|c| excerpt(&diffs[&c.path], c.line, c.side))
-            .collect();
-        let review = format_review(general.as_deref(), &comments, &excerpts);
-        info!(
-            "session {id} : revue envoyée ({} commentaire(s))",
-            comments.len()
-        );
-        Ok((input, lock, review))
+        let text = review.finish().map_err(|n| {
+            RpcError::params(format!(
+                "revue trop volumineuse : {} Kio sur {} Kio au plus",
+                n.div_ceil(1024),
+                MAX_REVIEW_BYTES / 1024
+            ))
+        })?;
+        info!("session {id} : revue préparée ({count} commentaire(s))");
+        Ok(ReviewToSend {
+            id,
+            input,
+            lock,
+            instruction: review_instruction(has_diff, has_file),
+            text,
+        })
     }
 
     /// Recalcule le diff d'une session dans 500 ms (anti-rebond : un seul

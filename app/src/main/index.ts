@@ -304,7 +304,7 @@ function failure(err: unknown): { ok: false; error: RpcFailure } {
     return { ok: false, error: { code: ErrorCode.InvalidParams, message: `paramètres refusés par l'app : ${err.message}` } }
   }
   const r = err instanceof RpcError ? err : new RpcError(ErrorCode.Internal, (err as Error).message)
-  return { ok: false, error: { code: r.code, message: r.message } }
+  return { ok: false, error: { code: r.code, message: r.message, ...(r.data !== undefined ? { data: r.data } : {}) } }
 }
 
 function registerIpc(): void {

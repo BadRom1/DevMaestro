@@ -78,3 +78,17 @@ pub fn response(id: Value, result: Value) -> Value {
 pub fn error_response(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message.into()}})
 }
+
+/// Erreur avec un champ `data` facultatif (détails structurés).
+pub fn error_response_data(
+    id: Value,
+    code: i64,
+    message: impl Into<String>,
+    data: Option<Value>,
+) -> Value {
+    let mut v = error_response(id, code, message);
+    if let Some(data) = data {
+        v["error"]["data"] = data;
+    }
+    v
+}

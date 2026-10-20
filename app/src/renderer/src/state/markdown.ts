@@ -4,9 +4,16 @@
  * - images jamais chargées : remplacées par leur texte alternatif ;
  * - titres numérotés pour le sommaire (« Sur cette page ») ;
  * - liens classés au clic (`classifyLink`) : fichier `.md` relatif → lecteur,
- *   http(s) → confirmation puis navigateur, ancre → titre, le reste inerte.
+ *   http(s) → confirmation puis navigateur, ancre → titre, le reste inerte ;
+ * - blocs de code colorés (highlight.js, langage de l'info du bloc, sortie
+ *   échappée ; langage inconnu ou document trop gros : texte échappé) ;
+ * - chaque bloc porte ses lignes source (`data-source-start` / `data-source-end`,
+ *   1-based, bornes comprises), tirées de `token.map`, pour commenter une sélection.
  */
 import MarkdownIt from 'markdown-it'
+import type { MarkdownIt as MarkdownItInstance, StateCore } from 'markdown-it'
+
+import { highlightCode, languageForFence, withinHighlightLimits } from './highlight'
 
 export interface OutlineItem {
   level: number
@@ -25,25 +32,59 @@ export function slugify(text: string): string {
   return s || 'section'
 }
 
-const md = new MarkdownIt({ html: false, linkify: false, typographer: false })
-
-const escapeHtml = (s: string) => md.utils.escapeHtml(s)
-
-// Images : jamais chargées (la CSP les bloquerait de toute façon), texte alternatif à la place.
-md.renderer.rules.image = (tokens, idx) => {
-  const t = tokens[idx]!
-  const alt = t.children?.map((c) => c.content).join('') || t.content || ''
-  const src = String(t.attrGet('src') ?? '')
-  return `<span class="img-alt" title="${escapeHtml(src)}">[image${alt ? ` : ${escapeHtml(alt)}` : ''}]</span>`
+/**
+ * Lignes source sur chaque bloc ouvrant ou autonome (paragraphe, titre, liste,
+ * élément, citation, tableau, ligne, bloc de code, filet). `map` vaut
+ * `[début, fin)` en lignes 0-based : `data-source-start = début + 1`,
+ * `data-source-end = fin` (dernière ligne, 1-based).
+ */
+function sourceLines(state: StateCore): void {
+  const lines = state.src.split('\n')
+  for (const t of state.tokens) {
+    if (!t.block || !t.map || t.nesting === -1 || t.type === 'inline') continue
+    let [start, end] = t.map
+    // Les listes comptent la ligne vide qui les suit : elle n'est pas du bloc.
+    while (end - 1 > start && !lines[end - 1]?.trim()) end--
+    t.attrSet('data-source-start', String(start + 1))
+    t.attrSet('data-source-end', String(Math.max(start + 1, end)))
+  }
 }
+
+function makeMd(highlight: boolean): MarkdownItInstance {
+  const md = new MarkdownIt({
+    html: false,
+    linkify: false,
+    typographer: false,
+    // Chaîne vide : markdown-it échappe lui-même le contenu (langage inconnu).
+    highlight: highlight ? (code, info) => highlightCode(code, languageForFence(info)) ?? '' : null,
+  })
+  const escape = (s: string) => md.utils.escapeHtml(s)
+  // Images : jamais chargées (la CSP les bloquerait de toute façon), texte alternatif à la place.
+  md.renderer.rules.image = (tokens, idx) => {
+    const t = tokens[idx]!
+    const alt = t.children?.map((c) => c.content).join('') || t.content || ''
+    const src = String(t.attrGet('src') ?? '')
+    return `<span class="img-alt" title="${escape(src)}">[image${alt ? ` : ${escape(alt)}` : ''}]</span>`
+  }
+  md.core.ruler.push('source_lines', sourceLines)
+  return md
+}
+
+/** Avec coloration des blocs de code, et sans (document au-delà des seuils). */
+const mdColored = makeMd(true)
+const mdPlain = makeMd(false)
 
 export interface RenderedMarkdown {
   html: string
   outline: OutlineItem[]
+  /** Blocs de code colorés (document sous les seuils de taille). */
+  highlighted: boolean
 }
 
 /** Rendu sûr et sommaire (titres de niveau 1 à 4, identifiants uniques). */
 export function renderMarkdown(src: string): RenderedMarkdown {
+  const highlighted = withinHighlightLimits(src)
+  const md = highlighted ? mdColored : mdPlain
   const env = {}
   const tokens = md.parse(src, env)
   const outline: OutlineItem[] = []
@@ -69,7 +110,7 @@ export function renderMarkdown(src: string): RenderedMarkdown {
     t.attrSet('id', id)
     if (level <= 4 && text) outline.push({ level, text, id })
   }
-  return { html: md.renderer.render(tokens, md.options, env), outline }
+  return { html: md.renderer.render(tokens, md.options, env), outline, highlighted }
 }
 
 export type LinkTarget =

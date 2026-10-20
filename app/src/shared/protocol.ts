@@ -280,12 +280,28 @@ export interface FileDiff {
 
 export type ReviewSide = 'new' | 'old'
 
+/** Commentaire sur une ligne du diff (sans `kind`, comme avant le lot 3 bis). */
 export interface ReviewComment {
   path: string
   line: number
   side: ReviewSide
   text: string
 }
+
+/**
+ * Commentaire sur des lignes d'un fichier (onglet Fichiers, lot 3 bis) : le
+ * démon relit lui-même les lignes `line` à `line_end` (400 au plus) ; `text`
+ * peut être vide (extrait sans remarque).
+ */
+export interface FileReviewComment {
+  kind: 'file'
+  path: string
+  line: number
+  line_end: number
+  text: string
+}
+
+export type AnyReviewComment = ReviewComment | FileReviewComment
 
 /* ---------- Onglet Fichiers (v0.2, lot 3) ---------- */
 
@@ -407,7 +423,7 @@ export interface Methods {
   }
   'sessions.diff': { params: { id: string }; result: DiffSummary }
   'sessions.diffFile': { params: { id: string; path: string }; result: FileDiff }
-  'sessions.sendReview': { params: { id: string; comments: ReviewComment[]; general?: string }; result: unknown }
+  'sessions.sendReview': { params: { id: string; comments: AnyReviewComment[]; general?: string }; result: unknown }
   /** Texte tapé dans la session (sans Entrée), ex. « @chemin » pour mentionner un fichier. */
   'sessions.input': { params: { id: string; data: string }; result: unknown }
   'files.list': { params: { id: string; path?: string }; result: FilesList }

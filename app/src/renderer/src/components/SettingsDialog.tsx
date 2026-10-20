@@ -302,9 +302,9 @@ function General({ profiles, projects, home }: { profiles: Profile[]; projects: 
             onChange={(e) => update({ notifications: { enabled: e.target.checked } })}
           />
           <span>
-            Notification du bureau quand une session attend une réponse{' '}
-            <span className="hint">
-              · sans son (tes hooks s’en chargent) ; aucune si la fenêtre a le focus et affiche déjà cette session
+            Notification du bureau quand une session attend une réponse
+            <span className="hint optaide">
+              Sans son (tes hooks s’en chargent) ; aucune si la fenêtre a le focus et affiche déjà cette session.
             </span>
           </span>
         </label>

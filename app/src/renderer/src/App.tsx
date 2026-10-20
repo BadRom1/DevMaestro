@@ -4,6 +4,8 @@ import type { ConnectionState } from '../../shared/bridge'
 import { validHome } from '../../shared/home'
 import { ErrorCode, type Session } from '../../shared/protocol'
 import { CallError, api, call } from './api'
+import { forgetDiffMemory } from './components/DiffView'
+import { forgetFilesMemory } from './components/FilesView'
 import { LinkDialog } from './components/LinkDialog'
 import { NewSessionDialog } from './components/NewSessionDialog'
 import { SessionPane } from './components/SessionPane'
@@ -29,6 +31,12 @@ import {
 } from './state/subagentsLoad'
 import { resolveScheme } from './state/themeTokens'
 import { applyTheme, systemPrefersLight, terminalTheme, type ThemeMode } from './theme'
+
+/** État gardé des onglets Diff et Fichiers d'une session oubliée : libéré. */
+function forgetViewMemory(id: string): void {
+  forgetFilesMemory(id)
+  forgetDiffMemory(id)
+}
 
 /** Aucun fichier vu (référence stable). */
 const NO_SEEN: Record<string, boolean> = {}
@@ -125,7 +133,10 @@ export function App() {
     const offN = api.onNotification((n) => {
       if (n.method === 'session.updated') dispatch({ type: 'session.updated', session: n.params.session })
       else if (n.method === 'session.effect') dispatch({ type: 'session.effect', id: n.params.id, effect: n.params.effect })
-      else if (n.method === 'session.removed') dispatch({ type: 'session.removed', id: n.params.id })
+      else if (n.method === 'session.removed') {
+        forgetViewMemory(n.params.id)
+        dispatch({ type: 'session.removed', id: n.params.id })
+      }
       else if (n.method === 'session.diff_changed') dispatch({ type: 'diff.changed', id: n.params.id })
       else if (n.method === 'session.subagents_changed') {
         if (typeof n.params?.id === 'string') dispatch({ type: 'subagents.changed', id: n.params.id, agents: n.params.agents })
@@ -322,6 +333,7 @@ export function App() {
   /** Retire une session arrêtée de la liste du démon ; la page la retire aussitôt. */
   const forget = useCallback(async (id: string) => {
     await call('sessions.forget', { id })
+    forgetViewMemory(id)
     dispatch({ type: 'session.removed', id })
   }, [])
 

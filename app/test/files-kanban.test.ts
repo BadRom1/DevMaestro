@@ -67,7 +67,7 @@ describe('lecteur Markdown', () => {
       { level: 2, text: 'Tests go test', id: 'h-tests-go-test' },
       { level: 2, text: 'Tests go test', id: 'h-tests-go-test-1' },
     ])
-    expect(r.html).toContain('<h1 id="h-demarrer">Démarrer</h1>')
+    expect(r.html).toMatch(/<h1 data-source-start="\d+" data-source-end="\d+" id="h-demarrer">Démarrer<\/h1>/)
     expect(slugify('  ')).toBe('section')
   })
 

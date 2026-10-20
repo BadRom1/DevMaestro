@@ -24,6 +24,8 @@ export type ConnectionState =
 export interface RpcFailure {
   code: number
   message: string
+  /** Détails structurés du démon (ex. extrait refusé : `{index, path, line, line_end}`). */
+  data?: unknown
 }
 
 export type CallResult<M extends MethodName> =

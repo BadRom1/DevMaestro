@@ -24,11 +24,13 @@ use uuid::Uuid;
 use super::log::warning;
 use super::peer::Peer;
 use super::supervisor::{
-    DEFAULT_SIZE, Daemon, Event, RpcError, SetModeError, opt_str, session_id_param, size_param,
+    DEFAULT_SIZE, Daemon, Event, ReviewToSend, RpcError, SetModeError, opt_str, session_id_param,
+    size_param,
 };
 use super::terminal::{Chunk, Snapshot, Terminal};
 use crate::protocol::{
-    Frame, PROTOCOL_VERSION, error_code, error_response, notification, read_frame_async, response,
+    Frame, PROTOCOL_VERSION, error_code, error_response, error_response_data, notification,
+    read_frame_async, response,
 };
 
 /// Trames en attente d'écriture vers un client.
@@ -295,7 +297,10 @@ impl Connection {
         match result {
             Ok(Some(value)) => self.send(response(id, value)).await,
             Ok(None) => {} // réponse déjà envoyée
-            Err(e) => self.send(error_response(id, e.code, e.message)).await,
+            Err(e) => {
+                self.send(error_response_data(id, e.code, e.message, e.data))
+                    .await
+            }
         }
     }
 
@@ -386,7 +391,7 @@ impl Connection {
                             if let Some(id) = id {
                                 let msg = match result {
                                     Ok(v) => response(id, v),
-                                    Err(e) => error_response(id, e.code, e.message),
+                                    Err(e) => error_response_data(id, e.code, e.message, e.data),
                                 };
                                 let _ = out.send(Frame::rpc(&msg)).await;
                             }
@@ -429,8 +434,8 @@ impl Connection {
                 })
                 .await
                 .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??;
-                if let (value, Some((tx, lock, review))) = r {
-                    send_review(&tx, &lock, &review).await?;
+                if let (value, Some(review)) = r {
+                    send_review(&d, &review).await?;
                     value
                 } else {
                     r.0
@@ -501,26 +506,27 @@ impl Connection {
 /// tapé, la revue reste un collage).
 const REVIEW_STEP: std::time::Duration = std::time::Duration::from_millis(80);
 
-/// Tape la consigne, colle la revue en *bracketed paste*, puis Entrée
-/// (architecture § 9 : seul le contenu est collé).
+/// Tape la consigne (celle de la revue, ou celle des extraits de fichiers),
+/// colle la revue en *bracketed paste*, puis Entrée (architecture § 9 : seul
+/// le contenu est collé).
 ///
 /// Le verrou des écritures de la session est tenu pendant les trois envois :
 /// ni une autre revue, ni des Shift+Tab, ni une entrée clavier passée par le
 /// démon ne s'intercalent. (Des touches tapées par l'utilisateur pendant ces
-/// 160 ms attendent derrière le verrou.)
-async fn send_review(
-    tx: &mpsc::Sender<Vec<u8>>,
-    lock: &tokio::sync::Mutex<()>,
-    review: &str,
-) -> Result<(), RpcError> {
-    let _guard = lock.lock().await;
+/// 160 ms attendent derrière le verrou.) Une fois le verrou pris, l'état de
+/// la session est revérifié : une demande apparue pendant la préparation
+/// (lecture du disque, `git`) fait refuser la revue, sans rien écrire.
+async fn send_review(d: &Arc<Daemon>, review: &ReviewToSend) -> Result<(), RpcError> {
+    let _guard = review.lock.lock().await;
+    d.recheck_review(review)?;
+    let tx = &review.input;
     let gone = |_| RpcError::new(error_code::INVALID_STATE, "la session ne tourne plus");
-    tx.send(crate::domain::diff::REVIEW_INSTRUCTION.as_bytes().to_vec())
+    tx.send(review.instruction.as_bytes().to_vec())
         .await
         .map_err(gone)?;
     tokio::time::sleep(REVIEW_STEP).await;
     let mut paste = b"\x1b[200~".to_vec();
-    paste.extend_from_slice(review.as_bytes());
+    paste.extend_from_slice(review.text.as_bytes());
     paste.extend_from_slice(b"\x1b[201~");
     tx.send(paste).await.map_err(gone)?;
     tokio::time::sleep(REVIEW_STEP).await;
