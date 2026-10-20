@@ -368,10 +368,11 @@ fn set_mode_cycles_with_shift_tab() {
     for (mode, expected) in steps {
         let r = c.call("sessions.setMode", json!({"id": id, "mode": mode}));
         assert_eq!(r, json!({"sent": expected}), "vers {mode}");
-        if expected > 0 {
-            wait_output(&mut c, id, &format!("⏵⏵ mode : {mode}"));
-        }
-        // Confirmation par les hooks du tour suivant.
+        // Confirmation immédiate par le pied de la TUI, sans attendre de hook.
+        c.wait_until(&format!("mode {mode} lu à l'écran"), |c| {
+            c.last_session(id).is_some_and(|s| s["mode"] == mode)
+        });
+        // Puis par les hooks du tour suivant.
         turn(&mut c, id);
         assert_eq!(c.last_session(id).unwrap()["mode"], mode, "vers {mode}");
     }
@@ -550,27 +551,134 @@ fn second_set_mode_waits_for_the_first_to_be_confirmed() {
     c.call("hello", json!({}));
     let id = session(&mut c, &env, json!({"mode": "default"}));
     turn(&mut c, id);
+    let mode_is = |c: &mut Client, mode: &str| {
+        c.wait_until(&format!("mode {mode}"), |c| {
+            c.last_session(id).is_some_and(|s| s["mode"] == mode)
+        });
+    };
+
+    // Avec le pied de la TUI : le second appel attend (côté démon) que le
+    // premier soit confirmé à l'écran, puis compte depuis le mode confirmé.
     assert_eq!(
         c.call("sessions.setMode", json!({"id": id, "mode": "plan"})),
         json!({"sent": 2})
     );
-    // Le mode courant connu est encore « default » : un second calcul serait faux.
-    assert_eq!(
-        c.call_err("sessions.setMode", json!({"id": id, "mode": "auto"})),
-        -32002
-    );
-    wait_output(&mut c, id, "⏵⏵ mode : plan");
-    turn(&mut c, id);
-    assert_eq!(c.last_session(id).unwrap()["mode"], "plan");
-    assert_eq!(
-        c.call("sessions.setMode", json!({"id": id, "mode": "auto"})),
-        json!({"sent": 1})
-    );
-    // Sans hook pour confirmer, le verrou tombe au bout de 3 s.
-    std::thread::sleep(Duration::from_millis(3200));
     assert_eq!(
         c.call("sessions.setMode", json!({"id": id, "mode": "auto"})),
         json!({"sent": 1}),
-        "toujours compté depuis « plan », dernier mode confirmé"
+        "compté depuis « plan », confirmé par le pied"
+    );
+    mode_is(&mut c, "auto");
+    // Session inactive, aucun hook : le mode affiché suit quand même.
+    assert_eq!(
+        c.call("sessions.setMode", json!({"id": id, "mode": "default"})),
+        json!({"sent": 1})
+    );
+    mode_is(&mut c, "default");
+    // Shift+Tab tapé dans le terminal : lu aussi.
+    c.input(id, b"\x1b[Z");
+    mode_is(&mut c, "acceptEdits");
+    // Les hooks font foi : le tour suivant confirme.
+    turn(&mut c, id);
+    assert_eq!(c.last_session(id).unwrap()["mode"], "acceptEdits");
+
+    // Sans pied reconnu (autre version de Claude Code) : repli sur les hooks.
+    c.input(id, b"/sans-pied\r");
+    wait_output(&mut c, id, "pied retiré");
+    assert_eq!(
+        c.call("sessions.setMode", json!({"id": id, "mode": "auto"})),
+        json!({"sent": 2})
+    );
+    // Le mode courant connu est encore « acceptEdits » : un second calcul
+    // serait faux. Refusé après environ 1 s d'attente.
+    let t = Instant::now();
+    assert_eq!(
+        c.call_err("sessions.setMode", json!({"id": id, "mode": "plan"})),
+        -32002
+    );
+    assert!(
+        t.elapsed() >= Duration::from_millis(900),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!(c.last_session(id).unwrap()["mode"], "acceptEdits");
+    wait_output(&mut c, id, "(Shift+Tab : auto)");
+    turn(&mut c, id);
+    assert_eq!(c.last_session(id).unwrap()["mode"], "auto");
+    assert_eq!(
+        c.call("sessions.setMode", json!({"id": id, "mode": "plan"})),
+        json!({"sent": 3})
+    );
+    // Sans hook pour confirmer, le verrou tombe au bout de MODE_CHANGE_TIMEOUT
+    // (le délai court depuis l'envoi, avant la réponse : marge assurée).
+    std::thread::sleep(
+        devmaestro_core::daemon::supervisor::MODE_CHANGE_TIMEOUT + Duration::from_millis(200),
+    );
+    assert_eq!(
+        c.call("sessions.setMode", json!({"id": id, "mode": "plan"})),
+        json!({"sent": 3}),
+        "toujours compté depuis « auto », dernier mode confirmé"
+    );
+}
+
+#[test]
+fn late_hook_does_not_override_the_mode_shown_by_the_footer() {
+    let env = Env::new();
+    let _daemon = env.start_daemon();
+    let mut c = Client::connect(&env);
+    c.call("hello", json!({}));
+    let id = session(&mut c, &env, json!({"mode": "default"}));
+    turn(&mut c, id);
+    assert_eq!(
+        c.call("sessions.setMode", json!({"id": id, "mode": "acceptEdits"})),
+        json!({"sent": 1})
+    );
+    c.wait_until("mode lu à l'écran", |c| {
+        c.last_session(id)
+            .is_some_and(|s| s["mode"] == "acceptEdits")
+    });
+    // Un hook émis avant le Shift+Tab arrive maintenant, avec l'ancien mode.
+    c.input(id, b"/hook-perime default\r");
+    wait_output(&mut c, id, "hook en retard envoyé : default");
+    c.wait_until("mode du pied rétabli", |c| {
+        c.last_session(id)
+            .is_some_and(|s| s["mode"] == "acceptEdits")
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    c.pump(Duration::from_millis(50));
+    assert_eq!(c.last_session(id).unwrap()["mode"], "acceptEdits");
+    // Même sans sortie du terminal après le hook : le démon relit le pied
+    // de lui-même (~200 ms) et le garde.
+    c.input(id, b"/hook-perime-muet default\r");
+    // Le journal prouve que le hook a été appliqué puis corrigé.
+    wait_log(&env, "hook en retard (mode « default »)");
+    c.wait_until("pied relu par le démon", |c| {
+        c.last_session(id)
+            .is_some_and(|s| s["mode"] == "acceptEdits")
+    });
+    // Les touches passent pendant qu'un setMode attend sa confirmation.
+    c.input(id, b"/sans-pied\r");
+    wait_output(&mut c, id, "pied retiré");
+    assert_eq!(
+        c.call("sessions.setMode", json!({"id": id, "mode": "plan"})),
+        json!({"sent": 1})
+    );
+    let t = Instant::now();
+    let pending = c.send_request("sessions.setMode", json!({"id": id, "mode": "auto"}));
+    // La requête suivante n'attend pas la fin des essais du setMode.
+    let hello = c.send_request("hello", json!({}));
+    assert!(c.wait_response(hello)["result"]["server"] == "orchd");
+    assert!(c.responses_pending(pending), "setMode encore en attente");
+    assert!(
+        t.elapsed() < Duration::from_millis(800),
+        "{:?}",
+        t.elapsed()
+    );
+    let r = c.wait_response(pending);
+    assert_eq!(r["error"]["code"], -32002, "{r}");
+    assert!(
+        t.elapsed() >= Duration::from_millis(900),
+        "{:?}",
+        t.elapsed()
     );
 }

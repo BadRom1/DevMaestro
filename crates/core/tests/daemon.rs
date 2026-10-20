@@ -132,7 +132,27 @@ fn launch_follow_reconnect_stop_resume() {
         .map(|k| k.as_str().unwrap())
         .collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["ORCH_SESSION", "ORCH_SOCKET", "ORCH_TOKEN"]);
+    // Ni les marqueurs de session Claude Code hérités du démon : seuls les
+    // réglages de l'utilisateur passent.
+    assert_eq!(
+        keys,
+        [
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS",
+            "ORCH_SESSION",
+            "ORCH_SOCKET",
+            "ORCH_TOKEN"
+        ]
+    );
+    // Le démon les a retirés de son propre environnement (noms au journal,
+    // jamais les valeurs).
+    let log = daemon_log(&env);
+    assert!(
+        log.contains("marqueurs de session Claude Code hérités"),
+        "{log}"
+    );
+    assert!(log.contains("CLAUDE_CODE_CHILD_SESSION"), "{log}");
+    assert!(!log.contains("secret-de-la-session-parente"), "{log}");
     assert_eq!(l["ORCH_SOCKET"], json!(env.relay_socket()));
     assert_eq!(l["TERM"], "xterm-256color");
     assert_eq!(l["COLORTERM"], "truecolor");
@@ -623,4 +643,168 @@ fn stubborn_session_killed_and_second_signal_exits_now() {
     let mut c = Client::connect(&env);
     let s = c.call("sessions.get", json!({"id": id}));
     assert_eq!(status_label(&s["session"]), "stopped:stopped_by_app");
+}
+
+#[test]
+fn title_color_and_display_name() {
+    let env = Env::new();
+    let mut daemon = env.start_daemon();
+    let mut c = Client::connect(&env);
+    c.call("hello", json!({}));
+
+    // Nom affiché : premier prompt dès le lancement…
+    let prompt = "Corrige le test\nunitaire du démon";
+    let r = c.call(
+        "sessions.launch",
+        json!({"cwd": env.proj, "mode": "default", "prompt": prompt}),
+    );
+    let id: Uuid = r["session"]["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(r["session"]["first_prompt"], prompt);
+    assert_eq!(
+        r["session"]["display_name"],
+        "Corrige le test unitaire du démon"
+    );
+    assert_eq!(r["session"]["title"], json!(null));
+    assert_eq!(r["session"]["color"], json!(null));
+    // … puis le `session_name` de la statusline.
+    c.wait_until("nom de Claude Code", |c| {
+        c.last_session(id)
+            .is_some_and(|s| s["display_name"] == "Session factice")
+    });
+    wait_idle(&mut c, id);
+
+    // Paramètres invalides : rien ne change.
+    for bad in [
+        json!({"id": id}),
+        json!({"id": id, "color": "purple"}),
+        json!({"id": id, "color": 3}),
+        json!({"id": id, "title": "é".repeat(81)}),
+        json!({"id": id, "title": "deux\nlignes"}),
+        json!({"id": id, "title": 12}),
+    ] {
+        assert_eq!(c.call_err("sessions.update", bad.clone()), -32602, "{bad}");
+    }
+    assert_eq!(
+        c.call_err(
+            "sessions.update",
+            json!({"id": Uuid::new_v4(), "title": "x"})
+        ),
+        -32001
+    );
+
+    let before = c.last_session(id).unwrap();
+    let r = c.call(
+        "sessions.update",
+        json!({"id": id, "title": "  Mon titre  ", "color": "violet"}),
+    );
+    assert_eq!(r["session"]["title"], "Mon titre");
+    assert_eq!(r["session"]["color"], "violet");
+    assert_eq!(r["session"]["display_name"], "Mon titre");
+    assert_eq!(r["session"]["updated_at"], before["updated_at"]);
+    c.wait_until("session.updated du titre", |c| {
+        c.last_session(id)
+            .is_some_and(|s| s["title"] == "Mon titre")
+    });
+    // Clé absente : inchangée ; null : effacée.
+    let r = c.call("sessions.update", json!({"id": id, "color": null}));
+    assert_eq!(r["session"]["title"], "Mon titre");
+    assert_eq!(r["session"]["color"], json!(null));
+    let r = c.call("sessions.update", json!({"id": id, "title": null}));
+    assert_eq!(r["session"]["display_name"], "Session factice");
+    let r = c.call(
+        "sessions.update",
+        json!({"id": id, "title": "Titre gardé", "color": "bleu"}),
+    );
+    assert_eq!(r["session"]["display_name"], "Titre gardé");
+    let claude_id = r["session"]["claude_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Gardés à la reprise…
+    c.call("sessions.stop", json!({"id": id}));
+    c.wait_until("arrêt", |c| {
+        c.last_session(id).is_some_and(|s| s["alive"] == false)
+    });
+    let r = c.call("sessions.resume", json!({"id": id}));
+    assert_eq!(r["session"]["title"], "Titre gardé");
+    assert_eq!(r["session"]["color"], "bleu");
+    assert_eq!(r["session"]["first_prompt"], prompt);
+    wait_idle(&mut c, id);
+
+    // … et au redémarrage du démon (base SQLite).
+    daemon.signal(nix::sys::signal::Signal::SIGKILL);
+    daemon.wait();
+    drop(c);
+    let _daemon = env.start_daemon();
+    let mut c = Client::connect(&env);
+    let s = c.call("sessions.get", json!({"id": id}))["session"].clone();
+    assert_eq!(s["title"], "Titre gardé");
+    assert_eq!(s["color"], "bleu");
+    assert_eq!(s["first_prompt"], prompt);
+    assert_eq!(s["metrics"]["session_name"], "Session factice");
+    let r = c.call("sessions.update", json!({"id": id, "title": null}));
+    assert_eq!(r["session"]["display_name"], "Session factice");
+    c.call("sessions.update", json!({"id": id, "title": "Titre gardé"}));
+
+    // Anciennes sessions : titre de l'app, sinon titre de Claude Code, sinon
+    // premier prompt, sinon identifiant court.
+    let dir = env.home.join(".claude/projects/-projet");
+    std::fs::create_dir_all(&dir).unwrap();
+    let line = |prompt: &str| {
+        format!(
+            r#"{{"type":"user","cwd":"/p","timestamp":"2026-10-19T10:00:00Z","message":{{"content":"{prompt}"}}}}"#
+        )
+    };
+    std::fs::write(dir.join(format!("{claude_id}.jsonl")), line("ignoré")).unwrap();
+    let with_title = "11111111-1111-4111-8111-111111111111";
+    std::fs::write(
+        dir.join(format!("{with_title}.jsonl")),
+        format!(
+            "{}\n{}\n",
+            line("Prompt"),
+            r#"{"type":"summary","summary":"Résumé de Claude"}"#
+        ),
+    )
+    .unwrap();
+    let with_prompt = "22222222-2222-4222-8222-222222222222";
+    std::fs::write(
+        dir.join(format!("{with_prompt}.jsonl")),
+        line("Lis le code"),
+    )
+    .unwrap();
+    let empty = "33333333-3333-4333-8333-333333333333";
+    std::fs::write(dir.join(format!("{empty}.jsonl")), "").unwrap();
+    let list = c.call("transcripts.list", json!({}));
+    let names: HashMap<String, Value> = list["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["claude_session_id"].as_str().unwrap().to_owned(),
+                s["display_name"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(names[&claude_id], "Titre gardé");
+    assert_eq!(names[with_title], "Résumé de Claude");
+    assert_eq!(names[with_prompt], "Lis le code");
+    assert_eq!(names[empty], "33333333");
+
+    // Reprise d'une session connue seulement par son transcript : elle garde
+    // son nom (titre de Claude Code, premier prompt).
+    let r = c.call(
+        "sessions.resume",
+        json!({"claude_session_id": with_title, "cwd": env.proj}),
+    );
+    assert_ne!(r["session"]["id"], json!(id));
+    assert_eq!(r["session"]["first_prompt"], "Prompt");
+    assert_eq!(r["session"]["metrics"]["session_name"], "Résumé de Claude");
+    assert_eq!(r["session"]["display_name"], "Résumé de Claude");
+    let r = c.call(
+        "sessions.resume",
+        json!({"claude_session_id": with_prompt, "cwd": env.proj}),
+    );
+    assert_eq!(r["session"]["display_name"], "Lis le code");
 }

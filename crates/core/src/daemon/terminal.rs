@@ -142,6 +142,45 @@ impl Terminal {
         self.lock().parser.set_size(nz(size.rows), nz(size.cols));
     }
 
+    /// Texte des `n` dernières lignes non vides de l'écran visible, de haut
+    /// en bas (pour lire le pied de la TUI, voir
+    /// [`crate::domain::mode_from_footer`]). La TUI de Claude Code se dessine
+    /// dans l'écran principal, pas forcément jusqu'en bas : les lignes vides
+    /// du bas sont sautées.
+    pub fn bottom_rows(&self, n: usize) -> Vec<String> {
+        let inner = self.lock();
+        let screen = inner.parser.screen();
+        let (rows, cols) = screen.size();
+        let mut out = Vec::with_capacity(n);
+        // Du bas vers le haut, arrêt après `n` lignes non vides ; une ligne
+        // vide ne coûte aucune allocation.
+        for r in (0..rows.get()).rev() {
+            if out.len() == n {
+                break;
+            }
+            let visible = |c: u16| {
+                screen
+                    .cell(r, c)
+                    .is_some_and(|cell| cell.has_contents() && !cell.contents().trim().is_empty())
+            };
+            if !(0..cols.get()).any(visible) {
+                continue;
+            }
+            let mut line = String::new();
+            for c in 0..cols.get() {
+                match screen.cell(r, c) {
+                    Some(cell) if cell.is_wide_continuation() => {}
+                    Some(cell) if cell.has_contents() => line.push_str(cell.contents()),
+                    _ => line.push(' '),
+                }
+            }
+            line.truncate(line.trim_end().len());
+            out.push(line);
+        }
+        out.reverse();
+        out
+    }
+
     pub fn size(&self) -> TermSize {
         let inner = self.lock();
         let (rows, cols) = inner.parser.screen().size();
@@ -190,6 +229,20 @@ mod tests {
         let mut p = vt100::Parser::new(nz(10), nz(30), 0);
         p.process(t.snapshot().ansi.as_bytes());
         assert_eq!(p.screen().contents(), t.snapshot().text);
+    }
+
+    #[test]
+    fn bottom_rows_skip_empty_lines() {
+        let t = Terminal::new(TermSize { cols: 40, rows: 8 });
+        t.feed(b"un\r\ndeux\r\n\x1b[2m\xe2\x8f\xb8 plan mode on\x1b[0m\r\n> ");
+        assert_eq!(t.bottom_rows(2), ["⏸ plan mode on", ">"]);
+        assert_eq!(t.bottom_rows(1), [">"]);
+        assert!(t.bottom_rows(0).is_empty());
+        assert_eq!(t.bottom_rows(10).len(), 4);
+        assert_eq!(
+            crate::domain::mode_from_footer(&t.bottom_rows(4)),
+            Some(crate::domain::PermissionMode::Plan)
+        );
     }
 
     #[test]

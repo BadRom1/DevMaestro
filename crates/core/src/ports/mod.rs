@@ -131,6 +131,14 @@ pub struct SessionRecord {
     pub pid_start: Option<u64>,
     /// Scope systemd de la session (`devmaestro-session-….scope`), s'il y en a un.
     pub scope_unit: Option<String>,
+    /// Titre donné par l'utilisateur (schéma v3).
+    pub title: Option<String>,
+    /// Couleur choisie par l'utilisateur (schéma v3).
+    pub color: Option<String>,
+    /// Premier prompt tapé, tronqué (schéma v3).
+    pub first_prompt: Option<String>,
+    /// Dernier `session_name` de la statusline (schéma v3).
+    pub session_name: Option<String>,
 }
 
 /// Persistance des sessions.

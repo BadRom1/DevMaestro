@@ -1,4 +1,5 @@
 /** Mise en forme pour l'interface (français). */
+import { SESSION_COLORS, type PastSession, type Session, type SessionColor } from '../../../shared/protocol'
 
 const nf = new Intl.NumberFormat('fr-FR')
 const money2 = new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -75,4 +76,74 @@ export function tildify(p: string, home: string | null): string {
 export function basename(p: string): string {
   const parts = p.split('/').filter(Boolean)
   return parts[parts.length - 1] ?? p
+}
+
+const ELLIPSIS = '…'
+
+/**
+ * Tronque un chemin **par le début** pour qu'il tienne en `max` caractères :
+ * « ~/workplace/perso/Orchestrateur » → « …/perso/Orchestrateur ». On retire
+ * des segments entiers tant que possible ; si le dernier segment seul est trop
+ * long, il est coupé par le début (« …rateur »). Le résultat compte au plus
+ * `max` caractères (points de code), ellipse comprise.
+ */
+export function truncateStart(path: string, max: number): string {
+  const chars = [...path]
+  if (chars.length <= max) return path
+  if (max <= 0) return ''
+  if (max === 1) return ELLIPSIS
+  // Chaque position de « / » après le début : on garde la fin à partir de là.
+  for (let i = 1; i < chars.length; i++) {
+    if (chars[i] !== '/') continue
+    const rest = chars.length - i
+    if (rest + 1 <= max) return ELLIPSIS + chars.slice(i).join('')
+  }
+  // Même le dernier segment ne tient pas : coupe brute.
+  return ELLIPSIS + chars.slice(chars.length - (max - 1)).join('')
+}
+
+/** Nom affiché d'une session : celui du démon, sinon un repli équivalent (démon plus ancien). */
+export function sessionDisplayName(
+  s: Pick<Session, 'id' | 'display_name' | 'title' | 'metrics' | 'branch' | 'cwd'>,
+): string {
+  const pick = (v: string | null | undefined) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null)
+  return (
+    pick(s.display_name) ??
+    pick(s.title) ??
+    pick(s.metrics?.session_name) ??
+    // Démon sans `display_name` : la branche ou le dossier parlent plus qu'un identifiant.
+    pick(s.branch) ??
+    pick(basename(s.cwd)) ??
+    s.id.slice(0, 8)
+  )
+}
+
+/** Nom affiché d'une ancienne session. */
+export function pastDisplayName(
+  p: Pick<PastSession, 'claude_session_id' | 'display_name' | 'title' | 'first_prompt'>,
+): string {
+  const pick = (v: string | null | undefined) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null)
+  return pick(p.display_name) ?? pick(p.title) ?? pick(p.first_prompt) ?? p.claude_session_id.slice(0, 8)
+}
+
+/** Le démon connaît-il le nommage des sessions (`display_name`, `sessions.update`) ? */
+export function supportsNaming(s: Session): boolean {
+  return typeof s.display_name === 'string'
+}
+
+export const COLOR_LABELS: Record<SessionColor, string> = {
+  gris: 'Gris',
+  bleu: 'Bleu',
+  vert: 'Vert',
+  jaune: 'Jaune',
+  orange: 'Orange',
+  rouge: 'Rouge',
+  violet: 'Violet',
+  rose: 'Rose',
+}
+
+/** Couleur connue de la palette, ou `null` (valeur absente ou inattendue). */
+export function sessionColor(s: Pick<Session, 'color'>): SessionColor | null {
+  const c = s.color
+  return typeof c === 'string' && (SESSION_COLORS as readonly string[]).includes(c) ? c : null
 }

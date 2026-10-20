@@ -1,10 +1,20 @@
 import { useState } from 'react'
 
 import type { Profile } from '../../../shared/protocol'
-import { basename, relativeTime, shortAgo, tildify } from '../state/format'
+import {
+  COLOR_LABELS,
+  basename,
+  pastDisplayName,
+  relativeTime,
+  sessionColor,
+  sessionDisplayName,
+  shortAgo,
+  tildify,
+} from '../state/format'
 import type { PastEntry, ProjectGroup } from '../state/projects'
 import { glyphFor } from '../state/status'
-import { StatusGlyph, profileClass } from './common'
+import { PathLabel, StatusGlyph, profileClass } from './common'
+import { ColorBar } from './SessionIdentity'
 
 export function Sidebar(props: {
   groups: ProjectGroup[]
@@ -51,23 +61,30 @@ export function Sidebar(props: {
                 </span>
               )}
             </div>
-            <div className="proj-path" title={g.root}>
-              {tildify(g.root, props.home)}
-            </div>
+            <PathLabel className="proj-path" path={tildify(g.root, props.home)} title={g.root} />
             <ul role="list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
               {g.sessions.map((s) => {
                 const glyph = glyphFor(s.status)
                 const branch = s.branch ?? (s.cwd !== g.root ? basename(s.cwd) : 'sans branche')
+                const name = sessionDisplayName(s)
+                const color = sessionColor(s)
                 return (
                   <li key={s.id}>
                     <button
                       className="srow"
                       aria-current={s.id === props.selectedId}
-                      aria-label={`${branch}, ${glyph.label}, ${s.profile}, dernière activité ${relativeTime(s.last_activity)}`}
+                      aria-label={`${name}, ${branch}, ${glyph.label}, ${s.profile}${color ? `, couleur ${COLOR_LABELS[color].toLowerCase()}` : ''}, dernière activité ${relativeTime(s.last_activity)}`}
+                      title={`${name}\n${branch} · ${s.cwd}`}
                       onClick={() => props.onSelect(s.id)}
                     >
                       <StatusGlyph glyph={glyph} />
-                      <span className="br">{branch}</span>
+                      <span className="names">
+                        <span className="nm">
+                          <ColorBar color={color} />
+                          <span className="nm-t">{name}</span>
+                        </span>
+                        {branch !== name && <span className="br">{branch}</span>}
+                      </span>
                       {!single && <span className={`chip ${profileClass(s.profile, props.profiles)}`}>{s.profile}</span>}
                       <span className="ago">{shortAgo(s.last_activity ?? s.created_at)}</span>
                     </button>
@@ -91,7 +108,7 @@ export function Sidebar(props: {
         {props.past.length === 0 && <p className="empty-note">Aucune ancienne session trouvée.</p>}
         <ul role="list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
           {props.past.map((p) => {
-            const label = p.title ?? p.first_prompt ?? p.claude_session_id.slice(0, 8)
+            const label = pastDisplayName(p)
             const where = p.cwd ? basename(p.cwd) : 'dossier inconnu'
             return (
               <li key={`${p.profile}:${p.claude_session_id}`}>

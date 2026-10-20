@@ -54,12 +54,12 @@ Chaînes des trames `0x10` et `0x11` : longueur `u16` gros-boutiste puis octets 
 
 Exemple : un hook `Stop` avec le jeton `t` et le JSON `{}` s'écrit `00 00 00 0c 10 00 01 74 00 04 53 74 6f 70 7b 7d`.
 
-Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire un état (architecture § 6) : ils servent à l'affichage.
+Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire un état (architecture § 6) : ils servent à l'affichage. **Seule exception**, étroite : l'indicateur de mode du pied de la TUI, lu pour confirmer `sessions.setMode` (§ 4, « Changer de mode »).
 
 ## 3. JSON-RPC 2.0
 
 - Requêtes `{"jsonrpc":"2.0","id":…,"method":…,"params":{…}}`, réponses `result` ou `error` avec le même `id`. Une requête sans `id` est une notification : traitée, sans réponse. Pas de lots (tableaux).
-- Les requêtes d'une connexion sont traitées **dans l'ordre**.
+- Les requêtes d'une connexion sont traitées **dans l'ordre**, avec une exception : un `sessions.setMode` qui attend la confirmation d'un changement précédent (§ 4) est mis de côté, et les requêtes suivantes passent sans l'attendre ; sa réponse peut donc arriver après les leurs (l'`id` les distingue).
 - Les notifications du démon (§ 5) ne sont envoyées qu'aux connexions qui ont envoyé au moins un message JSON-RPC (en pratique : `hello` d'abord).
 
 ### Codes d'erreur
@@ -99,6 +99,7 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `sessions.input` | `{id, data}` | `{}` une fois le texte mis en file (texte UTF-8 ; les trames `0x03` sont préférables pour le clavier) |
 | `sessions.stop` | `{id}` | `{stopping: bool, alive: bool}` |
 | `sessions.setMode` | `{id, mode}` | `{sent}` : nombre de Shift+Tab envoyés (voir ci-dessous) |
+| `sessions.update` | `{id, title?: texte \| null, color?: couleur \| null}` | `{session: Session}` (voir ci-dessous) |
 | `sessions.answerPermission` | `{id, request_id, decision: "allow" \| "allow_always" \| "deny", message?}` | `{request_id, resolved: true}` |
 | `sessions.answerQuestion` | `{id, request_id, answers: {"<texte de la question>": "<libellé>" \| ["<libellé>", …]}}` | `{request_id, resolved: true}` |
 | `transcripts.list` | `{profile?, limit?}` (50 par défaut) | `{profile, sessions: [AncienneSession]}` |
@@ -111,12 +112,22 @@ Détails :
 - **`sessions.resume`** :
   - tous les paramètres (profil, mode, taille, dossier, binaire `claude`) sont vérifiés avant de toucher à la session ; si la reprise échoue (y compris au lancement du processus), `sessions.list` est inchangé et l'écran n'est pas effacé ;
   - avec `id` : la session du démon, qui ne doit pas tourner (`-32002` sinon), est relancée avec `--resume <claude_session_id>`. Si son processus vient de se terminer mais que le démon ne l'a pas encore constaté (délai de grâce de 0,5 s laissé à un `SessionEnd` en retard), la fin est constatée sur-le-champ et la reprise a lieu. La session garde son `id`, son terminal et ses abonnés (le démon envoie `ESC[0m CRLF ESC[2J ESC[H` dans le flux juste avant la première sortie du nouveau processus) ;
-  - avec `claude_session_id` seul : si une session arrêtée du démon porte ce `claude_session_id`, c'est elle qui est reprise ; sinon (ancienne session trouvée par `transcripts.list`) une nouvelle entrée est créée, `cwd` est alors obligatoire ;
+  - avec `claude_session_id` seul : si une session arrêtée du démon porte ce `claude_session_id`, c'est elle qui est reprise ; sinon (ancienne session trouvée par `transcripts.list`) une nouvelle entrée est créée, `cwd` est alors obligatoire. Elle reprend le nom de la conversation : `first_prompt` et titre de Claude Code (`aiTitle`/`summary`, dans `metrics.session_name`) lus dans le transcript du profil, et `title`/`color` d'une autre entrée du démon pour le même `claude_session_id` s'il y en a ;
   - les paramètres absents reprennent ceux de la session (profil, mode, modèle, taille).
 - **`sessions.stop`** envoie `SIGHUP` au groupe de processus de `claude`, puis `SIGKILL` au bout de 3 s s'il tourne encore. La réponse arrive tout de suite ; la fin est annoncée par `session.updated` (`alive: false`).
 - **`sessions.launch`, `sessions.resume`, `sessions.setMode`** refusent `bypassPermissions` et `dontAsk` (`-32005`, message en français) sauf si `allow_dangerous_modes = true` (§ 9). À la reprise, le mode retenu est vérifié même s'il n'est pas demandé : une session qui était en `bypassPermissions` n'est reprise ainsi qu'avec le réglage (sinon, passer un autre `mode`).
 - **Mode par défaut rendu explicite** : sans `mode` (et, à la reprise, sans mode connu de la session), le démon lit `permissions.defaultMode` (lecture seule) dans `<cwd>/.claude/settings.local.json`, sinon `<cwd>/.claude/settings.json`, sinon `<dossier du profil>/settings.json`. Mode trouvé et sûr : passé tel quel par `--permission-mode`. Mode dangereux sans `allow_dangerous_modes` : la session est lancée en `--permission-mode manual` et `warnings` contient un message en français (aussi au journal). Rien de trouvé : pas de `--permission-mode`. `warnings` est vide sinon.
 - **`Session.scope`** : unité du scope systemd de la session (`devmaestro-session-<8>-<8>.scope`), ou `null` si elle a été lancée directement (§ 9).
+- **`sessions.update`** : nom et couleur choisis par l'utilisateur, pour toute session du démon (qui tourne ou non).
+  - Clé absente : inchangée ; `null` : effacée. Au moins une des deux clés est attendue (`-32602` « rien à modifier » sinon).
+  - `title` : texte, blancs de début et de fin retirés, **80 caractères** (points de code) au plus, sans caractère de contrôle (saut de ligne, tabulation…), sans caractère invisible de mise en forme (catégorie Unicode Cf : forçage du sens d'écriture U+202A–U+202E et U+2066–U+2069, espaces sans chasse U+200B/U+200C/U+FEFF…, et séparateurs U+2028/U+2029) ; seul l'antiliant U+200D, qui compose les émojis, est admis. Un titre sans aucun caractère visible après nettoyage vaut `null`.
+  - `color` : un nom de la palette `"gris" | "bleu" | "vert" | "jaune" | "orange" | "rouge" | "violet" | "rose"` (l'app choisit le rendu de chaque jeton).
+  - Erreurs : `-32602` (paramètre invalide, rien ne change), `-32001` (session inconnue).
+  - Effet : enregistré en base, `session.updated` diffusé, `updated_at` **inchangé** (renommer ne fait pas remonter la session dans `sessions.list`). Titre et couleur suivent la session à la reprise (`sessions.resume`, même entrée) et au redémarrage du démon.
+  - Exemple : `{"id": "…", "title": "Refonte du relais", "color": "violet"}` → `{"session": {…, "title": "Refonte du relais", "color": "violet", "display_name": "Refonte du relais", …}}`.
+- **`Session.display_name`** (toujours un texte), calculé par le démon : `title` s'il y en a un, sinon le `session_name` de la statusline (`metrics.session_name`), sinon `first_prompt`, sinon les 8 premiers caractères de `id`. Le nom de Claude Code et le prompt sont ramenés à une ligne (blancs réduits à une espace) et coupés à 60 caractères (suivis de `…`).
+- **`Session.first_prompt`** : premier prompt tapé, tel que reçu par `UserPromptSubmit` (ou le `prompt` de `sessions.launch`, retenu dès le lancement), coupé à 200 caractères (`…`). Les textes qui commencent par `/` (commandes) et les textes vides ne comptent pas. Il n'est pas remis à zéro par `/clear`.
+- **`transcripts.list`** : chaque ancienne session porte aussi `display_name` (toujours un texte) : le `title` d'une session du démon qui a le même `claude_session_id`, sinon le titre donné par Claude Code (`title` : `aiTitle` ou `summary` du transcript), sinon `first_prompt`, sinon les 8 premiers caractères de `claude_session_id` (mêmes règles de mise sur une ligne et de coupe à 60 caractères).
 
 ### Répondre depuis l'app (ADR 0003)
 
@@ -135,17 +146,37 @@ La TUI affiche sa propre demande pendant que le relais `PermissionRequest` atten
 
 ### Changer de mode (`sessions.setMode`)
 
-**Contournement** : Claude Code n'a pas d'API pour changer le mode d'une session en cours. Le démon écrit dans le PTY autant de Shift+Tab (`ESC [ Z`) qu'il en faut pour aller du mode courant connu (dernier `permission_mode` reçu dans un hook) au mode visé, le long du cycle relevé avec **Claude Code 2.1.303** (prototype n° 1, Q9) : `default` (`manual`) → `acceptEdits` → `plan` → `auto` → `default`.
+**Contournement** : Claude Code n'a pas d'API pour changer le mode d'une session en cours. Le démon écrit dans le PTY autant de Shift+Tab (`ESC [ Z`) qu'il en faut pour aller du mode courant connu (champ `mode` de la session : dernier `permission_mode` reçu dans un hook, ou dernier mode lu dans le pied de la TUI, voir plus bas) au mode visé, le long du cycle relevé avec **Claude Code 2.1.303** (prototype n° 1, Q9) : `default` (`manual`) → `acceptEdits` → `plan` → `auto` → `default`.
 
-- Réponse immédiate `{sent: n}` (`0` si la session est déjà dans ce mode) ; la **confirmation** vient du `permission_mode` du hook suivant (champ `mode` de `session.updated`).
-- Erreurs : `-32014` si le mode courant est inconnu (aucun hook ne l'a encore porté) ou hors du cycle (`bypassPermissions`, `dontAsk`…), ou si le mode visé est hors du cycle ; `-32002` si la session ne tourne pas ou si une demande attend (Shift+Tab agirait sur le dialogue de la TUI) ; `-32005` pour un mode dangereux sans réglage.
-- Après un `setMode` qui envoie au moins une touche, le démon attend la confirmation : un second `setMode` est refusé (`-32002`) jusqu'au prochain hook qui porte un `permission_mode` (ou 3 s sans hook ; le calcul repart alors du dernier mode confirmé). Un hook qui rapporte un autre mode que celui visé est journalisé. Le cycle peut changer avec la version de Claude Code ou les modes disponibles.
+- Réponse `{sent: n}` (`0` si la session est déjà dans ce mode) une fois les touches mises en file.
+- Erreurs : `-32014` si le mode courant est inconnu (ni hook ni pied ne l'a encore porté) ou hors du cycle (`bypassPermissions`, `dontAsk`…), ou si le mode visé est hors du cycle ; `-32002` si la session ne tourne pas, si une demande attend (Shift+Tab agirait sur le dialogue de la TUI), ou si le changement précédent n'est toujours pas confirmé (voir plus bas) ; `-32005` pour un mode dangereux sans réglage.
+
+**Confirmation par le pied de la TUI** (seule lecture du PTY par le démon, § 2). Quand Claude est inactif, aucun hook ne vient confirmer un changement de mode : le démon lit donc, à chaque sortie du PTY, les 8 dernières lignes non vides de l'écran (`vt100`, texte sans mise en forme) et y cherche l'indicateur de mode de Claude Code, relevé avec **2.1.303** :
+
+| Pied affiché | Mode |
+|---|---|
+| `⏸ manual mode on` | `default` |
+| `⏵⏵ accept edits on (shift+tab to cycle)` | `acceptEdits` |
+| `⏸ plan mode on (shift+tab to cycle)` | `plan` |
+| `⏵⏵ auto mode on (shift+tab to cycle)` | `auto` |
+
+- Seuls les mots comptent (`manual mode on`, `accept edits on`, `plan mode on`, `auto mode on`, sans tenir compte de la casse) : symboles et couleurs peuvent changer. Garde-fous :
+  - avant les mots, au moins un **symbole de mode** de la famille lecture / pause (`⏸`, `⏵`, `⏩`, `⏯`, `▶`, `▷`, `▸`, `►`…) et rien d'autre : ni texte, ni `>`/`❯` (invite), `│`, `•`, `-`, `*`, `⏺` (puce des réponses de Claude) ;
+  - après les mots, une fin de ligne, ou un blanc suivi de rien ou d'autre chose qu'une lettre ou un chiffre (`(shift+tab to cycle)`, indications alignées à droite ; pas « Plan mode on is now… ») ;
+  - s'il y a une ligne de séparation du cadre de saisie (`────…` ou `╰───╯`, au moins 8 traits), seules les lignes **sous la dernière** sont lues ;
+  - la ligne la plus basse l'emporte. Les modes dangereux ne sont jamais lus à l'écran (les hooks et `dangerous_mode_detected` s'en chargent).
+- Un mode lu qui **change** met aussitôt à jour le `mode` de la session (`session.updated`, enregistré en base). Pendant un `setMode`, seul le mode visé est retenu (les modes traversés par plusieurs Shift+Tab sont ignorés), et il confirme le changement. Sans `setMode` en cours, tout mode lu est retenu (Shift+Tab tapé dans le terminal).
+- **Les hooks font foi** : un hook qui porte un `permission_mode` remplace le mode lu à l'écran et clôt aussi un changement en cours (un hook qui rapporte un autre mode que celui visé est journalisé). Un hook qui change le mode fait aussi relire le pied à la sortie suivante du PTY.
+- **Hook en retard** : un hook émis avant un Shift+Tab peut arriver après que le pied a montré le nouveau mode. Quand un hook contredit le mode lu à l'écran moins de 3 s plus tôt, le démon relit le pied 200 ms plus tard : s'il montre toujours ce mode, c'est lui qui est gardé (`session.updated`, avertissement au journal) ; sinon le hook l'emporte. Jamais pour un mode dangereux : un mode `bypassPermissions` ou `dontAsk` rapporté par un hook n'est jamais remplacé par une lecture de l'écran.
+- Pied absent ou non reconnu (autre version de Claude Code) : rien n'est lu, le comportement est celui des hooks seuls.
+
+**Second `setMode` pendant un changement non confirmé** : le démon réessaie de lui-même toutes les 25 ms pendant **1 s** au plus (le pied confirme en général bien avant), dans une tâche à part : les entrées et requêtes suivantes de ce client ne l'attendent pas (§ 3). Confirmé entre-temps : le calcul part du mode confirmé et la réponse est normale. Sinon `-32002`. Si l'écriture des Shift+Tab échoue (processus terminé), le changement est abandonné (`-32002`) et ne bloque pas le suivant. Un changement jamais confirmé (ni pied, ni hook) cesse de bloquer au bout de 3 s ; le calcul repart alors du dernier mode connu. Le cycle et le pied peuvent changer avec la version de Claude Code ou les modes disponibles.
 
 ## 5. Notifications du démon
 
 | Méthode | Paramètres | Quand |
 |---|---|---|
-| `session.updated` | `{session: Session}` | à chaque changement : lancement, hook, statusline (si les mesures changent), fin du processus, reprise |
+| `session.updated` | `{session: Session}` | à chaque changement : lancement, hook, statusline (si les mesures changent), mode lu dans le pied de la TUI, `sessions.update`, fin du processus, reprise |
 | `session.effect` | `{id, effect: Effet}` | effets de la machine à états, juste **avant** le `session.updated` correspondant |
 | `session.resync` | `{id, snapshot: Écran}` | un abonné a pris trop de retard (§ 6) |
 
@@ -200,9 +231,13 @@ Règles :
 ```json
 {
   "id": "uuid", "claude_session_id": "uuid",
+  "title": "Refonte du relais" | null,  // titre donné par l'utilisateur (sessions.update)
+  "color": "violet" | null,             // gris, bleu, vert, jaune, orange, rouge, violet, rose
+  "display_name": "Refonte du relais",  // toujours un texte (§ 4, sessions.update)
+  "first_prompt": "Corrige le test…" | null,
   "profile": "default", "cwd": "/…", "project_root": "/…", "branch": "main",
   "model": "opus",                      // modèle demandé au lancement, ou null
-  "mode": "default",                    // dernier permission_mode connu (hooks), sinon celui demandé
+  "mode": "default",                    // dernier mode connu (hooks, pied de la TUI), sinon celui demandé
   "status": {"state": "starting|running|waiting|idle|error|stopped",
              "wait": "permission|question",          // si waiting
              "reason": "prompt_input_exit"},         // si stopped
@@ -255,7 +290,8 @@ Un processus sorti avec un code non nul ou tué par un signal inattendu, sans `S
 ```json
 {"name": "work", "config_dir": "/home/u/.claude-work", "sets_config_dir_env": true}
 {"claude_session_id": "…", "transcript_path": "…", "cwd": "…", "git_branch": "…",
- "first_prompt": "…", "title": "…", "first_timestamp": "…", "last_timestamp": "…", "message_count": 12}
+ "first_prompt": "…", "title": "…", "display_name": "…",
+ "first_timestamp": "…", "last_timestamp": "…", "message_count": 12}
 ```
 
 ## 8. Relais (`orchd hook`, `orchd statusline`)
@@ -269,6 +305,26 @@ Lancés par Claude Code, avec l'environnement du processus `claude` :
 | `ORCH_SESSION` | identifiant interne de la session (information, jamais utilisé pour authentifier) |
 
 Toute autre variable `ORCH_*` ou `DEVMAESTRO_*` héritée du démon est retirée de l'environnement de `claude`.
+
+**Marqueurs de session Claude Code** : un démon lancé depuis une session Claude Code (app lancée depuis un terminal d'une session, par exemple) hérite des variables que Claude Code pose pour **ses** sous-processus. Transmises, elles font passer nos `claude` pour des sessions enfants : `CLAUDE_CODE_CHILD_SESSION` coupe l'enregistrement du transcript (« Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker ») et exclut la session de `--resume`. Le démon les retire **de son propre environnement au démarrage** (noms écrits au journal, jamais les valeurs ; ses sous-processus `git`, `systemd-run`… ne les voient donc pas) **et** de celui de chaque `claude` (code : `CLAUDE_SESSION_MARKERS` dans `daemon/launch.rs`) :
+
+| Retirées | Pourquoi |
+|---|---|
+| `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION` | « je tourne sous Claude Code » (documentées comme posées dans les sous-processus) |
+| `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH` | point d'entrée et binaire de la session parente |
+| `CLAUDE_CODE_SSE_PORT` | port de l'extension IDE de la session parente |
+| `CLAUDE_CODE_HOST_SESSION_ID`, `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_CODE_REMOTE`, `CLAUDE_CODE_REMOTE_SESSION_ID` | identifiants et contexte (Remote Control, session cloud) de la session parente |
+| `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN` | boîte de réception (et son jeton) de la session parente |
+| `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` | posée par une plateforme qui embarque Claude Code, pour son processus |
+| `CLAUDE_PID`, `CLAUDE_EFFORT`, `CLAUDE_JOB_DIR` | pid, effort et dossier de tâche de la session parente |
+| `TRACEPARENT` | contexte de trace propagé par la session parente |
+| `AI_AGENT` | posée par Claude Code pour son outil Bash (« lancé par un agent ») |
+| `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` | réglages documentés, mais hérités de l'hôte ils connecteraient toutes les sessions au même compte, quel que soit le profil : le profil (`CLAUDE_CONFIG_DIR`) est la seule source de compte |
+| `CLAUDE_CODE_SIMPLE` | réglage documenté (mode dépouillé) qui risque de désactiver les hooks et le plugin dont dépend le suivi |
+| préfixes `CLAUDE_CODE_SESSION_*`, `CLAUDE_CODE_PARENT_*` | identifiant et état de la session parente (`CLAUDE_CODE_SESSION_ID`, `…_ATTENDED`…) |
+| préfixe `CLAUDE_CODE_SDK_*` | posées par un hôte Agent SDK (app de bureau…) pour son processus (rafraîchissement de l'authentification par l'hôte…) |
+
+Les préfixes gardent leur `_` final : `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` est un réglage. Les variables de **configuration** documentées sont transmises telles quelles (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `ANTHROPIC_*`, mandataires `HTTP(S)_PROXY`, clés d'API…). Le `claude` lancé pose ensuite ses propres marqueurs pour ses hooks et sa statusline (dont nos relais), comme d'habitude.
 
 Le démon rattache une trame à sa session **par le jeton** (comparé en temps constant), jamais par le `session_id` du JSON (qui change sur `/clear`). Jeton inconnu (session terminée, faux jeton) : trame ignorée.
 
@@ -291,9 +347,9 @@ Fichiers générés (au démarrage du démon et avant chaque lancement) :
 ## 9. Cycle de vie et persistance
 
 - **Scope systemd** : si `systemd-run --user --scope` fonctionne au démarrage du démon (gestionnaire systemd utilisateur joignable ; désactivable par `DEVMAESTRO_SYSTEMD_SCOPE=off`), chaque lancement devient `systemd-run --user --scope --quiet --collect --unit=devmaestro-session-<id8>-<alea8>.scope -- claude …` : `systemd-run` s'inscrit dans le scope puis exécute `claude` à sa place (même pid, même PTY, même environnement et dossier). Sinon, lancement direct. Le mode est écrit au journal au démarrage et dans `Session.scope`. Pour les tests seulement, `DEVMAESTRO_SYSTEMD_RUNTIME_DIR` donne à `systemd-run` le vrai `XDG_RUNTIME_DIR` quand celui du démon est temporaire.
-- Lancement : `claude (--session-id <uuid> | --resume <id>) [--permission-mode <mode>] [--model <m>] --plugin-dir <plugin> --settings <réglages du profil> [-- "<prompt>"]` dans un PTY, `cwd` = le dossier demandé, avec `TERM=xterm-256color`, `COLORTERM=truecolor`, les variables du § 8, et `CLAUDE_CONFIG_DIR` pour les profils autres que `default` (retiré de l'environnement hérité pour `default`). Le mode `default` s'écrit `manual` sur la ligne de commande. Le binaire vient de `DEVMAESTRO_CLAUDE_BIN`, sinon du `PATH` du démon. Le prompt suit `--` (fin des options façon commander.js, d'après `claude --help`) : un prompt comme `--dangerously-skip-permissions` ou `- liste` n'est pas lu comme une option. **À vérifier avec le vrai CLI** : que `--` est accepté et qu'un prompt égal au nom d'une sous-commande (`mcp`, `update`…) n'est pas lancé comme telle.
+- Lancement : `claude (--session-id <uuid> | --resume <id>) [--permission-mode <mode>] [--model <m>] --plugin-dir <plugin> --settings <réglages du profil> [-- "<prompt>"]` dans un PTY, `cwd` = le dossier demandé, avec `TERM=xterm-256color`, `COLORTERM=truecolor`, les variables du § 8 (marqueurs de session Claude Code hérités retirés), et `CLAUDE_CONFIG_DIR` pour les profils autres que `default` (retiré de l'environnement hérité pour `default`). Le mode `default` s'écrit `manual` sur la ligne de commande. Le binaire vient de `DEVMAESTRO_CLAUDE_BIN`, sinon du `PATH` du démon. Le prompt suit `--` (fin des options façon commander.js, d'après `claude --help`) : un prompt comme `--dangerously-skip-permissions` ou `- liste` n'est pas lu comme une option. **À vérifier avec le vrai CLI** : que `--` est accepté et qu'un prompt égal au nom d'une sous-commande (`mcp`, `update`…) n'est pas lancé comme telle.
 - À la fin du processus `claude`, son groupe de processus reçoit `SIGHUP` (outils restés en arrière-plan), comme à la fermeture d'un terminal.
-- Les sessions sont enregistrées dans `$XDG_DATA_HOME/devmaestro/state.db` (SQLite, WAL, `synchronous=NORMAL`) : identifiants, profil, dossiers, branche, modèle, mode, statut, dates, pid, et (schéma v2) date de démarrage du processus et scope systemd. Au redémarrage après un plantage, les processus `claude` relus dont des processus vivent encore (eux-mêmes, ou d'autres dans leur groupe ou leur session) restent refusés au socket de contrôle (§ 10). Écriture à chaque changement de statut ou de champ ; une session qui ne change que par sa dernière activité est réécrite au plus toutes les 30 s. Le schéma est versionné (`PRAGMA user_version`, migrations pas à pas) : une base d'une version plus récente est refusée (le démon ne démarre pas, message en français) ; une base illisible ou corrompue est renommée `state.db.corrupt-<horodatage>` et remplacée par une base vide (avertissement au journal).
+- Les sessions sont enregistrées dans `$XDG_DATA_HOME/devmaestro/state.db` (SQLite, WAL, `synchronous=NORMAL`) : identifiants, profil, dossiers, branche, modèle, mode, statut, dates, pid, (schéma v2) date de démarrage du processus et scope systemd, et (schéma v3) titre, couleur, premier prompt et dernier `session_name` de la statusline. Au redémarrage après un plantage, les processus `claude` relus dont des processus vivent encore (eux-mêmes, ou d'autres dans leur groupe ou leur session) restent refusés au socket de contrôle (§ 10). Écriture à chaque changement de statut ou de champ ; une session qui ne change que par sa dernière activité est réécrite au plus toutes les 30 s. Le schéma est versionné (`PRAGMA user_version`, migrations pas à pas) : une base d'une version plus récente est refusée (le démon ne démarre pas, message en français) ; une base illisible ou corrompue est renommée `state.db.corrupt-<horodatage>` et remplacée par une base vide (avertissement au journal).
 - Droits : dossiers `$XDG_RUNTIME_DIR/devmaestro`, `$XDG_DATA_HOME/devmaestro` et `$XDG_STATE_HOME/devmaestro` en 0700 (refusés s'ils sont un lien symbolique ou appartiennent à un autre utilisateur), base, journal, plugin et réglages en 0600.
 - **Arrêter le démon termine les sessions** : `SIGTERM`, `SIGINT` ou `SIGHUP` → `SIGHUP` à chaque session (le socket reste ouvert pour recevoir les `SessionEnd`), `SIGKILL` au bout de 3 s, puis fin. Un second signal pendant cet arrêt envoie `SIGKILL` à toutes les sessions et sort aussitôt. Les sessions restent reprenables. Après un plantage du démon, les sessions qui étaient en démarrage, en cours, à répondre ou inactives sont relues arrêtées (`daemon_restart`) ; celles déjà arrêtées ou en erreur sont relues telles quelles (statut et date inchangés).
 - Journal : sortie d'erreur et `$XDG_STATE_HOME/devmaestro/orchd.log`.
@@ -316,7 +372,7 @@ Fichiers générés (au démarrage du démon et avant chaque lancement) :
   
   Le pair est épinglé par `SO_PEERPIDFD` (noyau 6.5 et plus) : après les lectures de `/proc`, le démon vérifie que ce processus vit toujours (son pid n'a donc pas été réattribué entre l'acceptation et la fin des contrôles). Sans pidfd, la date de démarrage du pid est relue et comparée.
 - **Socket des relais** : une trame n'est acceptée que si son jeton désigne une session vivante **et** si le pair descend du processus `claude` de cette session (ou partage son scope systemd). Un processus d'une session ne peut donc rien envoyer pour une **autre** session. En revanche, un processus d'une session connaît le jeton de **sa** session et peut forger des événements pour elle (une fausse demande, une fausse fin de tour) : l'app affiche toujours le contenu exact de la demande, et « Toujours » ne reprend que les suggestions de la **première** trame d'une demande, seulement des règles qui correspondent à l'outil et à l'entrée de la demande (`toolName` égal ; pour `Bash`, `ruleContent` obligatoire, égal à la commande ou préfixe `…:*` qu'elle prolonge ; pour les outils de fichiers, `ruleContent` obligatoire, égal au chemin ou `<dossier absolu>/**` qui le contient).
-- **Environnement de `claude`** : les variables `ORCH_*` et `DEVMAESTRO_*` héritées sont retirées.
+- **Environnement de `claude`** : les variables `ORCH_*` et `DEVMAESTRO_*` héritées sont retirées, ainsi que les marqueurs de session Claude Code (§ 8), dont le jeton de messagerie d'une session parente (`CLAUDE_CODE_MESSAGING_TOKEN`).
 - **Modes qui suppriment les demandes** (`bypassPermissions`, `dontAsk`) : réglage explicite du démon (§ 9), y compris quand ils viennent d'un `defaultMode` du projet ou du profil ; `bypassPermissions` verrouillé dans les réglages passés à `claude` ; passage détecté et signalé (`dangerous_mode_detected`).
 - **Le relais n'autorise jamais rien par défaut** (délai, démon absent : sortie sans décision).
 

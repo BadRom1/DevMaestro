@@ -24,7 +24,7 @@ use uuid::Uuid;
 use super::log::warning;
 use super::peer::Peer;
 use super::supervisor::{
-    DEFAULT_SIZE, Daemon, Event, RpcError, opt_str, session_id_param, size_param,
+    DEFAULT_SIZE, Daemon, Event, RpcError, SetModeError, opt_str, session_id_param, size_param,
 };
 use super::terminal::{Chunk, Snapshot, Terminal};
 use crate::protocol::{
@@ -33,6 +33,12 @@ use crate::protocol::{
 
 /// Trames en attente d'écriture vers un client.
 const OUT_QUEUE: usize = 1024;
+/// Attente maximale d'un `sessions.setMode` derrière un changement de mode
+/// pas encore confirmé (le pied de la TUI confirme en général en quelques
+/// dizaines de millisecondes).
+const SET_MODE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+/// Intervalle entre deux essais.
+const SET_MODE_RETRY_STEP: std::time::Duration = std::time::Duration::from_millis(25);
 /// Taille maximale d'une trame de sortie de PTY regroupant plusieurs morceaux.
 const PTY_BATCH: usize = 64 * 1024;
 
@@ -342,14 +348,30 @@ impl Connection {
                 json!({"unsubscribed": was})
             }
             "sessions.setMode" => {
-                let (tx, bytes, sent) = d.set_mode(params)?;
-                if sent > 0 {
-                    tx.send(bytes).await.map_err(|_| {
-                        RpcError::new(error_code::INVALID_STATE, "la session ne tourne plus")
-                    })?;
+                match d.set_mode(params) {
+                    Ok(keys) => send_mode_keys(&d, params, keys).await?,
+                    // Changement précédent pas encore confirmé : réessayé dans
+                    // une tâche à part, pour ne pas bloquer la connexion (les
+                    // touches et requêtes suivantes passent ; la réponse peut
+                    // arriver après d'autres, l'`id` JSON-RPC les distingue).
+                    Err(SetModeError::Unconfirmed(_)) => {
+                        let (out, params) = (self.out.clone(), params.clone());
+                        tokio::spawn(async move {
+                            let result = set_mode_with_retry(&d, &params).await;
+                            if let Some(id) = id {
+                                let msg = match result {
+                                    Ok(v) => response(id, v),
+                                    Err(e) => error_response(id, e.code, e.message),
+                                };
+                                let _ = out.send(Frame::rpc(&msg)).await;
+                            }
+                        });
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e.into_rpc()),
                 }
-                json!({"sent": sent})
             }
+            "sessions.update" => d.update_session(params)?,
             "sessions.answerPermission" => d.answer_permission(params)?,
             "sessions.answerQuestion" => d.answer_question(params)?,
             "transcripts.list" => {
@@ -395,6 +417,41 @@ impl Connection {
         let task = tokio::spawn(forward_output(sid, rx, terminal, out));
         self.subscriptions.insert(sid, task);
         Ok(())
+    }
+}
+
+/// Écrit les Shift+Tab d'un `sessions.setMode` accepté. Si l'écriture
+/// échoue (processus terminé), le changement attendu est abandonné.
+async fn send_mode_keys(
+    d: &Arc<Daemon>,
+    params: &Value,
+    (tx, bytes, sent): super::supervisor::ModeKeys,
+) -> Result<Value, RpcError> {
+    if sent > 0 && tx.send(bytes).await.is_err() {
+        if let Ok(id) = session_id_param(params) {
+            d.cancel_mode_change(&id);
+        }
+        return Err(RpcError::new(
+            error_code::INVALID_STATE,
+            "la session ne tourne plus",
+        ));
+    }
+    Ok(json!({"sent": sent}))
+}
+
+/// `sessions.setMode` réessayé toutes les [`SET_MODE_RETRY_STEP`] pendant
+/// au plus [`SET_MODE_RETRY`] tant que le changement précédent n'est pas
+/// confirmé ; ensuite l'erreur `-32002`.
+async fn set_mode_with_retry(d: &Arc<Daemon>, params: &Value) -> Result<Value, RpcError> {
+    let deadline = tokio::time::Instant::now() + SET_MODE_RETRY;
+    loop {
+        match d.set_mode(params) {
+            Ok(keys) => return send_mode_keys(d, params, keys).await,
+            Err(SetModeError::Unconfirmed(_)) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(SET_MODE_RETRY_STEP).await;
+            }
+            Err(e) => return Err(e.into_rpc()),
+        }
     }
 }
 

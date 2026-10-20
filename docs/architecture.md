@@ -91,7 +91,7 @@ La machine à états est du code pur, testé avec des séquences d'événements 
 1. **Hooks** : état, outil en cours, permission demandée, mode (`permission_mode`).
 2. **Statusline** : modèle, coût (`cost.total_cost_usd`), contexte (`context_window.used_percentage`), dossier et worktree, quotas (`rate_limits`, souvent absent).
 3. **Transcript** `<config>/projects/<cwd encodé>/<session_id>.jsonl` : derniers messages, résumé, découverte des anciennes sessions. Format interne de Claude Code : lecture tolérante, optionnelle.
-4. **Flux du terminal** : affichage uniquement, jamais analysé pour en déduire un état.
+4. **Flux du terminal** : affichage uniquement, avec **une seule exception** (ajoutée après le premier essai, 2026-10-20) : le mode de permission affiché en bas de la TUI (« manual mode on », « plan mode on »…) est lu dans l'émulateur pour confirmer un changement de mode tout de suite, car Claude au repos n'envoie aucun hook. Lecture tolérante, limitée aux dernières lignes de l'écran, jamais pour les modes dangereux ; les hooks restent prioritaires. Détails dans `docs/protocole.md` (`sessions.setMode`).
 
 Git (branche, diff, worktrees) est interrogé directement, avec une surveillance des fichiers pour rafraîchir.
 

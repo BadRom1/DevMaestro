@@ -101,18 +101,43 @@ fn detect_systemd_scope() -> Option<PathBuf> {
     }
 }
 
+/// Retire de l'environnement du démon les marqueurs de session Claude Code
+/// hérités (voir [`launch::CLAUDE_SESSION_MARKERS`]) : ni les sous-processus
+/// du démon (`git`, `systemd-run`…) ni les `claude` lancés ne doivent se
+/// croire dans une session Claude Code. Renvoie les noms retirés (jamais les
+/// valeurs).
+///
+/// À appeler tant que le processus n'a qu'un fil (avant le runtime tokio).
+fn scrub_claude_session_markers() -> Vec<String> {
+    let names: Vec<std::ffi::OsString> = std::env::vars_os()
+        .map(|(k, _)| k)
+        .filter(|k| k.to_str().is_some_and(launch::is_claude_session_marker))
+        .collect();
+    for name in &names {
+        // SAFETY : appelé depuis `run_foreground` avant la création du runtime
+        // tokio et de tout autre fil : aucun accès concurrent à
+        // l'environnement n'est possible.
+        unsafe { std::env::remove_var(name) };
+    }
+    names
+        .into_iter()
+        .map(|n| n.to_string_lossy().into_owned())
+        .collect()
+}
+
 /// Lance le démon au premier plan, jusqu'à un signal d'arrêt.
 pub fn run_foreground() -> Result<(), String> {
+    let scrubbed = scrub_claude_session_markers();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(2)
         .thread_name("orchd")
         .build()
         .map_err(|e| format!("démarrage du runtime : {e}"))?;
-    runtime.block_on(run(Paths::from_env()))
+    runtime.block_on(run(Paths::from_env(), scrubbed))
 }
 
-async fn run(paths: Paths) -> Result<(), String> {
+async fn run(paths: Paths, scrubbed: Vec<String>) -> Result<(), String> {
     // Dossiers privés (0700, pas de lien symbolique, à l'utilisateur) : le
     // repli du dossier runtime dans /tmp notamment ne doit pas être détourné.
     for dir in [&paths.runtime_dir, &paths.data_dir, &paths.state_dir] {
@@ -138,6 +163,12 @@ async fn run(paths: Paths) -> Result<(), String> {
         eprintln!(
             "orchd : journal {} indisponible : {e}",
             paths.log_file().display()
+        );
+    }
+    if !scrubbed.is_empty() {
+        info!(
+            "marqueurs de session Claude Code hérités, retirés de l'environnement : {}",
+            scrubbed.join(", ")
         );
     }
 

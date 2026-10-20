@@ -40,6 +40,12 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE sessions ADD COLUMN pid_start INTEGER;
     ALTER TABLE sessions ADD COLUMN scope_unit TEXT;
     ",
+    "
+    ALTER TABLE sessions ADD COLUMN title TEXT;
+    ALTER TABLE sessions ADD COLUMN color TEXT;
+    ALTER TABLE sessions ADD COLUMN first_prompt TEXT;
+    ALTER TABLE sessions ADD COLUMN session_name TEXT;
+    ",
 ];
 
 /// Version du schéma gérée par ce binaire.
@@ -219,6 +225,10 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
         pid: row.get::<_, Option<i64>>("pid")?.map(|p| p as u32),
         pid_start: row.get::<_, Option<i64>>("pid_start")?.map(|p| p as u64),
         scope_unit: row.get("scope_unit")?,
+        title: row.get("title")?,
+        color: row.get("color")?,
+        first_prompt: row.get("first_prompt")?,
+        session_name: row.get("session_name")?,
     }))
 }
 
@@ -228,8 +238,9 @@ impl SessionStore for SqliteStore {
         conn.execute(
             "INSERT INTO sessions (id, claude_session_id, profile, cwd, project_root, branch,
                 model, mode, status, status_reason, created_at, updated_at, last_activity, pid,
-                pid_start, scope_unit)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                pid_start, scope_unit, title, color, first_prompt, session_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                ?17, ?18, ?19, ?20)
              ON CONFLICT(id) DO UPDATE SET
                 claude_session_id = excluded.claude_session_id,
                 profile = excluded.profile, cwd = excluded.cwd,
@@ -237,7 +248,9 @@ impl SessionStore for SqliteStore {
                 model = excluded.model, mode = excluded.mode, status = excluded.status,
                 status_reason = excluded.status_reason, updated_at = excluded.updated_at,
                 last_activity = excluded.last_activity, pid = excluded.pid,
-                pid_start = excluded.pid_start, scope_unit = excluded.scope_unit",
+                pid_start = excluded.pid_start, scope_unit = excluded.scope_unit,
+                title = excluded.title, color = excluded.color,
+                first_prompt = excluded.first_prompt, session_name = excluded.session_name",
             params![
                 r.id.to_string(),
                 r.claude_session_id,
@@ -255,6 +268,10 @@ impl SessionStore for SqliteStore {
                 r.pid.map(i64::from),
                 r.pid_start.map(|s| s as i64),
                 r.scope_unit,
+                r.title,
+                r.color,
+                r.first_prompt,
+                r.session_name,
             ],
         )
         .map_err(other)?;
@@ -300,6 +317,10 @@ mod tests {
             pid: Some(42),
             pid_start: Some(1234),
             scope_unit: Some("devmaestro-session-1.scope".into()),
+            title: Some("Mon titre".into()),
+            color: Some("bleu".into()),
+            first_prompt: Some("Corrige le test".into()),
+            session_name: Some("Correction".into()),
         }
     }
 
@@ -409,10 +430,54 @@ mod tests {
         assert_eq!(all[0].pid, Some(42));
         assert_eq!(all[0].pid_start, None);
         assert_eq!(all[0].scope_unit, None);
+        assert_eq!(all[0].title, None);
         let mut r = all[0].clone();
         r.pid_start = Some(77);
         store.upsert(&r).unwrap();
         assert_eq!(store.load_all().unwrap()[0].pid_start, Some(77));
+    }
+
+    #[test]
+    fn migrates_a_v2_database_keeping_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.execute_batch(MIGRATIONS[1]).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, claude_session_id, profile, cwd, project_root,
+                    status, created_at, updated_at, pid, pid_start, scope_unit)
+                 VALUES (?1, 'c', 'default', '/p', '/p', 'stopped', ?2, ?2, 42, 7, 'u.scope')",
+                params![
+                    Uuid::from_u128(5).to_string(),
+                    fmt_time(OffsetDateTime::UNIX_EPOCH)
+                ],
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let all = store.load_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].scope_unit.as_deref(), Some("u.scope"));
+        assert_eq!(
+            (
+                &all[0].title,
+                &all[0].color,
+                &all[0].first_prompt,
+                &all[0].session_name
+            ),
+            (&None, &None, &None, &None)
+        );
+        let mut r = all[0].clone();
+        r.title = Some("Titre".into());
+        r.color = Some("rose".into());
+        r.first_prompt = Some("Bonjour".into());
+        r.session_name = Some("Salutation".into());
+        store.upsert(&r).unwrap();
+        drop(store);
+        assert_eq!(SqliteStore::open(&path).unwrap().load_all().unwrap()[0], r);
     }
 
     #[test]

@@ -21,6 +21,19 @@ describe('état de la page', () => {
     expect(Object.keys(st.sessions)).toHaveLength(1)
   })
 
+  it('session.response : ignorée si un session.updated plus récent est arrivé', () => {
+    const s = session({ updated_at: '2026-10-19T10:00:00.100Z', title: null })
+    let st = reducer(initialState, { type: 'session.updated', session: s })
+    const fresh = { ...s, title: 'Nouveau', updated_at: '2026-10-19T10:00:00.200Z' }
+    st = reducer(st, { type: 'session.response', session: fresh })
+    expect(st.sessions[s.id]!.title).toBe('Nouveau')
+    const late = { ...s, title: 'Ancien', updated_at: '2026-10-19T10:00:00.150Z' }
+    expect(reducer(st, { type: 'session.response', session: late })).toBe(st)
+    // Session inconnue : ajoutée.
+    const other = session()
+    expect(reducer(st, { type: 'session.response', session: other }).sessions[other.id]).toBe(other)
+  })
+
   it('sessions.list remplace tout (reconnexion)', () => {
     const a = session()
     const b = session()

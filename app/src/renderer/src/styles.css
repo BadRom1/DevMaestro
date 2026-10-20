@@ -9,6 +9,9 @@
   --f-label: "IBM Plex Sans Condensed", "IBM Plex Sans", system-ui, sans-serif;
   --f-mono: "JetBrains Mono", ui-monospace, monospace;
   --r: 6px;
+  /* Couleurs de session (décoratives), inspirées de la palette Okabe-Ito. */
+  --col-gris: #9aa3b5; --col-bleu: #56b4e9; --col-vert: #2bb58c; --col-jaune: #f0e442;
+  --col-orange: #e69f00; --col-rouge: #e8743b; --col-violet: #a98beb; --col-rose: #e08bbe;
   color-scheme: dark;
 }
 @media (prefers-color-scheme: light) {
@@ -18,6 +21,8 @@
     --accent: #2f5bd3; --accent-ink: #ffffff;
     --wait: #b26a00; --run: #11866a; --idle: #6b7385; --done: #3f7d2c; --err: #c33b3b; --stop: #8b93a3;
     --sel: rgba(47, 91, 211, 0.22);
+    --col-gris: #7a8294; --col-bleu: #0072b2; --col-vert: #009e73; --col-jaune: #b8a200;
+    --col-orange: #d18a00; --col-rouge: #d55e00; --col-violet: #7b5cc4; --col-rose: #cc79a7;
     color-scheme: light;
   }
 }
@@ -27,6 +32,8 @@
   --accent: #2f5bd3; --accent-ink: #ffffff;
   --wait: #b26a00; --run: #11866a; --idle: #6b7385; --done: #3f7d2c; --err: #c33b3b; --stop: #8b93a3;
   --sel: rgba(47, 91, 211, 0.22);
+  --col-gris: #7a8294; --col-bleu: #0072b2; --col-vert: #009e73; --col-jaune: #b8a200;
+  --col-orange: #d18a00; --col-rouge: #d55e00; --col-violet: #7b5cc4; --col-rose: #cc79a7;
   color-scheme: light;
 }
 
@@ -113,6 +120,10 @@ button { cursor: pointer }
 .srow:hover { background: var(--panel-2) }
 .srow[aria-current="true"] { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent) }
 .srow .br { font-family: var(--f-mono); font-size: 12.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.srow .names { display: grid; min-width: 0; line-height: 1.3 }
+.srow .nm { display: flex; align-items: center; gap: 5px; min-width: 0 }
+.srow .nm-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.srow .names .br { font-size: 11px; color: var(--faint) }
 .srow .ago { margin-left: auto; font-size: 11.5px; color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums }
 .old { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 8px }
 .old .srow .br { font-family: var(--f-body) }
@@ -125,8 +136,29 @@ button { cursor: pointer }
 .sess > .term-panel { flex: 1; min-height: 0; display: grid }
 .sh { padding: 12px 14px 10px; border-bottom: 1px solid var(--line); display: grid; gap: 8px }
 .sh-1 { display: flex; flex-wrap: wrap; align-items: center; gap: 8px }
-.sh-1 h2 { margin: 0; font-size: 15px; font-weight: 600; font-family: var(--f-mono) }
-.sh-1 h2 span { color: var(--muted) }
+.sh-1 h2 { margin: 0; font-size: 15px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; cursor: default }
+.sh-1 .where { font-family: var(--f-mono); font-size: 12.5px; color: var(--muted) }
+.sh-1 .where span { color: var(--faint) }
+.rename { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap }
+.rename input { background: var(--sunk); border: 1px solid var(--line-2); border-radius: var(--r); padding: 2px 8px; font-size: 14px; font-weight: 600; width: min(32ch, 60vw) }
+.hint.pending { display: inline-flex; align-items: center; gap: 5px }
+.spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin 1.1s linear infinite }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; border-top-color: var(--muted); border-style: dotted } }
+
+/* Couleur de session : décorative, toujours doublée d'un nom en texte. */
+.c-gris { --c: var(--col-gris) } .c-bleu { --c: var(--col-bleu) } .c-vert { --c: var(--col-vert) } .c-jaune { --c: var(--col-jaune) }
+.c-orange { --c: var(--col-orange) } .c-rouge { --c: var(--col-rouge) } .c-violet { --c: var(--col-violet) } .c-rose { --c: var(--col-rose) }
+.cbar { display: inline-block; flex: none; background: var(--c); border-radius: 2px }
+.cbar.sm { width: 3px; height: 12px }
+.cbar.lg { width: 4px; height: 18px }
+.swatch { display: inline-block; flex: none; width: 12px; height: 12px; border-radius: 50%; background: var(--c); border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent) }
+.swatch.none { background: linear-gradient(135deg, transparent 45%, var(--muted) 45% 55%, transparent 55%) }
+.cpick { position: relative }
+.cpick > .btn { display: inline-flex; align-items: center; gap: 5px }
+.cpop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; display: grid; grid-template-columns: repeat(3, auto); gap: 2px; padding: 6px; background: var(--panel); border: 1px solid var(--line-2); border-radius: var(--r); box-shadow: 0 8px 24px rgba(0, 0, 0, .25) }
+.cpop .sw { display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; background: transparent; border-radius: 5px; padding: 3px 8px; font-size: 12px; white-space: nowrap }
+.cpop .sw:hover { background: var(--panel-2) }
+.cpop .sw[aria-pressed="true"] { border-color: var(--accent) }
 .sh-2 { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums }
 .sh-2 b { color: var(--fg); font-weight: 500 }
 .sh .acts { margin-left: auto; display: flex; gap: 6px; align-items: center }

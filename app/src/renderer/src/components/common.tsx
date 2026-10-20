@@ -1,3 +1,6 @@
+import { useLayoutEffect, useRef, useState } from 'react'
+
+import { truncateStart } from '../state/format'
 import type { Glyph } from '../state/status'
 import { meterLevel } from '../state/quotas'
 
@@ -31,4 +34,53 @@ export function Meter({ pct, width, label }: { pct: number | null | undefined; w
 export function profileClass(profile: string, profiles: { name: string }[]): string {
   const i = profiles.findIndex((p) => p.name === profile)
   return i < 0 ? '' : `p${i % 2}`
+}
+
+/** Largeur d'un caractère de la police (à chasse fixe) de `el`, mesurée sur un canevas. */
+let canvas: HTMLCanvasElement | null = null
+function charWidth(el: HTMLElement): number {
+  const cs = getComputedStyle(el)
+  canvas ??= document.createElement('canvas')
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return 7
+  ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`
+  return ctx.measureText('0').width || 7
+}
+
+/**
+ * Chemin tronqué **par le début** (« …/perso/Orchestrateur ») selon la largeur
+ * disponible, chemin complet dans l'infobulle. Police à chasse fixe attendue
+ * (le budget est un nombre de caractères). Toujours affiché de gauche à droite.
+ */
+export function PathLabel({ path, title, className }: { path: string; title?: string; className?: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [max, setMax] = useState<number | null>(null)
+
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const measure = () => {
+      const cs = getComputedStyle(el)
+      const width = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
+      const cw = charWidth(el)
+      setMax(width > 0 ? Math.max(1, Math.floor(width / cw)) : null)
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    // Les polices (fontsource) arrivent après le premier rendu : on remesure.
+    const fonts = document.fonts
+    fonts?.addEventListener?.('loadingdone', measure)
+    void fonts?.ready.then(measure)
+    return () => {
+      ro.disconnect()
+      fonts?.removeEventListener?.('loadingdone', measure)
+    }
+  }, [])
+
+  return (
+    <div ref={ref} className={className} title={title ?? path} dir="ltr">
+      {max === null ? path : truncateStart(path, max)}
+    </div>
+  )
 }

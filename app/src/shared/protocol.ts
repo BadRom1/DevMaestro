@@ -114,6 +114,16 @@ export interface Session {
   pid: number | null
   last_exit: { code: number } | { signal: string } | null
   size: { cols: number; rows: number } | null
+  /** Titre choisi par l'utilisateur (`sessions.update`) ; absent avec un démon plus ancien. */
+  title?: string | null
+  /** Couleur décorative choisie par l'utilisateur. */
+  color?: SessionColor | null
+  /**
+   * Nom à afficher, calculé par le démon : titre, sinon `session_name` de
+   * Claude Code, sinon premier prompt, sinon identifiant court. Absent avec
+   * un démon plus ancien (voir `sessionDisplayName`).
+   */
+  display_name?: string
 }
 
 export type Effect =
@@ -160,12 +170,20 @@ export interface PastSession {
   first_timestamp: string | null
   last_timestamp: string | null
   message_count: number | null
+  /** Nom à afficher, calculé par le démon (absent avec un démon plus ancien). */
+  display_name?: string | null
 }
 
 export type PermissionDecision = 'allow' | 'allow_always' | 'deny'
 /** Modes que l'app sait demander (`sessions.setMode`). */
 export type SettableMode = 'default' | 'acceptEdits' | 'plan' | 'auto'
 export const SETTABLE_MODES: readonly SettableMode[] = ['default', 'acceptEdits', 'plan', 'auto']
+
+/** Couleurs proposées pour une session (palette décorative, protocole § 4). */
+export type SessionColor = 'gris' | 'bleu' | 'vert' | 'jaune' | 'orange' | 'rouge' | 'violet' | 'rose'
+export const SESSION_COLORS: readonly SessionColor[] = ['gris', 'bleu', 'vert', 'jaune', 'orange', 'rouge', 'violet', 'rose']
+/** Longueur maximale d'un titre de session (en caractères). */
+export const MAX_TITLE = 80
 
 /** Réponses à une question : libellé, liste de libellés (choix multiple) ou texte libre. */
 export type QuestionAnswers = Record<string, string | string[]>
@@ -205,6 +223,10 @@ export interface Methods {
   }
   'sessions.resize': { params: { id: string; cols: number; rows: number }; result: { cols: number; rows: number } }
   'sessions.stop': { params: { id: string }; result: { stopping: boolean; alive: boolean } }
+  'sessions.update': {
+    params: { id: string; title?: string | null; color?: SessionColor | null }
+    result: { session: Session }
+  }
   'sessions.setMode': { params: { id: string; mode: SettableMode }; result: { sent: unknown } }
   'sessions.answerPermission': {
     params: { id: string; request_id: number; decision: PermissionDecision; message?: string }
@@ -233,6 +255,7 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'sessions.resize',
   'sessions.stop',
   'sessions.setMode',
+  'sessions.update',
   'sessions.answerPermission',
   'sessions.answerQuestion',
   'transcripts.list',

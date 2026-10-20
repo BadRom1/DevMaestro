@@ -4,7 +4,7 @@
  * minimal (identifiants UUID, entiers bornés, énumérations, chaînes de
  * longueur bornée). Les champs inconnus sont retirés. Messages en français.
  */
-import type { MethodName } from '../shared/protocol'
+import { MAX_TITLE, SESSION_COLORS, type MethodName } from '../shared/protocol'
 
 export class ValidationError extends Error {
   override name = 'ValidationError'
@@ -108,6 +108,20 @@ function answers(o: Obj): Record<string, string | string[]> {
   return out
 }
 
+/** Champ facultatif qui accepte `null` (effacement) : présent dès que la clé l'est. */
+function nullable(o: Obj, out: Obj, k: string, f: (o: Obj, k: string) => unknown): boolean {
+  if (!Object.prototype.hasOwnProperty.call(o, k) || o[k] === undefined) return false
+  out[k] = o[k] === null ? null : f(o, k)
+  return true
+}
+
+/** Titre de session : au plus `MAX_TITLE` caractères (points de code, comme côté démon). */
+function title(o: Obj, k: string): string {
+  const v = str(o, k, MAX_TITLE * 2)
+  if ([...v].length > MAX_TITLE) throw new ValidationError(`« ${k} » est trop long (${MAX_TITLE} caractères au plus)`)
+  return v
+}
+
 /** Paramètres nettoyés pour `method`, ou `ValidationError`. */
 export function validateParams(method: MethodName, raw: unknown): Obj {
   const o = obj(raw)
@@ -153,6 +167,13 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       out.id = uuid(o, 'id')
       out.mode = oneOf(o, 'mode', SET_MODES)
       return out
+    case 'sessions.update': {
+      out.id = uuid(o, 'id')
+      const t = nullable(o, out, 'title', title)
+      const c = nullable(o, out, 'color', (x, k) => oneOf(x, k, SESSION_COLORS))
+      if (!t && !c) throw new ValidationError('rien à modifier : « title » ou « color » attendu')
+      return out
+    }
     case 'sessions.answerPermission':
       out.id = uuid(o, 'id')
       out.request_id = int(o, 'request_id', 0, Number.MAX_SAFE_INTEGER)

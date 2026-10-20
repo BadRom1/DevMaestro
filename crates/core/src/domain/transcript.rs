@@ -184,12 +184,45 @@ fn typed_prompt(content: &Value) -> Option<&str> {
 }
 
 fn preview(text: &str) -> String {
+    truncate_chars(text, PROMPT_PREVIEW_CHARS)
+}
+
+/// Les `max` premiers caractères de `text`, suivis de `…` s'il en reste.
+pub fn truncate_chars(text: &str, max: usize) -> String {
     let mut chars = text.chars();
-    let head: String = chars.by_ref().take(PROMPT_PREVIEW_CHARS).collect();
+    let head: String = chars.by_ref().take(max).collect();
     if chars.next().is_some() {
         format!("{head}…")
     } else {
         head
+    }
+}
+
+/// Longueur maximale d'un nom affiché tiré d'un prompt ou d'un nom donné par
+/// Claude Code, en caractères (`…` en plus s'il est coupé).
+pub const DISPLAY_NAME_CHARS: usize = 60;
+
+/// Texte ramené à un nom affichable : blancs (dont les sauts de ligne)
+/// réduits à une espace, coupé à [`DISPLAY_NAME_CHARS`]. `None` s'il est vide.
+pub fn display_label(text: &str) -> Option<String> {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!flat.is_empty()).then(|| truncate_chars(&flat, DISPLAY_NAME_CHARS))
+}
+
+/// Les 8 premiers caractères d'un identifiant, nom de dernier recours.
+pub fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+impl PastSession {
+    /// Nom à afficher : titre donné par Claude Code (`aiTitle`, `summary`),
+    /// sinon premier prompt, sinon identifiant court.
+    pub fn display_name(&self) -> String {
+        self.title
+            .as_deref()
+            .and_then(display_label)
+            .or_else(|| self.first_prompt.as_deref().and_then(display_label))
+            .unwrap_or_else(|| short_id(&self.session_id))
     }
 }
 
@@ -288,6 +321,24 @@ mod tests {
         let p = s.first_prompt.unwrap();
         assert_eq!(p.chars().count(), PROMPT_PREVIEW_CHARS + 1);
         assert!(p.ends_with('…'));
+    }
+
+    #[test]
+    fn display_name_prefers_title_then_prompt_then_short_id() {
+        let mut s = PastSession {
+            session_id: "714c80f0-b828-461a-b198-ec128c923746".into(),
+            ..PastSession::default()
+        };
+        assert_eq!(s.display_name(), "714c80f0");
+        s.first_prompt = Some(format!("Lis\n  {}", "x".repeat(80)));
+        let name = s.display_name();
+        assert!(name.starts_with("Lis xxx"), "{name}");
+        assert_eq!(name.chars().count(), DISPLAY_NAME_CHARS + 1);
+        assert!(name.ends_with('…'));
+        s.title = Some("  ".into());
+        assert!(s.display_name().starts_with("Lis "));
+        s.title = Some("Lecture de l'architecture".into());
+        assert_eq!(s.display_name(), "Lecture de l'architecture");
     }
 
     #[test]

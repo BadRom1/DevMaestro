@@ -34,6 +34,11 @@ export type Action =
   | { type: 'connection'; state: ConnectionState }
   | { type: 'sessions'; sessions: Session[] }
   | { type: 'session.updated'; session: Session }
+  /**
+   * Session renvoyée par une méthode (`sessions.update`…) : appliquée sauf si
+   * un `session.updated` plus récent est déjà arrivé.
+   */
+  | { type: 'session.response'; session: Session }
   | { type: 'session.effect'; id: string; effect: Effect }
   | { type: 'profiles'; profiles: Profile[] }
   | { type: 'project'; cwd: string; info: ProjectInfo }
@@ -73,6 +78,14 @@ export function reducer(state: AppState, action: Action): AppState {
         sessions: { ...state.sessions, [s.id]: s },
         stale: pruneStale(state.stale, s),
       }
+    }
+    case 'session.response': {
+      const s = action.session
+      const cur = state.sessions[s.id]
+      const curT = Date.parse(cur?.updated_at ?? '')
+      const newT = Date.parse(s.updated_at ?? '')
+      if (!Number.isNaN(curT) && !Number.isNaN(newT) && curT > newT) return state
+      return reducer(state, { type: 'session.updated', session: s })
     }
     case 'session.effect':
       return applyEffect(state, action.id, action.effect)

@@ -59,6 +59,18 @@ const AUTO_ANSWER: Duration = Duration::from_millis(300);
 
 const MODE_CYCLE: [&str; 4] = ["default", "acceptEdits", "plan", "auto"];
 
+/// Pied de la TUI pour un mode, comme Claude Code 2.1.303 (symboles et
+/// couleurs compris).
+fn footer(mode: &str) -> String {
+    match mode {
+        "default" => "\x1b[2m⏸ manual mode on\x1b[0m".into(),
+        "acceptEdits" => "\x1b[35m⏵⏵ accept edits on\x1b[2m (shift+tab to cycle)\x1b[0m".into(),
+        "plan" => "\x1b[36m⏸ plan mode on\x1b[2m (shift+tab to cycle)\x1b[0m".into(),
+        "auto" => "\x1b[33m⏵⏵ auto mode on\x1b[2m (shift+tab to cycle)\x1b[0m".into(),
+        other => format!("mode {other}"),
+    }
+}
+
 extern "C" fn on_winch(_: nix::libc::c_int) {
     WINCH.store(true, Ordering::SeqCst);
 }
@@ -220,9 +232,40 @@ struct Fake {
     hooks: Value,
     plugin_root: String,
     mode: RefCell<String>,
+    /// Pied de la TUI affiché après Shift+Tab (`/sans-pied` le retire, pour
+    /// imiter une version de Claude Code sans indicateur reconnu).
+    footer: RefCell<bool>,
+    /// Le pied est affiché (sous chaque invite, toujours à jour comme dans
+    /// la vraie TUI) : dès le lancement avec `--permission-mode`, sinon après
+    /// le premier Shift+Tab (mode d'abord inconnu du démon).
+    footer_on_screen: RefCell<bool>,
 }
 
 impl Fake {
+    /// Invite `> ` précédée du pied du mode courant s'il est affiché.
+    fn prompt_line(&self, line: &str) -> String {
+        if *self.footer.borrow() && *self.footer_on_screen.borrow() {
+            format!("  {}\r\n> {line}", footer(&self.hook_mode()))
+        } else {
+            format!("> {line}")
+        }
+    }
+
+    /// `/hook-perime <mode>` : un hook neutre (`Notification`) qui porte un
+    /// autre mode que le mode courant, comme un hook émis avant un Shift+Tab
+    /// et arrivé après.
+    fn stale_hook(&self, mode: &str) {
+        self.send_stale_hook(mode);
+        out(&format!("hook en retard envoyé : {mode}\r\n"));
+    }
+
+    fn send_stale_hook(&self, mode: &str) {
+        let mut ev = self.base("Notification");
+        ev["permission_mode"] = json!(mode);
+        ev["notification_type"] = json!("information");
+        ev["message"] = json!("hook en retard");
+        self.hook("Notification", ev);
+    }
     /// `permission_mode` tel que l'écrivent les hooks : `manual` → `default`.
     fn hook_mode(&self) -> String {
         self.mode.borrow().clone()
@@ -553,6 +596,8 @@ impl Fake {
                 hooks: fake_hooks,
                 plugin_root: self.plugin_root.clone(),
                 mode: RefCell::new(self.hook_mode()),
+                footer: RefCell::new(false),
+                footer_on_screen: RefCell::new(false),
             };
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(200));
@@ -767,7 +812,13 @@ fn main() {
         "ORCH_TOKEN_present": std::env::var_os("ORCH_TOKEN").is_some(),
         "env_keys": std::env::vars_os()
             .filter_map(|(k, _)| k.into_string().ok())
-            .filter(|k| k.starts_with("ORCH_") || k.starts_with("DEVMAESTRO_"))
+            .filter(|k| {
+                k.starts_with("ORCH_")
+                    || k.starts_with("DEVMAESTRO_")
+                    || k.starts_with("CLAUDE")
+                    || k == "AI_AGENT"
+                    || k == "TRACEPARENT"
+            })
             .collect::<Vec<_>>(),
         "TERM": std::env::var("TERM").ok(),
         "COLORTERM": std::env::var("COLORTERM").ok(),
@@ -804,7 +855,10 @@ fn main() {
         plugin_root,
         args,
         mode: RefCell::new(mode),
+        footer: RefCell::new(true),
+        footer_on_screen: RefCell::new(false),
     };
+    *fake.footer_on_screen.borrow_mut() = fake.args.mode.is_some();
 
     // Clavier en mode brut, comme une TUI.
     if let Ok(mut t) = nix::sys::termios::tcgetattr(std::io::stdin()) {
@@ -871,14 +925,17 @@ fn main() {
     if let Some(p) = fake.args.prompt.clone() {
         fake.turn(&mut keys, &p);
     }
-    out("> ");
+    out(&fake.prompt_line(""));
 
     let mut line = String::new();
     loop {
         if WINCH.swap(false, Ordering::SeqCst)
             && let Some((c, r)) = winsize()
         {
-            out(&format!("\r\ntaille : {c}x{r}\r\n> {line}"));
+            out(&format!(
+                "\r\ntaille : {c}x{r}\r\n{}",
+                fake.prompt_line(&line)
+            ));
         }
         let Some(key) = keys.next(Duration::from_millis(20)) else {
             continue;
@@ -923,12 +980,38 @@ fn main() {
                         *fake.mode.borrow_mut() = t["/mode ".len()..].trim().to_owned();
                         out(&format!("mode forcé : {}\r\n", fake.hook_mode()));
                     }
+                    t if t.starts_with("/hook-perime-muet ") => {
+                        // Le hook part 300 ms plus tard, sans rien écrire
+                        // ensuite : seul le démon peut relire le pied.
+                        let mode = t["/hook-perime-muet ".len()..].trim().to_owned();
+                        let me = Fake {
+                            args: Args::default(),
+                            session_id: fake.session_id.clone(),
+                            cwd: fake.cwd.clone(),
+                            hooks: fake.hooks.clone(),
+                            plugin_root: fake.plugin_root.clone(),
+                            mode: RefCell::new(fake.hook_mode()),
+                            footer: RefCell::new(false),
+                            footer_on_screen: RefCell::new(false),
+                        };
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(300));
+                            me.send_stale_hook(&mode);
+                        });
+                    }
+                    t if t.starts_with("/hook-perime ") => {
+                        fake.stale_hook(t["/hook-perime ".len()..].trim());
+                    }
+                    "/sans-pied" => {
+                        *fake.footer.borrow_mut() = false;
+                        out("pied retiré\r\n");
+                    }
                     "/ask" => fake.ask(&mut keys, text),
                     t if t == "/perm" || t.starts_with("/perm ") => fake.perm(&mut keys, t),
                     "" => {}
                     t => fake.turn(&mut keys, t),
                 }
-                out("> ");
+                out(&fake.prompt_line(""));
             }
             Key::Backspace => {
                 if line.pop().is_some() {
@@ -937,7 +1020,15 @@ fn main() {
             }
             Key::ShiftTab => {
                 fake.cycle_mode();
-                out(&format!("\r\n⏵⏵ mode : {}\r\n> {line}", fake.hook_mode()));
+                *fake.footer_on_screen.borrow_mut() = true;
+                if *fake.footer.borrow() {
+                    out(&format!("\r\n{}", fake.prompt_line(&line)));
+                } else {
+                    out(&format!(
+                        "\r\n(Shift+Tab : {})\r\n> {line}",
+                        fake.hook_mode()
+                    ));
+                }
             }
             Key::Char(c) => {
                 line.push(c);

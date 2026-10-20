@@ -55,6 +55,27 @@ describe('validation des paramètres de la page', () => {
     })
   })
 
+  it('sessions.update : titre et couleur, null pour effacer', () => {
+    expect(validateParams('sessions.update', { id: ID, title: 'Refonte', extra: 1 })).toEqual({ id: ID, title: 'Refonte' })
+    expect(validateParams('sessions.update', { id: ID, title: null })).toEqual({ id: ID, title: null })
+    expect(validateParams('sessions.update', { id: ID, color: 'violet' })).toEqual({ id: ID, color: 'violet' })
+    expect(validateParams('sessions.update', { id: ID, title: null, color: null })).toEqual({ id: ID, title: null, color: null })
+    expect(validateParams('sessions.update', { id: ID, title: 'é'.repeat(80) }).title).toHaveLength(80)
+    // 80 émojis : 160 unités UTF-16 mais 80 caractères.
+    expect(validateParams('sessions.update', { id: ID, title: '😀'.repeat(80) }).title).toBe('😀'.repeat(80))
+    const bad: unknown[] = [
+      { id: ID },
+      { id: ID, title: undefined },
+      { id: ID, title: 'x'.repeat(81) },
+      { id: ID, title: '😀'.repeat(81) },
+      { id: ID, title: 3 },
+      { id: ID, color: 'fuchsia' },
+      { id: ID, color: 1 },
+      { id: 'x', title: 'a' },
+    ]
+    for (const p of bad) expect(() => validateParams('sessions.update', p), JSON.stringify(p)).toThrow(ValidationError)
+  })
+
   it('view : UUID ou null, taille bornée', () => {
     expect(validateView({ id: null })).toEqual({ id: null })
     expect(validateView({ id: ID, cols: 80, rows: 24 })).toEqual({ id: ID, cols: 80, rows: 24 })
@@ -80,5 +101,6 @@ describe('messages d’erreur du démon', () => {
     expect(describeError(-32012, 'x')).toMatch(/réponds dans le terminal/)
     expect(describeError(-32011, 'x')).toMatch(/mauvais type/)
     expect(describeError(-32602, 'paramètres invalides')).toBe('paramètres invalides')
+    expect(describeError(-32601, 'méthode inconnue')).toMatch(/^méthode inconnue du démon \(démon trop ancien/)
   })
 })

@@ -173,6 +173,8 @@ export function App() {
     setDialog(false)
   }, [])
 
+  const onSessionUpdated = useCallback((s: Session) => dispatch({ type: 'session.response', session: s }), [])
+
   const onTermSize = useCallback((cols: number, rows: number) => setTermSize({ cols, rows }), [])
 
   const banner = connectionText(state.connection)
@@ -215,6 +217,7 @@ export function App() {
           termSize={termSize}
           onTermSize={onTermSize}
           onLink={setLink}
+          onSessionUpdated={onSessionUpdated}
         />
       </main>
       {dialog && (

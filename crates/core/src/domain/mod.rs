@@ -15,8 +15,9 @@ pub use metrics::{Metrics, ModelInfo, RateLimitWindow, RateLimits};
 pub use profile::Profile;
 pub use project::Project;
 pub use session::{
-    Pending, PermissionMode, PermissionPending, Question, QuestionOption, QuestionPending,
-    SHIFT_TAB_CYCLE, Session, SessionStatus, WaitKind, shift_tab_steps,
+    MAX_TITLE_CHARS, Pending, PermissionMode, PermissionPending, Question, QuestionOption,
+    QuestionPending, SESSION_COLORS, SHIFT_TAB_CYCLE, Session, SessionStatus, TitleError, WaitKind,
+    is_session_color, mode_from_footer, normalize_title, shift_tab_steps,
 };
 pub use state::{
     Applied, Effect, PendingRequest, ProcessExit, REASON_DAEMON_RESTART, REASON_PROCESS_EXIT,

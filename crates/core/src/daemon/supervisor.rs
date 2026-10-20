@@ -26,8 +26,9 @@ use super::peer::{self, Peer, Supervised, SupervisedProc};
 use super::terminal::{Chunk, RESUME_RESET, Snapshot, Terminal};
 use crate::domain::decision::{self, AnswerError, PermissionAnswer};
 use crate::domain::{
-    Effect, HookEvent, HookKind, PermissionMode, ProcessExit, Profile, REASON_DAEMON_RESTART,
-    RequestId, Session, SessionState, SessionStatus, Statusline, WaitKind, shift_tab_steps,
+    Effect, HookEvent, HookKind, PastSession, PermissionMode, ProcessExit, Profile,
+    REASON_DAEMON_RESTART, RequestId, SESSION_COLORS, Session, SessionState, SessionStatus,
+    Statusline, WaitKind, is_session_color, mode_from_footer, normalize_title, shift_tab_steps,
 };
 use crate::paths::Paths;
 use crate::ports::{
@@ -135,6 +136,33 @@ pub struct PermissionWait {
 /// nombre de Shift+Tab qu'ils contiennent.
 pub type ModeKeys = (mpsc::Sender<Vec<u8>>, Vec<u8>, usize);
 
+/// Échec de `sessions.setMode`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetModeError {
+    /// Un `setMode` précédent attend encore sa confirmation (hook ou pied de
+    /// la TUI) : l'appelant peut réessayer un peu plus tard.
+    Unconfirmed(RpcError),
+    /// Toute autre erreur, définitive.
+    Rpc(RpcError),
+}
+
+impl SetModeError {
+    pub fn into_rpc(self) -> RpcError {
+        match self {
+            Self::Unconfirmed(e) | Self::Rpc(e) => e,
+        }
+    }
+}
+
+impl From<RpcError> for SetModeError {
+    fn from(e: RpcError) -> Self {
+        Self::Rpc(e)
+    }
+}
+
+/// Lignes non vides du bas de l'écran lues pour trouver le pied de la TUI.
+const FOOTER_ROWS: usize = 8;
+
 /// Séquence envoyée par Shift+Tab (CSI Z, « back tab »).
 pub const SHIFT_TAB: &[u8] = b"\x1b[Z";
 
@@ -199,6 +227,9 @@ struct Run {
     /// Code de sortie, posé par le fil d'attente dès la fin du processus
     /// (avant que le démon ne la constate).
     exited: Arc<Mutex<Option<ExitStatus>>>,
+    /// Posé quand un hook change le mode : le lecteur du PTY oublie le
+    /// dernier pied vu et le signale de nouveau à la prochaine sortie.
+    footer_reset: Arc<AtomicBool>,
 }
 
 impl Run {
@@ -233,11 +264,21 @@ struct Entry {
     /// `sessions.setMode` envoyé, pas encore confirmé par un hook : mode visé
     /// et date de l'envoi.
     mode_change: Option<(PermissionMode, Instant)>,
+    /// Dernier mode retenu depuis le pied de la TUI, et quand.
+    screen_mode: Option<(PermissionMode, Instant)>,
 }
 
 /// Délai au bout duquel un `sessions.setMode` non confirmé n'empêche plus
 /// le suivant.
-const MODE_CHANGE_TIMEOUT: Duration = Duration::from_secs(3);
+pub const MODE_CHANGE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Un hook qui contredit le pied de la TUI lu il y a moins que ce délai est
+/// peut-être en retard (émis avant le changement) : le pied est relu.
+const STALE_HOOK_WINDOW: Duration = Duration::from_secs(3);
+
+/// Délai avant de relire le pied après un hook qui le contredit (le temps
+/// que la TUI redessine).
+const FOOTER_RECHECK_DELAY: Duration = Duration::from_millis(200);
 
 #[derive(Default)]
 struct Registry {
@@ -285,6 +326,8 @@ pub struct Daemon {
     /// Associe à chaque pid sa date de démarrage (`/proc/<pid>/stat`), pour
     /// ne jamais confondre avec un pid réattribué.
     supervised: Mutex<Supervised>,
+    /// Le démon lui-même, pour les tâches lancées depuis `&self`.
+    me: std::sync::Weak<Daemon>,
 }
 
 /// Instantané, historique éventuel, flux de sortie et terminal d'une session.
@@ -365,6 +408,7 @@ impl Entry {
             waiters: HashMap::new(),
             orphan: None,
             mode_change: None,
+            screen_mode: None,
         }
     }
 
@@ -430,6 +474,10 @@ impl Entry {
             pid: self.process().map(|(p, _)| p),
             pid_start: self.process().and_then(|(_, p)| p.start),
             scope_unit: self.process().and_then(|(_, p)| p.scope),
+            title: self.session.title.clone(),
+            color: self.session.color.clone(),
+            first_prompt: self.session.first_prompt.clone(),
+            session_name: self.session.metrics.session_name.clone(),
         }
     }
 
@@ -439,6 +487,10 @@ impl Entry {
         json!({
             "id": s.id,
             "claude_session_id": s.claude_session_id,
+            "title": s.title,
+            "color": s.color,
+            "display_name": s.display_name(),
+            "first_prompt": s.first_prompt,
             "profile": s.profile,
             "cwd": s.cwd,
             "project_root": s.project_root,
@@ -540,7 +592,7 @@ impl Daemon {
     /// Crée le démon. À appeler dans un runtime tokio.
     pub fn new(config: Config, deps: Deps) -> Arc<Self> {
         let (events, _) = broadcast::channel(EVENTS_CAPACITY);
-        Arc::new(Self {
+        Arc::new_cyclic(|me| Self {
             config,
             deps,
             registry: Mutex::new(Registry::default()),
@@ -550,6 +602,7 @@ impl Daemon {
             next_waiter: AtomicU64::new(1),
             shutting_down: AtomicBool::new(false),
             supervised: Mutex::new(Supervised::new()),
+            me: me.clone(),
         })
     }
 
@@ -793,6 +846,10 @@ impl Daemon {
                 r.profile.clone(),
             );
             session.branch = r.branch.clone();
+            session.title = r.title.clone();
+            session.color = r.color.clone();
+            session.first_prompt = r.first_prompt.clone();
+            session.metrics.session_name = r.session_name.clone();
             session.state = SessionState::restored(
                 status,
                 r.mode.as_deref().map(PermissionMode::parse),
@@ -903,13 +960,48 @@ impl Daemon {
             .transcripts
             .past_sessions(&profile, limit)
             .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))?;
-        Ok(json!({
-            "profile": profile.name,
-            "sessions": past.iter().map(past_session_json).collect::<Vec<_>>(),
-        }))
+        // Un titre donné dans l'app à une session du démon vaut aussi pour
+        // son transcript (même `claude_session_id`).
+        let titles: HashMap<String, String> = {
+            let reg = self.lock();
+            let mut entries: Vec<&Entry> = reg.sessions.values().collect();
+            entries.sort_by_key(|e| e.updated_at);
+            entries
+                .into_iter()
+                .filter_map(|e| {
+                    e.session
+                        .title
+                        .clone()
+                        .map(|t| (e.session.claude_session_id.clone(), t))
+                })
+                .collect()
+        };
+        let sessions: Vec<Value> = past
+            .iter()
+            .map(|p| {
+                let mut v = past_session_json(p);
+                if let Some(t) = titles.get(&p.session_id) {
+                    v["display_name"] = json!(t);
+                }
+                v
+            })
+            .collect();
+        Ok(json!({"profile": profile.name, "sessions": sessions}))
     }
 
     // ------------------------------------------------------ lancement, reprise
+
+    /// Résumé du transcript `claude_session_id` d'un profil, s'il existe
+    /// (profil inconnu ou lecture impossible : `None`).
+    fn past_session(&self, profile: &str, claude_session_id: &str) -> Option<PastSession> {
+        let profile = self.profile(profile).ok()?;
+        self.deps
+            .transcripts
+            .past_sessions(&profile, None)
+            .ok()?
+            .into_iter()
+            .find(|p| p.session_id == claude_session_id)
+    }
 
     fn claude_bin(&self) -> Result<PathBuf, RpcError> {
         launch::find_claude(
@@ -970,6 +1062,9 @@ impl Daemon {
             plan.profile.name.clone(),
         );
         session.branch = repo.and_then(|r| r.branch);
+        if let Some(p) = &plan.prompt {
+            session.note_prompt(p);
+        }
         let mut entry = Entry::new(session, Terminal::new(plan.size), self.now());
 
         let mut reg = self.lock();
@@ -1013,6 +1108,17 @@ impl Daemon {
         let size_given = params.get("cols").is_some() || params.get("rows").is_some();
         let size_param = size_param(params, DEFAULT_SIZE)?;
         let claude = self.claude_bin()?;
+        // Reprise par `claude_session_id` : le résumé de son transcript (lu
+        // hors du verrou du registre) nommera la nouvelle entrée s'il en faut une.
+        let past = match (&by_id, &claude_id) {
+            (None, Some(cid)) => self.past_session(
+                profile_param
+                    .as_deref()
+                    .unwrap_or(crate::domain::profile::DEFAULT_PROFILE_NAME),
+                cid,
+            ),
+            _ => None,
+        };
 
         let mut reg = self.lock();
         let existing = match (&by_id, &claude_id) {
@@ -1127,6 +1233,25 @@ impl Daemon {
             plan.profile.name.clone(),
         );
         session.branch = repo.and_then(|r| r.branch);
+        // Nom repris du transcript (premier prompt, titre de Claude Code) et
+        // d'une autre entrée du démon pour la même conversation (titre, couleur).
+        if let Some(past) = past {
+            session.first_prompt = past.first_prompt;
+            session.metrics.session_name = past.title;
+        }
+        if let Some(other) = reg
+            .sessions
+            .values()
+            .filter(|e| e.session.claude_session_id == session.claude_session_id)
+            .filter(|e| e.session.title.is_some() || e.session.color.is_some())
+            .max_by_key(|e| e.updated_at)
+        {
+            session.title = other.session.title.clone();
+            session.color = other.session.color.clone();
+        }
+        if let Some(p) = &plan.prompt {
+            session.note_prompt(p);
+        }
         let mut entry = Entry::new(session, Terminal::new(plan.size), self.now());
         let (run, token) = self.spawn_run(id, &entry.terminal, &plan, false)?;
         install_run(&mut reg, &mut entry, run, token, plan);
@@ -1235,14 +1360,31 @@ impl Daemon {
         }
 
         // Lecteur du PTY : alimente le terminal, ne bloque jamais sur les clients.
+        // Il lit aussi le pied de la TUI (mode affiché) : le démon n'est
+        // prévenu que d'un changement, verrou du terminal relâché avant celui
+        // du registre (jamais imbriqués dans cet ordre).
         let term = terminal.clone();
         let mut reader = spawned.reader;
+        let reader_daemon = Arc::clone(self);
+        let footer_reset = Arc::new(AtomicBool::new(false));
+        let reset_seen = footer_reset.clone();
         spawn_thread(&format!("pty-lecture-{run_id}"), move || {
             let mut buf = vec![0u8; 64 * 1024];
+            let mut footer: Option<PermissionMode> = None;
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
-                    Ok(n) => term.feed(&buf[..n]),
+                    Ok(n) => {
+                        term.feed(&buf[..n]);
+                        if reset_seen.swap(false, Ordering::SeqCst) {
+                            footer = None;
+                        }
+                        let seen = mode_from_footer(&term.bottom_rows(FOOTER_ROWS));
+                        if let Some(mode) = seen.filter(|m| footer.as_ref() != Some(m)) {
+                            footer = Some(mode.clone());
+                            reader_daemon.on_screen_mode(id, run_id, mode);
+                        }
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     // EIO : l'enfant a fermé le PTY.
                     Err(_) => break,
@@ -1289,6 +1431,7 @@ impl Daemon {
                 pid,
                 control: spawned.control,
                 input: input_tx,
+                footer_reset,
                 stop_requested: false,
                 proc,
                 exited,
@@ -1423,6 +1566,12 @@ impl Daemon {
         entry.updated_at = now;
         entry.release_resolved(&applied.effects);
         if let Some(mode) = &event.common.permission_mode {
+            if mode_before.as_ref() != Some(mode) {
+                if let Some(run) = &entry.run {
+                    run.footer_reset.store(true, Ordering::SeqCst);
+                }
+                self.recheck_footer_after_hook(id, entry, mode);
+            }
             // Un hook porte le mode : un `setMode` en cours est confirmé (ou démenti).
             if let Some((target, _)) = entry.mode_change.take()
                 && &target != mode
@@ -1594,8 +1743,10 @@ impl Daemon {
     /// `sessions.setMode {id, mode}` : nombre de Shift+Tab le long du cycle
     /// de la TUI ([`crate::domain::SHIFT_TAB_CYCLE`]) depuis le mode courant
     /// connu. Renvoie la file d'entrée du PTY et les octets à y écrire ; la
-    /// confirmation viendra du `permission_mode` du hook suivant.
-    pub fn set_mode(&self, params: &Value) -> Result<ModeKeys, RpcError> {
+    /// confirmation viendra du pied de la TUI ([`Daemon::on_screen_mode`]) ou
+    /// du `permission_mode` du hook suivant. Tant qu'un changement précédent
+    /// n'est pas confirmé : [`SetModeError::Unconfirmed`] (l'appelant réessaie).
+    pub fn set_mode(&self, params: &Value) -> Result<ModeKeys, SetModeError> {
         let id = session_id_param(params)?;
         let target = mode_param(params)?.ok_or_else(|| RpcError::params("« mode » manquant"))?;
         self.check_mode_allowed(Some(&target), false)?;
@@ -1607,13 +1758,13 @@ impl Daemon {
         if let Some((pending, at)) = &entry.mode_change
             && at.elapsed() < MODE_CHANGE_TIMEOUT
         {
-            return Err(RpcError::new(
+            return Err(SetModeError::Unconfirmed(RpcError::new(
                 error_code::INVALID_STATE,
                 format!(
                     "changement de mode vers « {} » pas encore confirmé par Claude Code : réessayer après le prochain hook",
                     pending.as_str()
                 ),
-            ));
+            )));
         }
         let run = entry
             .run
@@ -1623,7 +1774,8 @@ impl Daemon {
             return Err(RpcError::new(
                 error_code::INVALID_STATE,
                 "une demande attend une réponse : Shift+Tab agirait sur le dialogue de la TUI",
-            ));
+            )
+            .into());
         }
         let current = entry.session.state.permission_mode.clone().ok_or_else(|| {
             RpcError::new(
@@ -1646,6 +1798,152 @@ impl Daemon {
             entry.mode_change = Some((target, Instant::now()));
         }
         Ok((input, SHIFT_TAB.repeat(steps), steps))
+    }
+
+    /// Mode lu dans le pied de la TUI du processus `run_id` (voir
+    /// [`mode_from_footer`]). Pendant un `setMode`, seul le mode visé est
+    /// retenu (les modes traversés par plusieurs Shift+Tab sont ignorés) et
+    /// il confirme le changement ; sinon tout mode lu est retenu (Shift+Tab
+    /// tapé dans la TUI). Les hooks restent la source qui fait foi : ils
+    /// écrasent ce mode dès qu'ils en portent un.
+    pub fn on_screen_mode(&self, id: Uuid, run_id: u64, mode: PermissionMode) {
+        let mut reg = self.lock();
+        let Some(entry) = reg.sessions.get_mut(&id) else {
+            return;
+        };
+        if entry.run.as_ref().is_none_or(|r| r.id != run_id) {
+            return;
+        }
+        match &entry.mode_change {
+            Some((target, _)) if *target != mode => return,
+            Some(_) => entry.mode_change = None,
+            None => {}
+        }
+        entry.screen_mode = Some((mode.clone(), Instant::now()));
+        let current = entry.session.state.permission_mode.as_ref();
+        // Un mode dangereux n'est jamais remplacé par une lecture de l'écran
+        // (les hooks en restent seuls juges ; un vieux pied peut traîner).
+        if current == Some(&mode) || current.is_some_and(PermissionMode::is_dangerous) {
+            return;
+        }
+        info!(
+            "session {id} : mode « {} » lu dans le pied de la TUI",
+            mode.as_str()
+        );
+        entry.session.state.permission_mode = Some(mode);
+        entry.updated_at = self.now();
+        self.commit(entry);
+    }
+
+    /// Un hook vient de changer le mode en `hook_mode`. S'il contredit le pied
+    /// de la TUI lu peu avant ([`STALE_HOOK_WINDOW`]), il a peut-être été
+    /// émis avant le changement (hook en retard) : le pied est relu au bout
+    /// de [`FOOTER_RECHECK_DELAY`] ([`Daemon::on_footer_recheck`]). Jamais
+    /// pour un mode dangereux, dont les hooks restent seuls juges.
+    fn recheck_footer_after_hook(&self, id: Uuid, entry: &Entry, hook_mode: &PermissionMode) {
+        let Some((screen, at)) = &entry.screen_mode else {
+            return;
+        };
+        if screen == hook_mode || hook_mode.is_dangerous() || at.elapsed() >= STALE_HOOK_WINDOW {
+            return;
+        }
+        let (Some(run), Some(daemon)) = (&entry.run, self.me.upgrade()) else {
+            return;
+        };
+        let (run_id, terminal, screen) = (run.id, entry.terminal.clone(), screen.clone());
+        self.runtime.spawn(async move {
+            tokio::time::sleep(FOOTER_RECHECK_DELAY).await;
+            let seen = mode_from_footer(&terminal.bottom_rows(FOOTER_ROWS));
+            daemon.on_footer_recheck(id, run_id, &screen, seen);
+        });
+    }
+
+    /// Relecture du pied après un hook qui le contredisait : si le pied
+    /// montre toujours le mode `screen` lu avant le hook, c'est lui qui
+    /// l'emporte (le hook était en retard). Sinon le hook est gardé.
+    fn on_footer_recheck(
+        &self,
+        id: Uuid,
+        run_id: u64,
+        screen: &PermissionMode,
+        seen: Option<PermissionMode>,
+    ) {
+        let mut reg = self.lock();
+        let Some(entry) = reg.sessions.get_mut(&id) else {
+            return;
+        };
+        if entry.run.as_ref().is_none_or(|r| r.id != run_id) || seen.as_ref() != Some(screen) {
+            return;
+        }
+        let current = entry.session.state.permission_mode.clone();
+        if current.as_ref() == Some(screen) || current.as_ref().is_some_and(|m| m.is_dangerous()) {
+            return;
+        }
+        warning!(
+            "session {id} : hook en retard (mode « {} ») ; le pied de la TUI montre toujours « {} », gardé",
+            current.as_ref().map_or("?", |m| m.as_str()),
+            screen.as_str()
+        );
+        entry.screen_mode = Some((screen.clone(), Instant::now()));
+        entry.session.state.permission_mode = Some(screen.clone());
+        entry.updated_at = self.now();
+        self.commit(entry);
+    }
+
+    /// Le Shift+Tab d'un `setMode` n'a pas pu être écrit : le changement
+    /// attendu est abandonné (il n'empêche pas le suivant).
+    pub fn cancel_mode_change(&self, id: &Uuid) {
+        if let Some(entry) = self.lock().sessions.get_mut(id) {
+            entry.mode_change = None;
+        }
+    }
+
+    /// `sessions.update {id, title?, color?}` : clé absente = inchangé,
+    /// `null` (ou titre vide) = effacé. Renvoie `{session}`.
+    pub fn update_session(&self, params: &Value) -> Result<Value, RpcError> {
+        let id = session_id_param(params)?;
+        let title = match params.get("title") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(t)) => {
+                Some(normalize_title(t).map_err(|e| RpcError::params(format!("« title » : {e}")))?)
+            }
+            Some(_) => return Err(RpcError::params("« title » doit être une chaîne ou null")),
+        };
+        let color = match params.get("color") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(c)) if is_session_color(c) => Some(Some(c.clone())),
+            Some(_) => {
+                return Err(RpcError::params(format!(
+                    "« color » : une couleur parmi {}, ou null",
+                    SESSION_COLORS.join(", ")
+                )));
+            }
+        };
+        if title.is_none() && color.is_none() {
+            return Err(RpcError::params(
+                "rien à modifier : « title » ou « color » attendu",
+            ));
+        }
+        let mut reg = self.lock();
+        let entry = reg
+            .sessions
+            .get_mut(&id)
+            .ok_or_else(|| RpcError::unknown_session(&id))?;
+        let before = (entry.session.title.clone(), entry.session.color.clone());
+        if let Some(t) = title {
+            entry.session.title = t;
+        }
+        if let Some(c) = color {
+            entry.session.color = c;
+        }
+        // `updated_at` reste inchangé : renommer une session ne la fait pas
+        // remonter dans `sessions.list`.
+        if (entry.session.title.clone(), entry.session.color.clone()) != before {
+            self.commit(entry);
+        }
+        Ok(json!({"session": entry.json()}))
     }
 
     /// Trame de statusline d'un relais.
@@ -1826,6 +2124,7 @@ fn install_run(reg: &mut Registry, entry: &mut Entry, run: Run, token: String, p
     entry.run = Some(run);
     entry.orphan = None;
     entry.mode_change = None;
+    entry.screen_mode = None;
     entry.last_exit = None;
     entry.session.cwd = plan.cwd;
     entry.session.profile = plan.profile.name;
@@ -1931,6 +2230,10 @@ mod tests {
             pid: None,
             pid_start: None,
             scope_unit: None,
+            title: None,
+            color: None,
+            first_prompt: None,
+            session_name: None,
         };
         let mut later = r.clone();
         later.updated_at = OffsetDateTime::now_utc();

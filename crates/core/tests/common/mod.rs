@@ -18,6 +18,35 @@ pub const ORCHD: &str = env!("CARGO_BIN_EXE_orchd");
 pub const FAKE: &str = env!("CARGO_BIN_EXE_devmaestro-fake-claude");
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Marqueurs de session Claude Code posés dans l'environnement du démon des
+/// tests (jamais transmis à `claude`).
+pub const INHERITED_CLAUDE_MARKERS: &[(&str, &str)] = &[
+    ("CLAUDECODE", "1"),
+    ("CLAUDE_CODE_ENTRYPOINT", "cli"),
+    ("CLAUDE_CODE_CHILD_SESSION", "1"),
+    ("CLAUDE_CODE_SSE_PORT", "12345"),
+    (
+        "CLAUDE_CODE_SESSION_ID",
+        "00000000-0000-4000-8000-0000000000aa",
+    ),
+    ("CLAUDE_CODE_SESSION_ATTENDED", "1"),
+    ("CLAUDE_CODE_PARENT_SESSION_ID", "parent"),
+    ("CLAUDE_CODE_EXECPATH", "/usr/bin/claude"),
+    (
+        "CLAUDE_CODE_MESSAGING_TOKEN",
+        "secret-de-la-session-parente",
+    ),
+    ("CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH", "1"),
+    ("CLAUDE_PID", "1"),
+    ("AI_AGENT", "claude-code"),
+];
+
+/// Réglages Claude Code de l'utilisateur hérités par le démon : gardés.
+pub const INHERITED_CLAUDE_SETTINGS: &[(&str, &str)] = &[
+    ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "1234"),
+    ("CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS", "1500"),
+];
+
 /// Dossiers temporaires d'un test.
 pub struct Env {
     _root: tempfile::TempDir,
@@ -99,6 +128,14 @@ impl Env {
             .env("FAKE_CLAUDE_LOG", &self.fake_log)
             // Doit être retiré pour le profil par défaut.
             .env("CLAUDE_CONFIG_DIR", "/ne/doit/pas/arriver");
+        // Démon lancé depuis une session Claude Code : ses marqueurs de
+        // session doivent être retirés, ses réglages gardés.
+        for (k, v) in INHERITED_CLAUDE_MARKERS {
+            c.env(k, v);
+        }
+        for (k, v) in INHERITED_CLAUDE_SETTINGS {
+            c.env(k, v);
+        }
         // Bus du gestionnaire systemd utilisateur (XDG_RUNTIME_DIR est
         // temporaire : sans cette adresse, systemd-run ne le trouverait pas).
         if let Some(bus) = std::env::var_os("DBUS_SESSION_BUS_ADDRESS") {
@@ -242,6 +279,34 @@ impl Client {
             other => panic!("trame inattendue : {other:?}"),
         }
         true
+    }
+
+    /// Envoie une requête sans attendre sa réponse ; renvoie son `id`.
+    pub fn send_request(&mut self, method: &str, params: Value) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        write_frame(&mut self.stream, &Frame::rpc(&request(id, method, params))).unwrap();
+        id
+    }
+
+    /// La requête `id` n'a pas encore de réponse ?
+    pub fn responses_pending(&self, id: u64) -> bool {
+        !self.responses.contains_key(&id)
+    }
+
+    /// Réponse (ou erreur) de la requête `id`.
+    pub fn wait_response(&mut self, id: u64) -> Value {
+        let start = Instant::now();
+        loop {
+            if let Some(v) = self.responses.remove(&id) {
+                return v;
+            }
+            assert!(
+                start.elapsed() < TIMEOUT,
+                "pas de réponse à la requête {id}"
+            );
+            self.pump(Duration::from_millis(20));
+        }
     }
 
     pub fn call_raw(&mut self, method: &str, params: Value) -> Value {

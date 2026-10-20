@@ -10,6 +10,7 @@ use super::hooks::{HookEvent, HookKind};
 use super::metrics::{Metrics, ModelInfo};
 use super::state::{Applied, Effect, SessionState, apply_tracked};
 use super::statusline::Statusline;
+use super::transcript::{PROMPT_PREVIEW_CHARS, display_label, short_id, truncate_chars};
 
 /// Une session : un processus `claude` lancé ou repris par l'app.
 ///
@@ -42,6 +43,72 @@ pub struct Session {
     /// Mesures, dont le modèle (identifiant et nom affiché), issues de la
     /// statusline et de `SessionStart`.
     pub metrics: Metrics,
+    /// Titre donné par l'utilisateur (`sessions.update`), au plus
+    /// [`MAX_TITLE_CHARS`] caractères.
+    pub title: Option<String>,
+    /// Couleur choisie par l'utilisateur, un nom de [`SESSION_COLORS`].
+    pub color: Option<String>,
+    /// Premier prompt tapé (`UserPromptSubmit`), tronqué à
+    /// [`PROMPT_PREVIEW_CHARS`] ; les commandes (`/…`) ne comptent pas.
+    pub first_prompt: Option<String>,
+}
+
+/// Palette des couleurs de session (noms de jetons, l'app choisit le rendu).
+pub const SESSION_COLORS: &[&str] = &[
+    "gris", "bleu", "vert", "jaune", "orange", "rouge", "violet", "rose",
+];
+
+/// Longueur maximale d'un titre de session, en caractères (points de code).
+pub const MAX_TITLE_CHARS: usize = 80;
+
+/// Titre refusé par [`normalize_title`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TitleError {
+    #[error("titre trop long : {0} caractères, {MAX_TITLE_CHARS} au plus")]
+    TooLong(usize),
+    #[error("le titre ne doit pas contenir de caractère de contrôle (saut de ligne, tabulation…)")]
+    Control,
+    #[error(
+        "le titre ne doit pas contenir de caractère invisible de mise en forme \
+         (U+{0:04X} : sens d'écriture forcé, espace sans chasse, séparateur de ligne…)"
+    )]
+    Format(u32),
+}
+
+/// Caractères Unicode de mise en forme (catégorie Cf), et séparateurs de
+/// ligne et de paragraphe (Zl, Zp) : invisibles, ils peuvent maquiller un
+/// titre (inversion du sens d'écriture, U+202E…). L'antiliant sans chasse
+/// (U+200D) est admis : il compose les émojis (👩‍💻).
+fn is_format_char(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2
+        | 0x180E | 0x200B | 0x200C | 0x200E | 0x200F | 0x2028..=0x202E | 0x2060..=0x2064
+        | 0x2066..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F
+        | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
+}
+
+/// Titre tel qu'il sera gardé : blancs de début et de fin retirés ; vide =
+/// pas de titre (`None`).
+pub fn normalize_title(title: &str) -> Result<Option<String>, TitleError> {
+    let t = title.trim();
+    if t.chars().any(char::is_control) {
+        return Err(TitleError::Control);
+    }
+    if let Some(c) = t.chars().find(|c| is_format_char(*c)) {
+        return Err(TitleError::Format(c as u32));
+    }
+    let n = t.chars().count();
+    if n > MAX_TITLE_CHARS {
+        return Err(TitleError::TooLong(n));
+    }
+    // Au moins un caractère visible (pas seulement des blancs ou U+200D).
+    let visible = t.chars().any(|c| !c.is_whitespace() && c != '\u{200D}');
+    Ok(visible.then(|| t.to_owned()))
+}
+
+/// Couleur de la palette ? (`None` : pas de couleur, toujours valable.)
+pub fn is_session_color(color: &str) -> bool {
+    SESSION_COLORS.contains(&color)
 }
 
 impl Session {
@@ -62,6 +129,30 @@ impl Session {
             profile: profile.into(),
             state: SessionState::default(),
             metrics: Metrics::default(),
+            title: None,
+            color: None,
+            first_prompt: None,
+        }
+    }
+
+    /// Nom à afficher : titre de l'utilisateur, sinon `session_name` de la
+    /// statusline, sinon premier prompt, sinon les 8 premiers caractères de
+    /// l'identifiant. Le nom de Claude Code et le prompt sont ramenés à une
+    /// ligne et coupés à [`super::transcript::DISPLAY_NAME_CHARS`].
+    pub fn display_name(&self) -> String {
+        self.title
+            .clone()
+            .or_else(|| self.metrics.session_name.as_deref().and_then(display_label))
+            .or_else(|| self.first_prompt.as_deref().and_then(display_label))
+            .unwrap_or_else(|| short_id(&self.id.to_string()))
+    }
+
+    /// Retient le premier prompt tapé, s'il n'y en a pas encore. Les
+    /// commandes (texte qui commence par `/`) et les textes vides sont ignorés.
+    pub fn note_prompt(&mut self, prompt: &str) {
+        let p = prompt.trim();
+        if self.first_prompt.is_none() && !p.is_empty() && !p.starts_with('/') {
+            self.first_prompt = Some(truncate_chars(p, PROMPT_PREVIEW_CHARS));
         }
     }
 
@@ -74,6 +165,12 @@ impl Session {
     /// Comme [`Session::apply_hook`], en indiquant la demande à laquelle
     /// l'événement se rattache (voir [`crate::domain::state::apply_tracked`]).
     pub fn apply_hook_tracked(&mut self, event: &HookEvent, now: OffsetDateTime) -> Applied {
+        if let HookKind::UserPromptSubmit {
+            prompt: Some(prompt),
+        } = &event.kind
+        {
+            self.note_prompt(prompt);
+        }
         if let HookKind::SessionStart { model, .. } = &event.kind {
             self.claude_session_id = event.common.session_id.clone();
             if let Some(id) = model {
@@ -332,10 +429,212 @@ pub fn shift_tab_steps(current: &PermissionMode, target: &PermissionMode) -> Opt
     Some((to + SHIFT_TAB_CYCLE.len() - from) % SHIFT_TAB_CYCLE.len())
 }
 
+/// Indicateurs de mode du pied de la TUI, relevés avec **Claude Code
+/// 2.1.303** : `⏸ manual mode on`, `⏵⏵ accept edits on (shift+tab to
+/// cycle)`, `⏸ plan mode on (shift+tab to cycle)`, `⏵⏵ auto mode on
+/// (shift+tab to cycle)`. Seuls les mots comptent (symboles et couleurs
+/// peuvent changer). Les modes dangereux restent l'affaire des hooks.
+const FOOTER_MODES: [(&str, PermissionMode); 4] = [
+    ("manual mode on", PermissionMode::Default),
+    ("accept edits on", PermissionMode::AcceptEdits),
+    ("plan mode on", PermissionMode::Plan),
+    ("auto mode on", PermissionMode::Auto),
+];
+
+/// Symboles de mode (famille lecture / pause) admis devant les mots du
+/// pied : `⏸`, `⏵⏵`, `▶▶`… `⏺` (puce des réponses de Claude), `❯` (invite),
+/// `│`, `•`, `-` ou `*` n'en sont pas.
+const FOOTER_GLYPHS: &[char] = &['⏵', '⏩', '⏭', '⏯', '⏸', '▶', '▷', '▸', '▹', '►', '❚', '‖'];
+
+/// Ligne de séparation du cadre de saisie de la TUI (`────…`, `╰───╯`).
+fn is_separator(row: &str) -> bool {
+    let t = row.trim();
+    t.chars()
+        .filter(|c| matches!(c, '─' | '━' | '═' | '╌' | '┄'))
+        .count()
+        >= 8
+        && t.chars()
+            .all(|c| matches!(c, '─' | '━' | '═' | '╌' | '┄' | '╭' | '╮' | '╰' | '╯' | ' '))
+}
+
+/// Position de `needle` (ASCII, en minuscules) dans `hay`, sans tenir compte
+/// de la casse ASCII et sans allouer.
+fn find_ascii_ci(hay: &str, needle: &str) -> Option<usize> {
+    let (h, n) = (hay.as_bytes(), needle.as_bytes());
+    (0..=h.len().checked_sub(n.len())?)
+        .find(|&i| hay.is_char_boundary(i) && h[i..i + n.len()].eq_ignore_ascii_case(n))
+}
+
+/// Mode porté par une ligne de pied, ou `None`.
+fn footer_line_mode(line: &str) -> Option<PermissionMode> {
+    FOOTER_MODES.iter().find_map(|(words, mode)| {
+        let at = find_ascii_ci(line, words)?;
+        let before = line[..at].trim();
+        let after = &line[at + words.len()..];
+        // Avant : au moins un symbole de mode, et rien d'autre.
+        let clean_before = !before.is_empty()
+            && before
+                .chars()
+                .all(|c| c.is_whitespace() || FOOTER_GLYPHS.contains(&c));
+        // Après : rien, ou un blanc suivi d'autre chose que du texte
+        // (`(shift+tab to cycle)`, indications alignées à droite), jamais
+        // « Plan mode on is now… ».
+        let clean_after = after.chars().next().is_none_or(char::is_whitespace)
+            && after
+                .trim_start()
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric());
+        (clean_before && clean_after).then(|| mode.clone())
+    })
+}
+
+/// Mode affiché par le pied de la TUI dans ces lignes d'écran (texte sans
+/// mise en forme, de haut en bas), ou `None` s'il n'y est pas.
+///
+/// **Seule exception** au principe « le démon n'analyse pas le PTY »
+/// (architecture § 6) : faute de hook quand Claude est inactif, c'est le seul
+/// moyen de confirmer un `sessions.setMode`. Les hooks restent la source qui
+/// fait foi.
+///
+/// - un indicateur ne compte que précédé d'un symbole de mode
+///   ([`FOOTER_GLYPHS`]) et de rien d'autre sur sa ligne, puis suivi de rien
+///   ou d'un blanc et d'autre chose qu'une lettre ou un chiffre ;
+/// - s'il y a une ligne de séparation du cadre de saisie (`────…`), seules
+///   les lignes en dessous de la dernière sont lues (le pied est sous le
+///   cadre ; au-dessus, c'est la conversation) ;
+/// - la ligne la plus basse qui porte un indicateur l'emporte.
+pub fn mode_from_footer<S: AsRef<str>>(rows: &[S]) -> Option<PermissionMode> {
+    let below = rows
+        .iter()
+        .rposition(|r| is_separator(r.as_ref()))
+        .map_or(0, |i| i + 1);
+    rows[below..]
+        .iter()
+        .rev()
+        .find_map(|row| footer_line_mode(row.as_ref()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn footer_mode_is_read_from_the_words() {
+        use PermissionMode::*;
+        let cases = [
+            ("⏸ manual mode on", Some(Default)),
+            (
+                "  ⏵⏵ accept edits on (shift+tab to cycle)",
+                Some(AcceptEdits),
+            ),
+            ("⏸ plan mode on (shift+tab to cycle)", Some(Plan)),
+            ("⏵⏵ auto mode on (shift+tab to cycle)", Some(Auto)),
+            ("▶▶ Auto Mode On", Some(Auto)),
+            ("⏸ plan mode on   · ◐ 3 %", Some(Plan)),
+            ("auto mode on", None),
+            ("> plan mode on", None),
+            ("❯ plan mode on, puis…", None),
+            ("│ ❯ auto mode on │", None),
+            ("- auto mode on", None),
+            ("* auto mode on", None),
+            ("• auto mode on", None),
+            ("⏺ Plan mode on is now active", None),
+            ("⏺ plan mode on", None),
+            ("│ > passe en plan mode on", None),
+            ("le plan mode on du pied", None),
+            ("⏸ plan mode online", None),
+            ("⏸ plan mode on(", None),
+            ("? for shortcuts", None),
+            ("", None),
+        ];
+        for (line, expected) in cases {
+            assert_eq!(mode_from_footer(&[line]), expected, "{line:?}");
+        }
+        // La ligne la plus basse l'emporte.
+        assert_eq!(
+            mode_from_footer(&["⏸ manual mode on", "texte", "⏸ plan mode on", ""]),
+            Some(Plan)
+        );
+        assert_eq!(mode_from_footer::<&str>(&[]), None);
+        // Sous le cadre de saisie seulement.
+        let sep = "─".repeat(40);
+        assert_eq!(
+            mode_from_footer(&["⏸ plan mode on", sep.as_str(), "> ", sep.as_str(), "? aide"]),
+            None
+        );
+        assert_eq!(
+            mode_from_footer(&[
+                "⏸ plan mode on",
+                sep.as_str(),
+                "> ",
+                sep.as_str(),
+                "  ⏵⏵ auto mode on (shift+tab to cycle)"
+            ]),
+            Some(Auto)
+        );
+        assert_eq!(find_ascii_ci("Éé PLAN mode on", "plan mode on"), Some(5));
+        assert_eq!(find_ascii_ci("ab", "abc"), None);
+    }
+
+    #[test]
+    fn title_color_and_display_name() {
+        let id = Uuid::parse_str("1a2b3c4d-0000-4000-8000-000000000000").unwrap();
+        let mut s = Session::new(id, "c", "/p", "/p", "default");
+        assert_eq!(s.display_name(), "1a2b3c4d");
+        s.note_prompt("/clear");
+        s.note_prompt("   ");
+        assert_eq!(s.first_prompt, None);
+        let now = OffsetDateTime::UNIX_EPOCH;
+        s.apply_hook(
+            &hook(r#"{"session_id":"c","hook_event_name":"UserPromptSubmit","prompt":"Corrige\nle test"}"#),
+            now,
+        );
+        s.apply_hook(
+            &hook(
+                r#"{"session_id":"c","hook_event_name":"UserPromptSubmit","prompt":"Autre chose"}"#,
+            ),
+            now,
+        );
+        assert_eq!(s.first_prompt.as_deref(), Some("Corrige\nle test"));
+        assert_eq!(s.display_name(), "Corrige le test");
+        s.metrics.session_name = Some("Correction du test".into());
+        assert_eq!(s.display_name(), "Correction du test");
+        s.title = Some("Mon titre".into());
+        assert_eq!(s.display_name(), "Mon titre");
+
+        assert_eq!(normalize_title("  Titre  "), Ok(Some("Titre".into())));
+        assert_eq!(normalize_title("   "), Ok(None));
+        assert_eq!(normalize_title(&"é".repeat(80)), Ok(Some("é".repeat(80))));
+        assert_eq!(
+            normalize_title(&"é".repeat(81)),
+            Err(TitleError::TooLong(81))
+        );
+        assert_eq!(normalize_title("a\nb"), Err(TitleError::Control));
+        for (bad, code) in [
+            ("abc\u{202E}txt", 0x202E),
+            ("a\u{200B}b", 0x200B),
+            ("a\u{2028}b", 0x2028),
+            ("a\u{2029}b", 0x2029),
+            ("\u{FEFF}titre", 0xFEFF),
+            ("a\u{2066}b", 0x2066),
+        ] {
+            assert_eq!(
+                normalize_title(bad),
+                Err(TitleError::Format(code)),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(normalize_title("\u{200D}"), Ok(None));
+        assert_eq!(normalize_title(" \u{3000} "), Ok(None));
+        assert_eq!(
+            normalize_title("👩\u{200D}💻 Refonte"),
+            Ok(Some("👩\u{200D}💻 Refonte".into()))
+        );
+        assert!(is_session_color("violet"));
+        assert!(!is_session_color("purple"));
+    }
 
     fn hook(json: &str) -> HookEvent {
         HookEvent::parse(json, None).unwrap()

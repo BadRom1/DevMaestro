@@ -35,11 +35,90 @@ use crate::domain::{PermissionMode, Profile};
 pub use crate::ports::CommandLine;
 use crate::protocol::{ENV_SESSION, ENV_SOCKET, ENV_TOKEN};
 
-/// Variables héritées du démon retirées de l'environnement de `claude` :
-/// celles que Claude Code pose pour ses propres sous-processus (un démon
-/// lancé depuis une session Claude Code ne doit pas les transmettre). Nos
-/// variables `ORCH_*` sont, elles, toujours reposées et remplacent l'héritage.
-const INHERITED_ENV_REMOVED: &[&str] = &["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"];
+/// Marqueurs de session Claude Code (noms exacts) retirés de l'environnement
+/// hérité par `claude`, et de celui du démon lui-même au démarrage.
+///
+/// Un démon lancé depuis un processus d'une session Claude Code (terminal
+/// d'une session, app de développement lancée par l'outil Bash…) hérite des
+/// variables que Claude Code pose pour **ses** sous-processus. Transmises à
+/// nos `claude`, elles les font passer pour des sessions enfants : avec
+/// `CLAUDE_CODE_CHILD_SESSION`, la TUI n'enregistre plus de transcript
+/// (« Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION
+/// marker »), exclut la session de `--resume`, etc. Sources : la page
+/// « Environment variables » de la documentation de Claude Code (variables
+/// « set automatically / set by Claude Code » dans ses sous-processus) et
+/// l'environnement relevé dans un shell d'une session Claude Code 2.1.304 :
+///
+/// - `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION` : « je tourne sous Claude Code » ;
+/// - `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH` : point d'entrée et
+///   binaire de la session parente ;
+/// - `CLAUDE_CODE_SSE_PORT` : port de l'extension IDE de la session parente ;
+/// - `CLAUDE_CODE_HOST_SESSION_ID`, `CLAUDE_CODE_BRIDGE_SESSION_ID`,
+///   `CLAUDE_CODE_REMOTE`, `CLAUDE_CODE_REMOTE_SESSION_ID` : identifiants et
+///   contexte (Remote Control, session cloud) de la session parente ;
+/// - `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN` : boîte de
+///   réception (et son jeton) de la session parente, « jamais héritée » selon
+///   la documentation ;
+/// - `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` : posée par une plateforme qui
+///   embarque Claude Code pour **son** processus ;
+/// - `CLAUDE_PID`, `CLAUDE_EFFORT`, `CLAUDE_JOB_DIR` : pid, effort et dossier
+///   de tâche de la session parente ;
+/// - `TRACEPARENT` : contexte de trace propagé par la session parente ;
+/// - `AI_AGENT` : posée par Claude Code pour son outil Bash (« lancé par un
+///   agent »), fausse pour une session pilotée par l'utilisateur ;
+/// - `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` : réglages
+///   documentés, mais héritées de l'hôte elles connecteraient **toutes** les
+///   sessions au compte de l'hôte, quel que soit le profil choisi
+///   (`CLAUDE_CONFIG_DIR`) : les profils sont la seule source de compte ;
+/// - `CLAUDE_CODE_SIMPLE` : réglage documenté (mode dépouillé), qui risque de
+///   désactiver les hooks et le plugin dont dépend le suivi des sessions.
+///
+/// Les variables de **configuration** documentées (`CLAUDE_CODE_USE_BEDROCK`,
+/// `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `ANTHROPIC_*`, mandataires, clés d'API,
+/// `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`…) sont gardées.
+pub const CLAUDE_SESSION_MARKERS: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_CODE_HOST_SESSION_ID",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_REMOTE",
+    "CLAUDE_CODE_REMOTE_SESSION_ID",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_JOB_DIR",
+    "TRACEPARENT",
+    "AI_AGENT",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_SIMPLE",
+];
+
+/// Préfixes des marqueurs de session Claude Code (voir
+/// [`CLAUDE_SESSION_MARKERS`]) : `CLAUDE_CODE_SESSION_*` (identifiant de la
+/// session parente, `…_ATTENDED`…), `CLAUDE_CODE_PARENT_*`, et
+/// `CLAUDE_CODE_SDK_*` (posées par un hôte Agent SDK, comme l'app de bureau,
+/// pour **son** processus : rafraîchissement de l'authentification par
+/// l'hôte, lecture de l'état de session…). Toujours avec le `_` final :
+/// `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` est un réglage, gardé.
+pub const CLAUDE_SESSION_MARKER_PREFIXES: &[&str] = &[
+    "CLAUDE_CODE_SESSION_",
+    "CLAUDE_CODE_PARENT_",
+    "CLAUDE_CODE_SDK_",
+];
+
+/// Marqueur de session Claude Code (voir [`CLAUDE_SESSION_MARKERS`]) ?
+pub fn is_claude_session_marker(name: &str) -> bool {
+    CLAUDE_SESSION_MARKERS.contains(&name)
+        || CLAUDE_SESSION_MARKER_PREFIXES
+            .iter()
+            .any(|p| name.starts_with(p))
+}
 
 /// Préfixes des variables héritées du démon toujours retirées : les
 /// variables `ORCH_*` d'une autre session (si le démon a été lancé depuis une
@@ -74,7 +153,8 @@ pub struct LaunchSpec<'a> {
     /// Identifiant interne de la session (`ORCH_SESSION`).
     pub session: &'a str,
     /// Noms des variables de l'environnement du démon (hérité par `claude`) :
-    /// celles de [`INHERITED_ENV_PREFIXES`] sont retirées.
+    /// celles de [`INHERITED_ENV_PREFIXES`] et les marqueurs de session Claude
+    /// Code ([`is_claude_session_marker`]) sont retirés.
     pub inherited_env: &'a [String],
     /// Lancement dans un scope systemd.
     pub scope: Option<ScopeSpec<'a>>,
@@ -139,16 +219,17 @@ pub fn build(spec: &LaunchSpec<'_>) -> CommandLine {
         ("TERM".into(), "xterm-256color".into()),
         ("COLORTERM".into(), "truecolor".into()),
     ];
-    let mut env_remove: Vec<String> = INHERITED_ENV_REMOVED
+    // Les noms exacts sont toujours retirés (même absents de la liste
+    // héritée : défense en profondeur), les préfixes selon l'héritage.
+    let mut env_remove: Vec<String> = CLAUDE_SESSION_MARKERS
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
     let ours = [ENV_SOCKET, ENV_TOKEN, ENV_SESSION];
     for key in spec.inherited_env {
-        if INHERITED_ENV_PREFIXES.iter().any(|p| key.starts_with(p))
-            && !ours.contains(&key.as_str())
-            && !env_remove.contains(key)
-        {
+        let removed = INHERITED_ENV_PREFIXES.iter().any(|p| key.starts_with(p))
+            || is_claude_session_marker(key);
+        if removed && !ours.contains(&key.as_str()) && !env_remove.contains(key) {
             env_remove.push(key.clone());
         }
     }
@@ -316,6 +397,66 @@ mod tests {
             assert!(!c.env_remove.iter().any(|r| r == k), "{k}");
         }
         assert_eq!(env(&c, "ORCH_SOCKET").unwrap(), "/run/orchd.sock");
+    }
+
+    #[test]
+    fn inherited_claude_code_session_markers_are_removed() {
+        let p = Profile::default_for("/home/u/.claude");
+        let markers = [
+            "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SSE_PORT",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ATTENDED",
+            "CLAUDE_CODE_PARENT_SESSION_ID",
+            "CLAUDE_CODE_HOST_SESSION_ID",
+            "CLAUDE_CODE_EXECPATH",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH",
+            "CLAUDE_PID",
+            "CLAUDE_EFFORT",
+            "AI_AGENT",
+        ];
+        let kept = [
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS",
+            "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "HTTPS_PROXY",
+            "CLAUDE_ENV_FILE",
+            "PATH",
+        ];
+        let inherited: Vec<String> = markers.iter().chain(&kept).map(|s| s.to_string()).collect();
+        let mut s = spec(
+            &p,
+            LaunchKind::New {
+                claude_session_id: "u".into(),
+            },
+        );
+        s.inherited_env = &inherited;
+        let c = build(&s);
+        for k in markers {
+            assert!(c.env_remove.iter().any(|r| r == k), "{k} doit être retirée");
+            assert!(is_claude_session_marker(k), "{k}");
+        }
+        for k in kept {
+            assert!(!c.env_remove.iter().any(|r| r == k), "{k} doit être gardée");
+            assert!(!is_claude_session_marker(k), "{k}");
+        }
+        // Les noms exacts sont retirés même s'ils n'étaient pas hérités.
+        let c = build(&spec(
+            &p,
+            LaunchKind::New {
+                claude_session_id: "u".into(),
+            },
+        ));
+        for k in CLAUDE_SESSION_MARKERS {
+            assert!(c.env_remove.iter().any(|r| r == k), "{k}");
+        }
     }
 
     #[test]

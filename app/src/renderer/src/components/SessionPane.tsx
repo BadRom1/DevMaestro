@@ -1,39 +1,111 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 
-import { SETTABLE_MODES, type ProjectInfo, type Profile, type Session, type SettableMode } from '../../../shared/protocol'
-import { call, errorText } from '../api'
-import { basename, formatNumber, formatPct, formatUsd, modeLabel, relativeTime } from '../state/format'
+import {
+  SETTABLE_MODES,
+  type ProjectInfo,
+  type Profile,
+  type Session,
+  type SessionColor,
+  type SettableMode,
+} from '../../../shared/protocol'
+import { CallError, call, errorCode, errorText } from '../api'
+import {
+  basename,
+  formatNumber,
+  formatPct,
+  formatUsd,
+  modeLabel,
+  relativeTime,
+  sessionColor,
+  sessionDisplayName,
+  supportsNaming,
+} from '../state/format'
+import { displayedMode, idleMode, modeReducer, normalizeMode } from '../state/modeSwitch'
 import { glyphFor } from '../state/status'
 import { TerminalView } from '../terminal/TerminalView'
 import { Meter, StatusGlyph, profileClass } from './common'
 import { PermissionCard, QuestionCard } from './RequestCards'
+import { ColorBar, ColorPicker, RenameField } from './SessionIdentity'
 
-function normalizeMode(mode: string | null): string {
-  return mode === 'manual' ? 'default' : (mode ?? '')
+/** Changement de mode : appel, réessai unique et délai de confirmation (voir `modeSwitch`). */
+function useModeSwitch(session: Session) {
+  const [sw, dispatch] = useReducer(modeReducer, idleMode)
+  const latest = useRef(session)
+  latest.current = session
+
+  useEffect(() => {
+    dispatch({ type: 'session', mode: session.mode, alive: session.alive })
+  }, [session.mode, session.alive])
+
+  const send = useCallback(async (target: SettableMode) => {
+    try {
+      const r = await call('sessions.setMode', { id: latest.current.id, mode: target })
+      dispatch({ type: 'sent', sent: r.sent, mode: latest.current.mode })
+    } catch (e) {
+      const message = e instanceof CallError ? e.failure.message : errorText(e)
+      dispatch({ type: 'failed', code: errorCode(e), message, mode: latest.current.mode, now: Date.now() })
+    }
+  }, [])
+
+  useEffect(() => {
+    if (sw.phase !== 'pending') return
+    const now = Date.now()
+    if (sw.retryAt !== null) {
+      const target = sw.target
+      const t = setTimeout(() => {
+        dispatch({ type: 'retrying', now: Date.now() })
+        void send(target)
+      }, Math.max(0, sw.retryAt - now))
+      return () => clearTimeout(t)
+    }
+    const t = setTimeout(() => dispatch({ type: 'timeout', mode: latest.current.mode }), Math.max(0, sw.deadline - now))
+    return () => clearTimeout(t)
+  }, [sw, send])
+
+  const request = useCallback(
+    (target: SettableMode) => {
+      if (normalizeMode(latest.current.mode) === target) return
+      dispatch({ type: 'request', target, mode: latest.current.mode, now: Date.now() })
+      void send(target)
+    },
+    [send],
+  )
+
+  return { sw, request }
 }
+
+const OLD_DAEMON = 'Le démon ne gère pas encore le nommage des sessions : mets orchd à jour.'
 
 function Header({
   session,
   project,
   profiles,
   termSize,
+  onSessionUpdated,
 }: {
   session: Session
   project: ProjectInfo | undefined
   profiles: Profile[]
   termSize: { cols: number; rows: number } | null
+  onSessionUpdated: (s: Session) => void
 }) {
-  const [busy, setBusy] = useState<'mode' | 'stop' | 'resume' | null>(null)
+  const [busy, setBusy] = useState<'stop' | 'resume' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [renaming, setRenaming] = useState(false)
+  const { sw, request } = useModeSwitch(session)
   const glyph = glyphFor(session.status)
   const m = session.metrics
-  const name = project?.name ?? basename(project?.root ?? session.project_root ?? session.cwd)
+  const projectName = project?.name ?? basename(project?.root ?? session.project_root ?? session.cwd)
   const branch = session.branch ?? project?.branch ?? 'sans branche'
   const model = m?.model?.display_name ?? m?.model?.id ?? session.model ?? 'modèle inconnu'
-  const mode = normalizeMode(session.mode)
+  const mode = displayedMode(sw, session.mode)
   const known = (SETTABLE_MODES as readonly string[]).includes(mode)
+  const pendingMode = sw.phase === 'pending'
+  const name = sessionDisplayName(session)
+  const naming = supportsNaming(session)
+  const color = sessionColor(session)
 
-  async function run(kind: 'mode' | 'stop' | 'resume', f: () => Promise<unknown>, what: string) {
+  async function run(kind: 'stop' | 'resume', f: () => Promise<unknown>, what: string) {
     setBusy(kind)
     setError(null)
     try {
@@ -45,13 +117,49 @@ function Header({
     }
   }
 
+  async function update(params: { title?: string | null; color?: SessionColor | null }) {
+    const r = await call('sessions.update', { id: session.id, ...params })
+    onSessionUpdated(r.session)
+  }
+
+  async function saveTitle(title: string | null) {
+    try {
+      await update({ title })
+      setRenaming(false)
+    } catch (e) {
+      throw new Error(`Renommage impossible : ${errorText(e)}`)
+    }
+  }
+
+  function pickColor(c: SessionColor | null) {
+    setError(null)
+    update({ color: c }).catch((e: unknown) => setError(`Couleur non enregistrée : ${errorText(e)}`))
+  }
+
   return (
     <div className="sh">
       <div className="sh-1">
         <StatusGlyph glyph={glyph} decorative={false} />
-        <h2>
-          {name} <span>/</span> {branch}
-        </h2>
+        <ColorBar color={color} size="lg" />
+        {renaming ? (
+          <RenameField
+            initial={session.title ?? ''}
+            placeholder={name}
+            onSave={saveTitle}
+            onCancel={() => setRenaming(false)}
+          />
+        ) : (
+          <h2
+            className="sname"
+            title={naming ? `${name} (double-clic pour renommer)` : name}
+            onDoubleClick={() => naming && setRenaming(true)}
+          >
+            {name}
+          </h2>
+        )}
+        <span className="where" title={`${project?.root ?? session.project_root ?? session.cwd} · ${branch}`}>
+          {projectName} <span>/</span> {branch}
+        </span>
         <span className={`chip ${profileClass(session.profile, profiles)}`} title="Profil Claude Code">
           {session.profile}
         </span>
@@ -63,20 +171,15 @@ function Header({
           <select
             className="mode"
             aria-label="Mode de la session"
+            aria-busy={pendingMode}
             value={mode}
-            disabled={busy === 'mode' || !session.alive || session.status.state === 'waiting'}
+            disabled={pendingMode || !session.alive || session.status.state === 'waiting'}
             title={
               session.status.state === 'waiting'
                 ? 'Réponds d’abord à la demande en attente (Shift+Tab agirait sur le dialogue)'
                 : undefined
             }
-            onChange={(e) =>
-              void run(
-                'mode',
-                () => call('sessions.setMode', { id: session.id, mode: e.target.value as SettableMode }),
-                'Changement de mode impossible',
-              )
-            }
+            onChange={(e) => request(e.target.value as SettableMode)}
           >
             {!known && (
               <option value={mode} disabled>
@@ -90,8 +193,21 @@ function Header({
             ))}
           </select>
         </label>
-        {busy === 'mode' && <span className="hint">envoi…</span>}
+        {pendingMode && (
+          <span className="hint pending" role="status">
+            <span className="spin" aria-hidden="true" /> en cours…
+          </span>
+        )}
         <div className="acts">
+          <button
+            className="btn sm ghost"
+            disabled={!naming || renaming}
+            title={naming ? 'Renommer la session' : OLD_DAEMON}
+            onClick={() => setRenaming(true)}
+          >
+            Renommer
+          </button>
+          <ColorPicker value={color} disabled={!naming} disabledReason={OLD_DAEMON} onPick={pickColor} />
           {session.alive ? (
             <button
               className="btn sm ghost"
@@ -131,6 +247,11 @@ function Header({
           <b>{relativeTime(session.last_activity)}</b>
         </span>
         {session.possibly_stale && <span className="chip pend">peut-être obsolète</span>}
+        {sw.phase === 'idle' && sw.error && (
+          <span className="inline-err" role="alert">
+            {sw.error}
+          </span>
+        )}
         {error && (
           <span className="inline-err" role="alert">
             {error}
@@ -158,6 +279,7 @@ export function SessionPane({
   termSize,
   onTermSize,
   onLink,
+  onSessionUpdated,
 }: {
   session: Session | null
   project: ProjectInfo | undefined
@@ -167,6 +289,7 @@ export function SessionPane({
   termSize: { cols: number; rows: number } | null
   onTermSize: (cols: number, rows: number) => void
   onLink: (url: string) => void
+  onSessionUpdated: (s: Session) => void
 }) {
   const pending = session?.pending ?? []
   const termHost = useRef<HTMLDivElement>(null)
@@ -186,9 +309,16 @@ export function SessionPane({
   }, [keysSig])
 
   return (
-    <section className="panel sess" aria-label={session ? `Session ${session.branch ?? session.cwd}` : 'Aucune session'}>
+    <section className="panel sess" aria-label={session ? `Session ${sessionDisplayName(session)}` : 'Aucune session'}>
       {session ? (
-        <Header key={session.id} session={session} project={project} profiles={profiles} termSize={termSize} />
+        <Header
+          key={session.id}
+          session={session}
+          project={project}
+          profiles={profiles}
+          termSize={termSize}
+          onSessionUpdated={onSessionUpdated}
+        />
       ) : (
         <div className="sh">
           <div className="sh-1">

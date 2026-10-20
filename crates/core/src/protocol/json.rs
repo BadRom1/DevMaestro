@@ -154,6 +154,7 @@ pub fn past_session_json(s: &PastSession) -> Value {
         "git_branch": s.git_branch,
         "first_prompt": s.first_prompt,
         "title": s.title,
+        "display_name": s.display_name(),
         "first_timestamp": time_json(s.first_timestamp),
         "last_timestamp": time_json(s.last_timestamp),
         "message_count": s.message_count,

@@ -2,6 +2,7 @@
 import { ErrorCode } from '../../../shared/protocol'
 
 const FRIENDLY: Record<number, string> = {
+  [ErrorCode.MethodNotFound]: 'méthode inconnue du démon (démon trop ancien ? mets orchd à jour)',
   [ErrorCode.UnknownSession]: 'session inconnue du démon',
   [ErrorCode.InvalidState]: 'action impossible dans l’état actuel de la session',
   [ErrorCode.UnknownProfile]: 'profil inconnu',
