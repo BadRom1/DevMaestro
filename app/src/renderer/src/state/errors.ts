@@ -13,6 +13,7 @@ const FRIENDLY: Record<number, string> = {
   [-32012]: 'aucun relais n’attend cette réponse : réponds dans le terminal',
   [-32013]: '« Toujours » impossible : Claude Code ne propose aucune règle pour cette demande',
   [-32014]: 'changement de mode impossible : mode courant inconnu ou hors du cycle Shift+Tab',
+  [-32015]: 'Claude Code n’a pas de transcript pour cette session : impossible de la reprendre (retire-la de la liste)',
   [ErrorCode.Timeout]: 'le démon n’a pas répondu à temps',
   [ErrorCode.Disconnected]: 'démon non connecté',
 }

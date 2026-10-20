@@ -313,8 +313,18 @@ impl Connection {
                     .ok_or_else(|| RpcError::params("« path » manquant"))?;
                 d.resolve_project(std::path::Path::new(&path))?
             }
-            "sessions.list" => d.list(),
-            "sessions.get" => d.get(&session_id_param(params)?)?,
+            "sessions.list" => {
+                // `resumable` relu (système de fichiers) hors du runtime.
+                let d2 = d.clone();
+                let _ = tokio::task::spawn_blocking(move || d2.refresh_resumable(None)).await;
+                d.list()
+            }
+            "sessions.get" => {
+                let sid = session_id_param(params)?;
+                let d2 = d.clone();
+                let _ = tokio::task::spawn_blocking(move || d2.refresh_resumable(Some(sid))).await;
+                d.get(&sid)?
+            }
             "sessions.launch" => d.launch(params)?,
             "sessions.resume" => d.resume(params)?,
             "sessions.stop" => d.stop(&session_id_param(params)?)?,
@@ -372,17 +382,23 @@ impl Connection {
                 }
             }
             "sessions.update" => d.update_session(params)?,
+            "sessions.forget" => {
+                let sid = session_id_param(params)?;
+                let d2 = d.clone();
+                tokio::task::spawn_blocking(move || d2.forget(&sid))
+                    .await
+                    .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
+            }
+            "transcripts.hide" => d.set_transcript_hidden(params, true)?,
+            "transcripts.unhide" => d.set_transcript_hidden(params, false)?,
             "sessions.answerPermission" => d.answer_permission(params)?,
             "sessions.answerQuestion" => d.answer_question(params)?,
             "transcripts.list" => {
-                let profile = opt_str(params, "profile")?
-                    .unwrap_or_else(|| crate::domain::profile::DEFAULT_PROFILE_NAME.to_owned());
-                let limit = params
-                    .get("limit")
-                    .and_then(Value::as_u64)
-                    .map(|n| n as usize)
-                    .or(Some(50));
-                d.transcripts(&profile, limit)?
+                // Lecture des transcripts : hors du runtime.
+                let (d2, params) = (d.clone(), params.clone());
+                tokio::task::spawn_blocking(move || d2.transcripts(&params))
+                    .await
+                    .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
             }
             other => {
                 return Err(RpcError::new(
@@ -528,6 +544,9 @@ fn queue_event(daemon: &Daemon, queue: &mut VecDeque<Event>, ev: Event) {
 
 fn resync_events(daemon: &Daemon, queue: &mut VecDeque<Event>) {
     queue.clear();
+    // Les retraits récents d'abord : un client en retard apprend aussi quelles
+    // sessions ont disparu (un `session.removed` inconnu est sans effet).
+    queue.extend(daemon.removed_ids().into_iter().map(Event::Removed));
     queue.extend(daemon.session_ids().into_iter().map(Event::Updated));
 }
 
@@ -540,6 +559,7 @@ fn event_frame(daemon: &Daemon, ev: Event) -> Option<Frame> {
         Event::Effect { id, effect } => {
             notification("session.effect", json!({"id": id, "effect": *effect}))
         }
+        Event::Removed(id) => notification("session.removed", json!({"id": id})),
     };
     Some(Frame::rpc(&value))
 }

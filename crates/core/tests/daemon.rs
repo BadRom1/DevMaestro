@@ -775,7 +775,8 @@ fn title_color_and_display_name() {
     .unwrap();
     let empty = "33333333-3333-4333-8333-333333333333";
     std::fs::write(dir.join(format!("{empty}.jsonl")), "").unwrap();
-    let list = c.call("transcripts.list", json!({}));
+    // Sessions du démon incluses (`exclude_known: false`) : titre de l'app.
+    let list = c.call("transcripts.list", json!({"exclude_known": false}));
     let names: HashMap<String, Value> = list["sessions"]
         .as_array()
         .unwrap()
@@ -807,4 +808,268 @@ fn title_color_and_display_name() {
         json!({"claude_session_id": with_prompt, "cwd": env.proj}),
     );
     assert_eq!(r["session"]["display_name"], "Lis le code");
+}
+
+/// Fichiers de transcript d'une session dans le profil par défaut du test.
+fn transcript_files(env: &Env, claude_id: &str) -> Vec<PathBuf> {
+    let projects = env.home.join(".claude/projects");
+    std::fs::read_dir(&projects)
+        .map(|d| {
+            d.flatten()
+                .map(|p| p.path().join(format!("{claude_id}.jsonl")))
+                .filter(|p| p.is_file())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn resumable_needs_a_transcript_and_forget_removes_a_session() {
+    let env = Env::new();
+    let mut daemon = env.start_daemon();
+    let mut c = Client::connect(&env);
+    c.call("hello", json!({}));
+    // Une seconde connexion reçoit aussi `session.removed`.
+    let mut other = Client::connect(&env);
+    other.call("hello", json!({}));
+
+    let id = launch_idle(&mut c, &env, json!({}));
+    let s = c.last_session(id).unwrap();
+    assert_eq!(s["resumable"], false, "session vivante");
+    let claude_id = s["claude_session_id"].as_str().unwrap().to_owned();
+    // Le faux claude écrit son transcript, comme Claude Code.
+    c.wait_until("transcript écrit", |_| {
+        transcript_files(&env, &claude_id).len() == 1
+    });
+    c.call("sessions.stop", json!({"id": id}));
+    c.wait_until("arrêtée et reprenable", |c| {
+        c.last_session(id)
+            .is_some_and(|s| s["alive"] == false && s["resumable"] == true)
+    });
+
+    // Transcript absent (session lancée avec un marqueur hérité, par
+    // exemple) : plus reprenable, et la reprise est refusée sans rien changer.
+    for f in transcript_files(&env, &claude_id) {
+        std::fs::remove_file(f).unwrap();
+    }
+    let listed = c.call("sessions.list", json!({}));
+    let s = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == json!(id))
+        .unwrap()
+        .clone();
+    assert_eq!(s["resumable"], false);
+    let before = c.call("sessions.get", json!({"id": id}))["session"].clone();
+    let launches = env.fake_launches().len();
+    assert_eq!(c.call_err("sessions.resume", json!({"id": id})), -32015);
+    assert_eq!(
+        c.call_err("sessions.resume", json!({"claude_session_id": claude_id})),
+        -32015
+    );
+    assert_eq!(
+        c.call_err(
+            "sessions.resume",
+            json!({"claude_session_id": Uuid::new_v4(), "cwd": env.proj})
+        ),
+        -32015
+    );
+    let r = c.call_raw("sessions.resume", json!({"id": id}));
+    assert_eq!(
+        r["error"]["message"],
+        "Claude Code n'a pas de transcript pour cette session : impossible de la reprendre"
+    );
+    assert_eq!(c.call("sessions.get", json!({"id": id}))["session"], before);
+    assert_eq!(env.fake_launches().len(), launches, "aucun lancement");
+
+    // Oublier : refusé pour une session vivante ou inconnue.
+    let alive = launch_idle(&mut c, &env, json!({}));
+    assert_eq!(c.call_err("sessions.forget", json!({"id": alive})), -32002);
+    assert_eq!(
+        c.call_err("sessions.forget", json!({"id": Uuid::new_v4()})),
+        -32001
+    );
+    assert_eq!(c.call_err("sessions.forget", json!({})), -32602);
+    assert_eq!(
+        c.call("sessions.forget", json!({"id": id})),
+        json!({"forgotten": true})
+    );
+    assert_eq!(c.call_err("sessions.get", json!({"id": id})), -32001);
+    let removed = |cl: &Client| {
+        cl.notifications
+            .iter()
+            .any(|n| n["method"] == "session.removed" && n["params"] == json!({"id": id}))
+    };
+    c.wait_until("session.removed", |c| removed(c));
+    other.wait_until("session.removed (autre client)", |c| removed(c));
+    assert_eq!(c.call_err("sessions.forget", json!({"id": id})), -32001);
+
+    // Toujours absente après un redémarrage du démon (retirée de la base) ;
+    // l'autre session est relue. Les transcripts ne sont jamais supprimés.
+    let alive_claude = c.last_session(alive).unwrap()["claude_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    daemon.signal(nix::sys::signal::Signal::SIGKILL);
+    daemon.wait();
+    drop(c);
+    drop(other);
+    let _daemon = env.start_daemon();
+    let mut c = Client::connect(&env);
+    let ids: Vec<Value> = c.call("sessions.list", json!({}))["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].clone())
+        .collect();
+    assert!(!ids.contains(&json!(id)), "{ids:?}");
+    assert!(ids.contains(&json!(alive)), "{ids:?}");
+    let s = c.call("sessions.get", json!({"id": alive}))["session"].clone();
+    assert_eq!(s["resumable"], true, "relue arrêtée, transcript présent");
+    assert_eq!(
+        c.call("sessions.forget", json!({"id": alive})),
+        json!({"forgotten": true})
+    );
+    assert_eq!(transcript_files(&env, &alive_claude).len(), 1);
+
+    // Oubliée : son transcript est masqué de transcripts.list (durablement),
+    // visible avec `include_hidden`, et démasquable.
+    let entry = |c: &mut Client, params: Value| -> Option<Value> {
+        c.call("transcripts.list", params)["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["claude_session_id"] == json!(alive_claude))
+            .cloned()
+    };
+    assert_eq!(entry(&mut c, json!({})), None);
+    let e = entry(&mut c, json!({"include_hidden": true})).unwrap();
+    assert_eq!(e["hidden"], true);
+    // Entrée : cwd absolu, dernière activité, branche.
+    assert_eq!(e["cwd"], json!(env.proj));
+    assert!(e["last_activity"].is_string(), "{e}");
+    assert!(e.get("git_branch").is_some(), "{e}");
+    assert_eq!(
+        c.call(
+            "transcripts.unhide",
+            json!({"claude_session_id": alive_claude})
+        ),
+        json!({"hidden": false})
+    );
+    assert_eq!(entry(&mut c, json!({})).unwrap()["hidden"], false);
+    // Masquer une ancienne session connue seulement par son transcript.
+    assert_eq!(
+        c.call(
+            "transcripts.hide",
+            json!({"profile": "default", "claude_session_id": alive_claude})
+        ),
+        json!({"hidden": true})
+    );
+    assert_eq!(entry(&mut c, json!({})), None);
+    assert_eq!(
+        c.call_err("transcripts.hide", json!({"profile": "default"})),
+        -32602
+    );
+    assert_eq!(
+        c.call_err(
+            "transcripts.hide",
+            json!({"profile": "inconnu", "claude_session_id": "x"})
+        ),
+        -32003
+    );
+    assert_eq!(
+        c.call_err("transcripts.list", json!({"include_hidden": "oui"})),
+        -32602
+    );
+    // Le masquage survit au redémarrage, et ne supprime aucun fichier.
+    drop(c);
+    drop(_daemon);
+    let _daemon = env.start_daemon();
+    let mut c = Client::connect(&env);
+    assert_eq!(entry(&mut c, json!({})), None);
+    assert_eq!(transcript_files(&env, &alive_claude).len(), 1);
+
+    // La limite s'applique après l'exclusion des sessions masquées et de
+    // celles que le démon connaît.
+    let dir = env.home.join(".claude/projects/-autre");
+    std::fs::create_dir_all(&dir).unwrap();
+    for i in 0..3 {
+        std::fs::write(
+            dir.join(format!("00000000-0000-4000-8000-00000000000{i}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+    }
+    let known = launch_idle(&mut c, &env, json!({}));
+    let known_claude = c.last_session(known).unwrap()["claude_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    c.wait_until("transcript", |_| {
+        transcript_files(&env, &known_claude).len() == 1
+    });
+    let ids = |c: &mut Client, params: Value| -> Vec<String> {
+        c.call("transcripts.list", params)["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["claude_session_id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let got = ids(&mut c, json!({"limit": 3}));
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert!(
+        !got.contains(&known_claude) && !got.contains(&alive_claude),
+        "{got:?}"
+    );
+    let all = ids(
+        &mut c,
+        json!({"limit": 50, "exclude_known": false, "include_hidden": true}),
+    );
+    assert!(
+        all.contains(&known_claude) && all.contains(&alive_claude),
+        "{all:?}"
+    );
+}
+
+#[test]
+fn forget_during_exit_grace_and_resumable_on_get() {
+    let env = Env::new();
+    let _daemon = env.start_daemon();
+    let mut c = Client::connect(&env);
+    c.call("hello", json!({}));
+
+    // `resumable` relu à chaque sessions.get (session.updated s'il change).
+    let id = launch_idle(&mut c, &env, json!({}));
+    let claude_id = c.last_session(id).unwrap()["claude_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    c.call("sessions.stop", json!({"id": id}));
+    c.wait_until("reprenable", |c| {
+        c.last_session(id).is_some_and(|s| s["resumable"] == true)
+    });
+    let files = transcript_files(&env, &claude_id);
+    let saved = std::fs::read(&files[0]).unwrap();
+    std::fs::remove_file(&files[0]).unwrap();
+    let get =
+        |c: &mut Client| c.call("sessions.get", json!({"id": id}))["session"]["resumable"].clone();
+    assert_eq!(get(&mut c), false);
+    c.wait_until("session.updated (plus reprenable)", |c| {
+        c.last_session(id).is_some_and(|s| s["resumable"] == false)
+    });
+    std::fs::write(&files[0], saved).unwrap();
+    assert_eq!(get(&mut c), true);
+
+    // Processus tout juste terminé (délai de grâce) : la fin est constatée et
+    // la session oubliée, au lieu d'un refus.
+    let crashed = launch_idle(&mut c, &env, json!({}));
+    c.input(crashed, b"/crash\r");
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        c.call("sessions.forget", json!({"id": crashed})),
+        json!({"forgotten": true})
+    );
+    assert_eq!(c.call_err("sessions.get", json!({"id": crashed})), -32001);
 }

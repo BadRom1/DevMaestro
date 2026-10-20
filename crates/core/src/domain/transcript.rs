@@ -60,6 +60,8 @@ pub struct PastSession {
     pub title: Option<String>,
     pub first_timestamp: Option<OffsetDateTime>,
     pub last_timestamp: Option<OffsetDateTime>,
+    /// Date de modification du fichier (posée par l'adaptateur).
+    pub modified: Option<OffsetDateTime>,
     /// Nombre de lignes `user` et `assistant` (hors sous-agents), y compris
     /// les résultats d'outils : un ordre de grandeur, pas un nombre de tours.
     /// Inconnu (`None`) quand seuls le début et la fin du fichier ont été lus.

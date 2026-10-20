@@ -1,5 +1,6 @@
 //! Persistance des sessions dans SQLite (`$XDG_DATA_HOME/devmaestro/state.db`).
 
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -45,6 +46,14 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE sessions ADD COLUMN color TEXT;
     ALTER TABLE sessions ADD COLUMN first_prompt TEXT;
     ALTER TABLE sessions ADD COLUMN session_name TEXT;
+    ",
+    "
+    CREATE TABLE hidden_transcripts (
+        profile           TEXT NOT NULL,
+        claude_session_id TEXT NOT NULL,
+        hidden_at         TEXT NOT NULL,
+        PRIMARY KEY (profile, claude_session_id)
+    );
     ",
 ];
 
@@ -278,6 +287,54 @@ impl SessionStore for SqliteStore {
         Ok(())
     }
 
+    fn delete(&self, id: &Uuid) -> io::Result<()> {
+        let conn = self.conn.lock().map_err(other)?;
+        conn.execute(
+            "DELETE FROM sessions WHERE id = ?1",
+            params![id.to_string()],
+        )
+        .map_err(other)?;
+        Ok(())
+    }
+
+    fn hide_transcript(
+        &self,
+        profile: &str,
+        claude_session_id: &str,
+        at: OffsetDateTime,
+    ) -> io::Result<()> {
+        let conn = self.conn.lock().map_err(other)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO hidden_transcripts (profile, claude_session_id, hidden_at)
+             VALUES (?1, ?2, ?3)",
+            params![profile, claude_session_id, fmt_time(at)],
+        )
+        .map_err(other)?;
+        Ok(())
+    }
+
+    fn unhide_transcript(&self, profile: &str, claude_session_id: &str) -> io::Result<bool> {
+        let conn = self.conn.lock().map_err(other)?;
+        let n = conn
+            .execute(
+                "DELETE FROM hidden_transcripts WHERE profile = ?1 AND claude_session_id = ?2",
+                params![profile, claude_session_id],
+            )
+            .map_err(other)?;
+        Ok(n > 0)
+    }
+
+    fn hidden_transcripts(&self, profile: &str) -> io::Result<HashSet<String>> {
+        let conn = self.conn.lock().map_err(other)?;
+        let mut stmt = conn
+            .prepare("SELECT claude_session_id FROM hidden_transcripts WHERE profile = ?1")
+            .map_err(other)?;
+        let rows = stmt
+            .query_map(params![profile], |r| r.get::<_, String>(0))
+            .map_err(other)?;
+        Ok(rows.flatten().collect())
+    }
+
     fn load_all(&self) -> io::Result<Vec<SessionRecord>> {
         let conn = self.conn.lock().map_err(other)?;
         let mut stmt = conn
@@ -338,6 +395,36 @@ mod tests {
         assert_eq!(all[0], r);
         assert_eq!(all[1].status, "idle");
         assert_eq!(all[1].pid, Some(42));
+    }
+
+    #[test]
+    fn delete_removes_only_that_session() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.upsert(&record(1, "stopped", 10)).unwrap();
+        store.upsert(&record(2, "idle", 20)).unwrap();
+        store.delete(&Uuid::from_u128(1)).unwrap();
+        store.delete(&Uuid::from_u128(99)).unwrap();
+        let all = store.load_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, Uuid::from_u128(2));
+    }
+
+    #[test]
+    fn hidden_transcripts_per_profile() {
+        let store = SqliteStore::in_memory().unwrap();
+        let t = OffsetDateTime::UNIX_EPOCH;
+        assert!(store.hidden_transcripts("default").unwrap().is_empty());
+        store.hide_transcript("default", "a", t).unwrap();
+        store.hide_transcript("default", "a", t).unwrap();
+        store.hide_transcript("work", "b", t).unwrap();
+        assert_eq!(
+            store.hidden_transcripts("default").unwrap(),
+            ["a".to_owned()].into()
+        );
+        assert!(store.unhide_transcript("default", "a").unwrap());
+        assert!(!store.unhide_transcript("default", "a").unwrap());
+        assert!(store.hidden_transcripts("default").unwrap().is_empty());
+        assert_eq!(store.hidden_transcripts("work").unwrap().len(), 1);
     }
 
     #[test]

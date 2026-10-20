@@ -150,13 +150,16 @@ pub fn past_session_json(s: &PastSession) -> Value {
     json!({
         "claude_session_id": s.session_id,
         "transcript_path": s.transcript_path,
-        "cwd": s.cwd,
+        // Absolu ou `null` (le nom du dossier du transcript n'est jamais décodé).
+        "cwd": s.cwd.as_ref().filter(|c| c.is_absolute()),
         "git_branch": s.git_branch,
         "first_prompt": s.first_prompt,
         "title": s.title,
         "display_name": s.display_name(),
         "first_timestamp": time_json(s.first_timestamp),
         "last_timestamp": time_json(s.last_timestamp),
+        // Dernière activité : dernier horodatage lu, sinon date du fichier.
+        "last_activity": time_json(s.last_timestamp.or(s.modified)),
         "message_count": s.message_count,
     })
 }

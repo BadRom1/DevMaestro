@@ -213,7 +213,13 @@ pub enum Event {
     Updated(Uuid),
     /// Effet de la machine à états (`session.effect`).
     Effect { id: Uuid, effect: Arc<Value> },
+    /// La session a été retirée (`session.removed`, `sessions.forget`).
+    Removed(Uuid),
 }
+
+/// Sessions retirées gardées en mémoire pour les clients qui ont pris du
+/// retard (leur file est reconstruite, voir [`Daemon::removed_ids`]).
+const REMOVED_KEPT: usize = 1024;
 
 /// Un processus `claude` en cours.
 struct Run {
@@ -266,6 +272,10 @@ struct Entry {
     mode_change: Option<(PermissionMode, Instant)>,
     /// Dernier mode retenu depuis le pied de la TUI, et quand.
     screen_mode: Option<(PermissionMode, Instant)>,
+    /// Un transcript existe pour `claude_session_id` (`--resume` possible) ;
+    /// relu à la fin du processus, à la relecture de la base et sur
+    /// `sessions.list`.
+    has_transcript: bool,
 }
 
 /// Délai au bout duquel un `sessions.setMode` non confirmé n'empêche plus
@@ -328,6 +338,8 @@ pub struct Daemon {
     supervised: Mutex<Supervised>,
     /// Le démon lui-même, pour les tâches lancées depuis `&self`.
     me: std::sync::Weak<Daemon>,
+    /// Dernières sessions retirées (au plus [`REMOVED_KEPT`]).
+    removed: Mutex<std::collections::VecDeque<Uuid>>,
 }
 
 /// Instantané, historique éventuel, flux de sortie et terminal d'une session.
@@ -409,6 +421,7 @@ impl Entry {
             orphan: None,
             mode_change: None,
             screen_mode: None,
+            has_transcript: false,
         }
     }
 
@@ -507,6 +520,7 @@ impl Entry {
             "created_at": time_json(Some(self.created_at)),
             "updated_at": time_json(Some(self.updated_at)),
             "alive": self.run.is_some(),
+            "resumable": self.run.is_none() && self.has_transcript,
             "pid": self.run.as_ref().and_then(|r| r.pid),
             "scope": self.run.as_ref().and_then(|r| r.proc.scope.clone()),
             "last_exit": match &self.last_exit {
@@ -603,6 +617,7 @@ impl Daemon {
             shutting_down: AtomicBool::new(false),
             supervised: Mutex::new(Supervised::new()),
             me: me.clone(),
+            removed: Mutex::new(std::collections::VecDeque::new()),
         })
     }
 
@@ -871,6 +886,8 @@ impl Daemon {
             reg.sessions.insert(entry.session.id, entry);
         }
         info!("{} session(s) relue(s) depuis la base", reg.sessions.len());
+        drop(reg);
+        self.refresh_resumable(None);
     }
 
     // ---------------------------------------------------------------- lecture
@@ -952,21 +969,43 @@ impl Daemon {
         Ok(json!({"session": json}))
     }
 
-    /// `transcripts.list`.
-    pub fn transcripts(&self, profile: &str, limit: Option<usize>) -> Result<Value, RpcError> {
-        let profile = self.profile(profile)?;
-        let past = self
+    /// `transcripts.list {profile?, limit?, include_hidden?, exclude_known?}`.
+    pub fn transcripts(&self, params: &Value) -> Result<Value, RpcError> {
+        let profile = self.profile(
+            &opt_str(params, "profile")?
+                .unwrap_or_else(|| crate::domain::profile::DEFAULT_PROFILE_NAME.to_owned()),
+        )?;
+        let limit = match params.get("limit") {
+            None | Some(Value::Null) => Some(50),
+            Some(v) => Some(
+                v.as_u64()
+                    .ok_or_else(|| RpcError::params("« limit » : entier positif"))?
+                    as usize,
+            ),
+        };
+        let flag = |key: &str, default: bool| match params.get(key) {
+            None | Some(Value::Null) => Ok(default),
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(_) => Err(RpcError::params(format!("« {key} » doit être un booléen"))),
+        };
+        let include_hidden = flag("include_hidden", false)?;
+        let exclude_known = flag("exclude_known", true)?;
+        let hidden = self
             .deps
-            .transcripts
-            .past_sessions(&profile, limit)
+            .store
+            .hidden_transcripts(&profile.name)
             .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))?;
         // Un titre donné dans l'app à une session du démon vaut aussi pour
         // son transcript (même `claude_session_id`).
-        let titles: HashMap<String, String> = {
+        let (known, titles) = {
             let reg = self.lock();
             let mut entries: Vec<&Entry> = reg.sessions.values().collect();
             entries.sort_by_key(|e| e.updated_at);
-            entries
+            let known: std::collections::HashSet<String> = entries
+                .iter()
+                .map(|e| e.session.claude_session_id.clone())
+                .collect();
+            let titles: HashMap<String, String> = entries
                 .into_iter()
                 .filter_map(|e| {
                     e.session
@@ -974,8 +1013,21 @@ impl Daemon {
                         .clone()
                         .map(|t| (e.session.claude_session_id.clone(), t))
                 })
-                .collect()
+                .collect();
+            (known, titles)
         };
+        let mut exclude = std::collections::HashSet::new();
+        if exclude_known {
+            exclude.extend(known);
+        }
+        if !include_hidden {
+            exclude.extend(hidden.iter().cloned());
+        }
+        let past = self
+            .deps
+            .transcripts
+            .past_sessions(&profile, limit, &exclude)
+            .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))?;
         let sessions: Vec<Value> = past
             .iter()
             .map(|p| {
@@ -983,6 +1035,7 @@ impl Daemon {
                 if let Some(t) = titles.get(&p.session_id) {
                     v["display_name"] = json!(t);
                 }
+                v["hidden"] = json!(hidden.contains(&p.session_id));
                 v
             })
             .collect();
@@ -997,10 +1050,186 @@ impl Daemon {
         let profile = self.profile(profile).ok()?;
         self.deps
             .transcripts
-            .past_sessions(&profile, None)
-            .ok()?
+            .past_session(&profile, claude_session_id)
+    }
+
+    fn known_profiles(&self) -> Vec<Profile> {
+        self.deps.profiles.profiles().unwrap_or_default()
+    }
+
+    /// Transcripts existants de ces profils (liste en cache dans
+    /// l'adaptateur) : à appeler **hors** du verrou du registre.
+    fn transcript_sets(
+        &self,
+        names: impl IntoIterator<Item = String>,
+    ) -> HashMap<String, Arc<std::collections::HashSet<String>>> {
+        let profiles = self.known_profiles();
+        names
             .into_iter()
-            .find(|p| p.session_id == claude_session_id)
+            .filter_map(|name| {
+                let p = profiles.iter().find(|p| p.name == name)?;
+                Some((name, self.deps.transcripts.transcript_ids(p)))
+            })
+            .collect()
+    }
+
+    /// Relit `has_transcript` des sessions qui ne tournent pas (toutes, ou
+    /// seulement `only`) : une liste des transcripts par profil, hors du
+    /// verrou du registre ; `session.updated` pour chaque valeur changée.
+    /// Fait du travail sur le système de fichiers : depuis un contexte
+    /// asynchrone, l'appeler dans `spawn_blocking`.
+    pub fn refresh_resumable(&self, only: Option<Uuid>) {
+        let todo: Vec<(Uuid, String, String)> = self
+            .lock()
+            .sessions
+            .values()
+            .filter(|e| e.run.is_none() && only.is_none_or(|id| id == e.session.id))
+            .map(|e| {
+                (
+                    e.session.id,
+                    e.session.profile.clone(),
+                    e.session.claude_session_id.clone(),
+                )
+            })
+            .collect();
+        if todo.is_empty() {
+            return;
+        }
+        let sets = self.transcript_sets(todo.iter().map(|(_, p, _)| p.clone()));
+        let mut reg = self.lock();
+        for (id, profile, cid) in todo {
+            let ok = sets.get(&profile).is_some_and(|ids| ids.contains(&cid));
+            if let Some(e) = reg.sessions.get_mut(&id)
+                && e.run.is_none()
+                && e.session.claude_session_id == cid
+                && e.has_transcript != ok
+            {
+                e.has_transcript = ok;
+                let _ = self.events.send(Event::Updated(id));
+            }
+        }
+    }
+
+    /// Identifiants des dernières sessions retirées.
+    pub fn removed_ids(&self) -> Vec<Uuid> {
+        self.removed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    /// `sessions.forget {id}` : retire une session qui ne tourne pas (arrêtée
+    /// ou en erreur) du registre et de la base, masque son transcript de
+    /// `transcripts.list`, puis diffuse `session.removed`. Un processus qui
+    /// vient de se terminer (délai de grâce) est d'abord constaté terminé.
+    /// Les transcripts de Claude Code ne sont jamais supprimés.
+    pub fn forget(&self, id: &Uuid) -> Result<Value, RpcError> {
+        let mut reg = self.lock();
+        let current = reg
+            .sessions
+            .get(id)
+            .ok_or_else(|| RpcError::unknown_session(id))?
+            .run
+            .as_ref()
+            .map(|r| (r.id, r.exit_status()));
+        match current {
+            None => {}
+            Some((_, None)) => {
+                return Err(RpcError::new(
+                    error_code::INVALID_STATE,
+                    "la session tourne encore : l'arrêter d'abord",
+                ));
+            }
+            Some((run_id, Some(status))) => self.finalize_exit(&mut reg, *id, run_id, status),
+        }
+        let entry = reg.sessions.remove(id).expect("présente");
+        if let Some(t) = &entry.token {
+            reg.forget_token(t);
+        }
+        drop(reg);
+        // Hors du verrou : plus aucune écriture de cette session ne peut
+        // suivre (elles se font toutes sous le verrou, entrée présente).
+        if let Err(e) = self.deps.store.delete(id) {
+            error!("session {id} : suppression en base : {e} (elle reviendra au redémarrage)");
+        }
+        if let Err(e) = self.deps.store.hide_transcript(
+            &entry.session.profile,
+            &entry.session.claude_session_id,
+            self.now(),
+        ) {
+            error!("session {id} : masquage du transcript : {e}");
+        }
+        // Processus d'avant un plantage : oublié seulement si plus rien ne
+        // vit dans son groupe ni sa session (sinon ses descendants resteraient
+        // refusés au socket de contrôle tant qu'ils vivent).
+        if let Some((pid, proc)) = entry.orphan {
+            let mut one: Supervised = [(pid, proc)].into();
+            peer::prune(&mut one, &peer::scan());
+            if one.is_empty() {
+                self.supervised
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&pid);
+            }
+        }
+        {
+            let mut removed = self.removed.lock().unwrap_or_else(|e| e.into_inner());
+            removed.push_back(*id);
+            while removed.len() > REMOVED_KEPT {
+                removed.pop_front();
+            }
+        }
+        info!("session {id} oubliée (retirée du registre et de la base, transcript masqué)");
+        let _ = self.events.send(Event::Removed(*id));
+        Ok(json!({"forgotten": true}))
+    }
+
+    /// `transcripts.hide` / `transcripts.unhide {profile?, claude_session_id}`.
+    pub fn set_transcript_hidden(&self, params: &Value, hidden: bool) -> Result<Value, RpcError> {
+        let profile = self.profile(
+            &opt_str(params, "profile")?
+                .unwrap_or_else(|| crate::domain::profile::DEFAULT_PROFILE_NAME.to_owned()),
+        )?;
+        let cid = opt_str(params, "claude_session_id")?
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| RpcError::params("« claude_session_id » manquant"))?;
+        let r = if hidden {
+            self.deps
+                .store
+                .hide_transcript(&profile.name, &cid, self.now())
+        } else {
+            self.deps
+                .store
+                .unhide_transcript(&profile.name, &cid)
+                .map(drop)
+        };
+        r.map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))?;
+        Ok(json!({"hidden": hidden}))
+    }
+
+    /// Refuse la reprise d'une session sans transcript (`--resume` échouerait).
+    /// `sets` : listes calculées hors du verrou ; profil absent (rare) : la
+    /// liste est demandée ici.
+    fn require_transcript(
+        &self,
+        sets: &HashMap<String, Arc<std::collections::HashSet<String>>>,
+        profile: &Profile,
+        claude_id: &str,
+    ) -> Result<(), RpcError> {
+        let ok = match sets.get(&profile.name) {
+            Some(ids) => ids.contains(claude_id),
+            None => self.deps.transcripts.has_transcript(profile, claude_id),
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(RpcError::new(
+                error_code::NO_TRANSCRIPT,
+                "Claude Code n'a pas de transcript pour cette session : impossible de la reprendre",
+            ))
+        }
     }
 
     fn claude_bin(&self) -> Result<PathBuf, RpcError> {
@@ -1119,6 +1348,31 @@ impl Daemon {
             ),
             _ => None,
         };
+        // Transcripts des profils en jeu, listés hors du verrou du registre.
+        let candidate_profiles: Vec<String> = {
+            let reg = self.lock();
+            let mut names = vec![
+                profile_param
+                    .clone()
+                    .unwrap_or_else(|| crate::domain::profile::DEFAULT_PROFILE_NAME.to_owned()),
+            ];
+            if profile_param.is_none() {
+                names.extend(
+                    reg.sessions
+                        .values()
+                        .filter(|e| {
+                            by_id == Some(e.session.id)
+                                || claude_id.as_deref()
+                                    == Some(e.session.claude_session_id.as_str())
+                        })
+                        .map(|e| e.session.profile.clone()),
+                );
+            }
+            names.sort();
+            names.dedup();
+            names
+        };
+        let transcript_sets = self.transcript_sets(candidate_profiles);
 
         let mut reg = self.lock();
         let existing = match (&by_id, &claude_id) {
@@ -1176,6 +1430,9 @@ impl Daemon {
                 },
             };
             self.check_mode_allowed(plan.mode.as_ref(), mode_inherited)?;
+            if let LaunchKind::Resume { claude_session_id } = &plan.kind {
+                self.require_transcript(&transcript_sets, &plan.profile, claude_session_id)?;
+            }
             let mut warnings = Vec::new();
             if plan.mode.is_none() {
                 plan.mode = self.effective_mode(&plan.cwd, &plan.profile, &mut warnings);
@@ -1218,6 +1475,7 @@ impl Daemon {
             size: size_param,
         };
         self.check_mode_allowed(plan.mode.as_ref(), false)?;
+        self.require_transcript(&transcript_sets, &plan.profile, &cid)?;
         let mut warnings = Vec::new();
         if plan.mode.is_none() {
             plan.mode = self.effective_mode(&plan.cwd, &plan.profile, &mut warnings);
@@ -2023,6 +2281,11 @@ impl Daemon {
         info!("session {id} : processus terminé ({how})");
         self.emit_effects(id, &effects);
         self.commit(entry);
+        // `resumable` relu hors du verrou (système de fichiers).
+        if let Some(daemon) = self.me.upgrade() {
+            self.runtime
+                .spawn_blocking(move || daemon.refresh_resumable(Some(id)));
+        }
         if let Some(t) = token {
             reg.forget_token(&t);
         }

@@ -76,6 +76,25 @@ describe('validation des paramètres de la page', () => {
     for (const p of bad) expect(() => validateParams('sessions.update', p), JSON.stringify(p)).toThrow(ValidationError)
   })
 
+  it('sessions.forget : identifiant seul', () => {
+    expect(validateParams('sessions.forget', { id: ID, extra: true })).toEqual({ id: ID })
+    expect(() => validateParams('sessions.forget', { id: 'x' })).toThrow(ValidationError)
+  })
+
+  it('transcripts.hide / unhide / list (include_hidden)', () => {
+    for (const m of ['transcripts.hide', 'transcripts.unhide'] as const) {
+      expect(validateParams(m, { profile: 'work', claude_session_id: ID, x: 1 })).toEqual({ profile: 'work', claude_session_id: ID })
+      expect(() => validateParams(m, { claude_session_id: ID })).toThrow(ValidationError)
+      expect(() => validateParams(m, { profile: 'work', claude_session_id: '../x' })).toThrow(ValidationError)
+    }
+    expect(validateParams('transcripts.list', { profile: 'p', limit: 100, include_hidden: true })).toEqual({
+      profile: 'p',
+      limit: 100,
+      include_hidden: true,
+    })
+    expect(() => validateParams('transcripts.list', { include_hidden: 'oui' })).toThrow(ValidationError)
+  })
+
   it('view : UUID ou null, taille bornée', () => {
     expect(validateView({ id: null })).toEqual({ id: null })
     expect(validateView({ id: ID, cols: 80, rows: 24 })).toEqual({ id: ID, cols: 80, rows: 24 })
@@ -101,6 +120,7 @@ describe('messages d’erreur du démon', () => {
     expect(describeError(-32012, 'x')).toMatch(/réponds dans le terminal/)
     expect(describeError(-32011, 'x')).toMatch(/mauvais type/)
     expect(describeError(-32602, 'paramètres invalides')).toBe('paramètres invalides')
+    expect(describeError(-32015, 'pas de transcript')).toMatch(/^Claude Code n’a pas de transcript pour cette session/)
     expect(describeError(-32601, 'méthode inconnue')).toMatch(/^méthode inconnue du démon \(démon trop ancien/)
   })
 })

@@ -4,6 +4,7 @@
  * par l'API minimale du preload et par un `MessagePort` pour le terminal.
  */
 import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import path from 'node:path'
 
 import {
@@ -19,6 +20,7 @@ import {
 } from 'electron'
 
 import { Ipc, type CallResult, type PortDown, type RpcFailure } from '../shared/bridge'
+import { validHome } from '../shared/home'
 import { ErrorCode, RENDERER_METHODS, type MethodName } from '../shared/protocol'
 import { DaemonClient } from './daemon/client'
 import { defaultSocketPath } from './daemon/paths'
@@ -61,7 +63,7 @@ client.on('notification', (n) => {
     relay.onNotification(n)
     return
   }
-  if (n.method === 'session.updated' || n.method === 'session.effect') {
+  if (n.method === 'session.updated' || n.method === 'session.effect' || n.method === 'session.removed') {
     toPage(Ipc.notification, { method: n.method, params: n.params })
   }
 })
@@ -231,6 +233,7 @@ function registerIpc(): void {
     }
   })
   ipcMain.handle(Ipc.connection, (e) => (trusted(e) ? client.state : null))
+  ipcMain.handle(Ipc.home, (e) => (trusted(e) ? validHome(homedir()) : null))
   ipcMain.handle(Ipc.openExternal, async (e, url: unknown) => {
     if (!trusted(e)) return UNTRUSTED
     try {

@@ -50,6 +50,10 @@ pub mod error_code {
     /// `sessions.setMode` impossible : mode courant inconnu ou hors du cycle
     /// de Shift+Tab, ou mode visé hors du cycle.
     pub const MODE_UNREACHABLE: i64 = -32014;
+    /// `sessions.resume` impossible : Claude Code n'a pas de transcript pour
+    /// cette session (par exemple lancée avec un marqueur de session enfant
+    /// hérité, qui coupe l'enregistrement).
+    pub const NO_TRANSCRIPT: i64 = -32015;
 }
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {

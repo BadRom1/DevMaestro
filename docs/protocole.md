@@ -81,6 +81,7 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `-32012` | aucun relais n'attend la décision : demande sans détails (connue par une notification), délai du relais dépassé, ou relais pas encore rattaché (voir `answerable`) ; répondre dans le terminal |
 | `-32013` | « Toujours » impossible : aucune règle proposée par Claude Code (`always_rules` vide) |
 | `-32014` | `sessions.setMode` impossible : mode courant inconnu ou hors du cycle de Shift+Tab, ou mode visé hors du cycle |
+| `-32015` | `sessions.resume` impossible : Claude Code n'a pas de transcript pour cette session (message : « Claude Code n'a pas de transcript pour cette session : impossible de la reprendre ») |
 
 ## 4. Méthodes
 
@@ -100,9 +101,12 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `sessions.stop` | `{id}` | `{stopping: bool, alive: bool}` |
 | `sessions.setMode` | `{id, mode}` | `{sent}` : nombre de Shift+Tab envoyés (voir ci-dessous) |
 | `sessions.update` | `{id, title?: texte \| null, color?: couleur \| null}` | `{session: Session}` (voir ci-dessous) |
+| `sessions.forget` | `{id}` | `{forgotten: true}` (voir ci-dessous) |
 | `sessions.answerPermission` | `{id, request_id, decision: "allow" \| "allow_always" \| "deny", message?}` | `{request_id, resolved: true}` |
 | `sessions.answerQuestion` | `{id, request_id, answers: {"<texte de la question>": "<libellé>" \| ["<libellé>", …]}}` | `{request_id, resolved: true}` |
-| `transcripts.list` | `{profile?, limit?}` (50 par défaut) | `{profile, sessions: [AncienneSession]}` |
+| `transcripts.list` | `{profile?, limit?, include_hidden?, exclude_known?}` | `{profile, sessions: [AncienneSession]}` (voir ci-dessous) |
+| `transcripts.hide` | `{profile?, claude_session_id}` | `{hidden: true}` |
+| `transcripts.unhide` | `{profile?, claude_session_id}` | `{hidden: false}` |
 
 Détails :
 
@@ -114,6 +118,15 @@ Détails :
   - avec `id` : la session du démon, qui ne doit pas tourner (`-32002` sinon), est relancée avec `--resume <claude_session_id>`. Si son processus vient de se terminer mais que le démon ne l'a pas encore constaté (délai de grâce de 0,5 s laissé à un `SessionEnd` en retard), la fin est constatée sur-le-champ et la reprise a lieu. La session garde son `id`, son terminal et ses abonnés (le démon envoie `ESC[0m CRLF ESC[2J ESC[H` dans le flux juste avant la première sortie du nouveau processus) ;
   - avec `claude_session_id` seul : si une session arrêtée du démon porte ce `claude_session_id`, c'est elle qui est reprise ; sinon (ancienne session trouvée par `transcripts.list`) une nouvelle entrée est créée, `cwd` est alors obligatoire. Elle reprend le nom de la conversation : `first_prompt` et titre de Claude Code (`aiTitle`/`summary`, dans `metrics.session_name`) lus dans le transcript du profil, et `title`/`color` d'une autre entrée du démon pour le même `claude_session_id` s'il y en a ;
   - les paramètres absents reprennent ceux de la session (profil, mode, modèle, taille).
+- **Transcript requis pour reprendre** : `sessions.resume` (par `id` ou par `claude_session_id`) vérifie, avant de toucher à quoi que ce soit, que Claude Code a un transcript pour la conversation à reprendre (`<dossier du profil retenu>/projects/<un dossier>/<claude_session_id>.jsonl`, recherche par nom de fichier). Sinon `-32015` : `--resume` échouerait (cas des sessions lancées avec un marqueur `CLAUDE_CODE_CHILD_SESSION` hérité, § 8, dont Claude Code n'a rien enregistré). La session reste telle quelle ; elle peut être oubliée (`sessions.forget`).
+- **`Session.resumable`** : `true` si la session ne tourne pas **et** qu'un transcript existe pour son `claude_session_id` dans le dossier de son profil (même recherche) ; `false` sinon, toujours `false` pour une session vivante. Recalculé à la fin du processus, à la relecture de la base au démarrage, à chaque `sessions.list` et à chaque `sessions.get` (un transcript supprimé ou apparu depuis est alors pris en compte ; `session.updated` si la valeur change). La recherche se fait sur la liste des transcripts du profil (noms des fichiers `projects/*/*.jsonl`), gardée en cache tant que ni `projects/` ni aucun de ses sous-dossiers n'a changé de date de modification, et 2 s au plus ; jamais sous le verrou du registre.
+- **`sessions.forget {id}`** (« Retirer de la liste ») : retire une session qui ne tourne pas (arrêtée ou en erreur) du démon et de la base, **et masque** son transcript (`profile`, `claude_session_id` courant) de `transcripts.list`, durablement (voir `transcripts.hide`). Un processus qui vient de se terminer mais dont le démon n'a pas encore constaté la fin (délai de grâce de 0,5 s) est d'abord constaté terminé, puis la session est oubliée. `-32002` si elle tourne (l'arrêter d'abord), `-32001` si elle est inconnue (dont déjà oubliée), `-32602` sans `id`. Diffuse `session.removed {id}` à tous les clients (§ 5). Si l'écriture en base échoue, l'erreur est journalisée et la réponse reste `{forgotten: true}` (la session reviendrait au prochain démarrage). Les transcripts de Claude Code ne sont **jamais** supprimés (`transcripts.unhide` les fait réapparaître). Un processus d'avant un plantage du démon encore vivant reste refusé au socket de contrôle (§ 10) jusqu'à sa fin.
+- **`transcripts.list {profile?, limit?, include_hidden?, exclude_known?}`** :
+  - `profile` : `default` par défaut (`-32003` s'il est inconnu) ; `limit` : entier positif, 50 par défaut ;
+  - `include_hidden` (booléen, `false` par défaut) : inclure les transcripts masqués ; chaque entrée porte `hidden: true | false` ;
+  - `exclude_known` (booléen, `true` par défaut) : écarter les conversations que le démon connaît déjà (une session de `sessions.list` a ce `claude_session_id`) ;
+  - `limit` s'applique **après** ces exclusions : jusqu'à `limit` entrées utiles. Un booléen d'un autre type : `-32602`.
+- **`transcripts.hide {profile?, claude_session_id}`** → `{hidden: true}` : masque une ancienne session (connue seulement par son transcript) de `transcripts.list`, durablement (table `hidden_transcripts`, § 9) ; déjà masquée : sans effet. **`transcripts.unhide`** → `{hidden: false}` : la fait réapparaître (rien à faire si elle n'était pas masquée). `claude_session_id` manquant ou vide : `-32602` ; profil inconnu : `-32003`. Aucun fichier n'est jamais supprimé ; une session du démon n'est pas concernée (elle reste dans `sessions.list` jusqu'à `sessions.forget`).
 - **`sessions.stop`** envoie `SIGHUP` au groupe de processus de `claude`, puis `SIGKILL` au bout de 3 s s'il tourne encore. La réponse arrive tout de suite ; la fin est annoncée par `session.updated` (`alive: false`).
 - **`sessions.launch`, `sessions.resume`, `sessions.setMode`** refusent `bypassPermissions` et `dontAsk` (`-32005`, message en français) sauf si `allow_dangerous_modes = true` (§ 9). À la reprise, le mode retenu est vérifié même s'il n'est pas demandé : une session qui était en `bypassPermissions` n'est reprise ainsi qu'avec le réglage (sinon, passer un autre `mode`).
 - **Mode par défaut rendu explicite** : sans `mode` (et, à la reprise, sans mode connu de la session), le démon lit `permissions.defaultMode` (lecture seule) dans `<cwd>/.claude/settings.local.json`, sinon `<cwd>/.claude/settings.json`, sinon `<dossier du profil>/settings.json`. Mode trouvé et sûr : passé tel quel par `--permission-mode`. Mode dangereux sans `allow_dangerous_modes` : la session est lancée en `--permission-mode manual` et `warnings` contient un message en français (aussi au journal). Rien de trouvé : pas de `--permission-mode`. `warnings` est vide sinon.
@@ -179,8 +192,9 @@ La TUI affiche sa propre demande pendant que le relais `PermissionRequest` atten
 | `session.updated` | `{session: Session}` | à chaque changement : lancement, hook, statusline (si les mesures changent), mode lu dans le pied de la TUI, `sessions.update`, fin du processus, reprise |
 | `session.effect` | `{id, effect: Effet}` | effets de la machine à états, juste **avant** le `session.updated` correspondant |
 | `session.resync` | `{id, snapshot: Écran}` | un abonné a pris trop de retard (§ 6) |
+| `session.removed` | `{id}` | la session a été oubliée (`sessions.forget`) : elle n'existe plus ; aucun `session.updated` ne suit pour elle |
 
-Pour un client lent, les `session.updated` en attente d'une même session sont **regroupés** : il reçoit l'état le plus récent au moment de l'envoi, pas chaque étape. Les `session.effect` ne sont pas regroupés ; si plus de 4 096 événements attendent (ou si le client a pris trop de retard sur le démon), la file est remplacée par un `session.updated` par session et les effets en trop sont perdus. Le dernier `session.updated` reçu fait toujours foi.
+Pour un client lent, les `session.updated` en attente d'une même session sont **regroupés** : il reçoit l'état le plus récent au moment de l'envoi, pas chaque étape. Les `session.effect` ne sont pas regroupés ; si plus de 4 096 événements attendent (ou si le client a pris trop de retard sur le démon), la file est remplacée par un `session.removed` pour chacune des dernières sessions oubliées (jusqu'à 1 024, éventuellement déjà connues du client : à ignorer si l'`id` est inconnu) puis un `session.updated` par session, et les effets en trop sont perdus. Le dernier `session.updated` reçu fait toujours foi.
 
 ### Effet
 
@@ -251,6 +265,7 @@ Règles :
   "last_activity": "RFC 3339",          // dernier hook reçu
   "created_at": "RFC 3339", "updated_at": "RFC 3339",
   "alive": true, "pid": 1234,           // processus claude en cours
+  "resumable": false,                   // ne tourne pas et a un transcript (§ 4)
   "scope": "devmaestro-session-1a2b3c4d-5e6f7a8b.scope" | null,   // scope systemd (§ 9)
   "last_exit": {"code": 0} | {"signal": "Hangup"} | null,
   "size": {"cols": 100, "rows": 30}
@@ -291,8 +306,27 @@ Un processus sorti avec un code non nul ou tué par un signal inattendu, sans `S
 {"name": "work", "config_dir": "/home/u/.claude-work", "sets_config_dir_env": true}
 {"claude_session_id": "…", "transcript_path": "…", "cwd": "…", "git_branch": "…",
  "first_prompt": "…", "title": "…", "display_name": "…",
- "first_timestamp": "…", "last_timestamp": "…", "message_count": 12}
+ "first_timestamp": "…", "last_timestamp": "…", "last_activity": "…", "message_count": 12,
+ "hidden": false}
 ```
+
+Entrée de `transcripts.list` (ancienne session) :
+
+| Champ | Type | Contenu |
+|---|---|---|
+| `claude_session_id` | texte | nom du fichier quand c'est un UUID, sinon `sessionId` lu dans le transcript |
+| `transcript_path` | texte | chemin absolu du fichier `.jsonl` |
+| `cwd` | texte absolu \| `null` | `cwd` de la première ligne qui en porte un (`null` s'il n'y en a pas ou s'il n'est pas absolu ; le nom du dossier du transcript n'est jamais décodé) : de quoi regrouper par dossier, et par dépôt avec `projects.resolve` |
+| `git_branch` | texte \| `null` | branche de la dernière ligne lue qui en porte une |
+| `first_prompt` | texte \| `null` | premier prompt tapé, coupé à 200 caractères |
+| `title` | texte \| `null` | titre donné par Claude Code (`aiTitle` ou `summary`) |
+| `display_name` | texte | nom à afficher (§ 4) |
+| `first_timestamp`, `last_timestamp` | RFC 3339 \| `null` | premier et dernier horodatage lus |
+| `last_activity` | RFC 3339 \| `null` | dernière activité : `last_timestamp`, sinon date de modification du fichier |
+| `message_count` | entier \| `null` | lignes `user` et `assistant` (hors sous-agents) ; `null` pour un gros fichier lu par le début et la fin |
+| `hidden` | booléen | masquée (`sessions.forget` ou `transcripts.hide`) ; `true` seulement avec `include_hidden` |
+
+Liste triée par date de modification du fichier, de la plus récente à la plus ancienne.
 
 ## 8. Relais (`orchd hook`, `orchd statusline`)
 
@@ -349,7 +383,7 @@ Fichiers générés (au démarrage du démon et avant chaque lancement) :
 - **Scope systemd** : si `systemd-run --user --scope` fonctionne au démarrage du démon (gestionnaire systemd utilisateur joignable ; désactivable par `DEVMAESTRO_SYSTEMD_SCOPE=off`), chaque lancement devient `systemd-run --user --scope --quiet --collect --unit=devmaestro-session-<id8>-<alea8>.scope -- claude …` : `systemd-run` s'inscrit dans le scope puis exécute `claude` à sa place (même pid, même PTY, même environnement et dossier). Sinon, lancement direct. Le mode est écrit au journal au démarrage et dans `Session.scope`. Pour les tests seulement, `DEVMAESTRO_SYSTEMD_RUNTIME_DIR` donne à `systemd-run` le vrai `XDG_RUNTIME_DIR` quand celui du démon est temporaire.
 - Lancement : `claude (--session-id <uuid> | --resume <id>) [--permission-mode <mode>] [--model <m>] --plugin-dir <plugin> --settings <réglages du profil> [-- "<prompt>"]` dans un PTY, `cwd` = le dossier demandé, avec `TERM=xterm-256color`, `COLORTERM=truecolor`, les variables du § 8 (marqueurs de session Claude Code hérités retirés), et `CLAUDE_CONFIG_DIR` pour les profils autres que `default` (retiré de l'environnement hérité pour `default`). Le mode `default` s'écrit `manual` sur la ligne de commande. Le binaire vient de `DEVMAESTRO_CLAUDE_BIN`, sinon du `PATH` du démon. Le prompt suit `--` (fin des options façon commander.js, d'après `claude --help`) : un prompt comme `--dangerously-skip-permissions` ou `- liste` n'est pas lu comme une option. **À vérifier avec le vrai CLI** : que `--` est accepté et qu'un prompt égal au nom d'une sous-commande (`mcp`, `update`…) n'est pas lancé comme telle.
 - À la fin du processus `claude`, son groupe de processus reçoit `SIGHUP` (outils restés en arrière-plan), comme à la fermeture d'un terminal.
-- Les sessions sont enregistrées dans `$XDG_DATA_HOME/devmaestro/state.db` (SQLite, WAL, `synchronous=NORMAL`) : identifiants, profil, dossiers, branche, modèle, mode, statut, dates, pid, (schéma v2) date de démarrage du processus et scope systemd, et (schéma v3) titre, couleur, premier prompt et dernier `session_name` de la statusline. Au redémarrage après un plantage, les processus `claude` relus dont des processus vivent encore (eux-mêmes, ou d'autres dans leur groupe ou leur session) restent refusés au socket de contrôle (§ 10). Écriture à chaque changement de statut ou de champ ; une session qui ne change que par sa dernière activité est réécrite au plus toutes les 30 s. Le schéma est versionné (`PRAGMA user_version`, migrations pas à pas) : une base d'une version plus récente est refusée (le démon ne démarre pas, message en français) ; une base illisible ou corrompue est renommée `state.db.corrupt-<horodatage>` et remplacée par une base vide (avertissement au journal).
+- Les sessions sont enregistrées dans `$XDG_DATA_HOME/devmaestro/state.db` (SQLite, WAL, `synchronous=NORMAL`) : identifiants, profil, dossiers, branche, modèle, mode, statut, dates, pid, (schéma v2) date de démarrage du processus et scope systemd, (schéma v3) titre, couleur, premier prompt et dernier `session_name` de la statusline, et (schéma v4) la table `hidden_transcripts (profile, claude_session_id, hidden_at)` des transcripts masqués. Au redémarrage après un plantage, les processus `claude` relus dont des processus vivent encore (eux-mêmes, ou d'autres dans leur groupe ou leur session) restent refusés au socket de contrôle (§ 10). Écriture à chaque changement de statut ou de champ ; une session qui ne change que par sa dernière activité est réécrite au plus toutes les 30 s. Le schéma est versionné (`PRAGMA user_version`, migrations pas à pas) : une base d'une version plus récente est refusée (le démon ne démarre pas, message en français) ; une base illisible ou corrompue est renommée `state.db.corrupt-<horodatage>` et remplacée par une base vide (avertissement au journal).
 - Droits : dossiers `$XDG_RUNTIME_DIR/devmaestro`, `$XDG_DATA_HOME/devmaestro` et `$XDG_STATE_HOME/devmaestro` en 0700 (refusés s'ils sont un lien symbolique ou appartiennent à un autre utilisateur), base, journal, plugin et réglages en 0600.
 - **Arrêter le démon termine les sessions** : `SIGTERM`, `SIGINT` ou `SIGHUP` → `SIGHUP` à chaque session (le socket reste ouvert pour recevoir les `SessionEnd`), `SIGKILL` au bout de 3 s, puis fin. Un second signal pendant cet arrêt envoie `SIGKILL` à toutes les sessions et sort aussitôt. Les sessions restent reprenables. Après un plantage du démon, les sessions qui étaient en démarrage, en cours, à répondre ou inactives sont relues arrêtées (`daemon_restart`) ; celles déjà arrêtées ou en erreur sont relues telles quelles (statut et date inchangés).
 - Journal : sortie d'erreur et `$XDG_STATE_HOME/devmaestro/orchd.log`.

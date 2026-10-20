@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 
 import type { ConnectionState } from '../../shared/bridge'
+import { validHome } from '../../shared/home'
 import { ErrorCode, type Session } from '../../shared/protocol'
 import { CallError, api, call } from './api'
 import { LinkDialog } from './components/LinkDialog'
@@ -8,8 +9,8 @@ import { NewSessionDialog } from './components/NewSessionDialog'
 import { SessionPane } from './components/SessionPane'
 import { Sidebar } from './components/Sidebar'
 import { TopBar } from './components/TopBar'
-import { fallbackProject, groupByProject, pastToOffer, sidebarOrder, type PastEntry } from './state/projects'
-import { initialState, reducer } from './state/store'
+import { fallbackProject, groupByProject, groupPast, pastToOffer, sidebarOrder, type PastEntry } from './state/projects'
+import { initialState, needsResolve, reducer } from './state/store'
 import { applyThemeMode, effectiveScheme, loadThemeMode, type ThemeMode } from './theme'
 
 function connectionText(c: ConnectionState): { text: string; bad: boolean } | null {
@@ -47,7 +48,9 @@ function useScheme(mode: ThemeMode): 'light' | 'dark' {
 }
 
 /** Profondeur de la liste des anciennes sessions, par profil. */
-const PAST_LIMIT = 20
+const PAST_LIMIT = 100
+/** Nouvel essai de `projects.resolve` après un échec (dossier disparu, démon occupé…). */
+const RESOLVE_RETRY_MS = 60_000
 
 export function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
@@ -59,7 +62,19 @@ export function App() {
   const closeLink = useCallback(() => setLink(null), [])
   const [termSize, setTermSize] = useState<{ cols: number; rows: number } | null>(null)
   const resolving = useRef(new Set<string>())
-  const [, tick] = useState(0)
+  const [clock, tick] = useState(0)
+  const [home, setHome] = useState<string | null>(null)
+
+  // Dossier personnel : donné par le processus principal (absent avec un preload plus ancien).
+  useEffect(() => {
+    let alive = true
+    void Promise.resolve(api.home?.())
+      .then((h) => alive && setHome(validHome(h)))
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [])
 
   // Horloge des « il y a N min ».
   useEffect(() => {
@@ -75,6 +90,7 @@ export function App() {
     const offN = api.onNotification((n) => {
       if (n.method === 'session.updated') dispatch({ type: 'session.updated', session: n.params.session })
       else if (n.method === 'session.effect') dispatch({ type: 'session.effect', id: n.params.id, effect: n.params.effect })
+      else if (n.method === 'session.removed') dispatch({ type: 'session.removed', id: n.params.id })
     })
     return () => {
       alive = false
@@ -116,28 +132,36 @@ export function App() {
 
   const sessions = useMemo(() => Object.values(state.sessions), [state.sessions])
 
-  // Projets : `projects.resolve` une fois par dossier.
+
+  const past = useMemo(() => pastToOffer(state.past, sessions, PAST_LIMIT), [state.past, sessions])
+
+  // Projets : `projects.resolve` une fois par dossier (sessions courantes et anciennes).
   useEffect(() => {
     if (state.connection.state !== 'connected') return
-    for (const s of sessions) {
-      if (state.projects[s.cwd] || resolving.current.has(s.cwd)) continue
+    const dirs: { cwd: string; project_root: string | null }[] = [
+      ...sessions,
+      ...past.flatMap((p) => (p.cwd ? [{ cwd: p.cwd, project_root: null }] : [])),
+    ]
+    for (const s of dirs) {
+      if (resolving.current.has(s.cwd) || !needsResolve(state, s.cwd, Date.now())) continue
       resolving.current.add(s.cwd)
       call('projects.resolve', { path: s.cwd })
         .then((info) => dispatch({ type: 'project', cwd: s.cwd, info }))
         .catch((e: unknown) => {
-          // Connexion perdue ou délai : on réessaiera. Autre erreur (dossier
-          // disparu) : repli mis en cache, sans redemander à chaque mise à jour.
+          // Connexion perdue ou délai : on réessaiera à la reconnexion. Autre
+          // erreur (dossier disparu…) : repli provisoire, nouvel essai plus tard.
           const code = e instanceof CallError ? e.failure.code : null
-          if (code === ErrorCode.Disconnected || code === ErrorCode.Timeout) resolving.current.delete(s.cwd)
-          else dispatch({ type: 'project', cwd: s.cwd, info: fallbackProject(s) })
+          if (code === ErrorCode.Disconnected || code === ErrorCode.Timeout) return
+          dispatch({ type: 'project.failed', cwd: s.cwd, fallback: fallbackProject(s), retryAt: Date.now() + RESOLVE_RETRY_MS })
         })
+        .finally(() => resolving.current.delete(s.cwd))
     }
-  }, [sessions, state.projects, state.connection])
-
-  const groups = useMemo(() => groupByProject(sessions, state.projects), [sessions, state.projects])
+    // `clock` : réévalue les nouveaux essais toutes les 30 s.
+  }, [sessions, past, state, clock])
+  const groups = useMemo(() => groupByProject(sessions, state.projects, home), [sessions, state.projects, home])
   const ordered = useMemo(() => sidebarOrder(groups), [groups])
   const waiting = ordered.filter((s) => s.status.state === 'waiting')
-  const past = useMemo(() => pastToOffer(state.past, sessions, PAST_LIMIT), [state.past, sessions])
+  const pastGroups = useMemo(() => groupPast(past, state.projects, home), [past, state.projects, home])
   const selected = state.selectedId ? (state.sessions[state.selectedId] ?? null) : null
 
   // Sélection par défaut : la première qui attend, sinon la première de la liste.
@@ -146,10 +170,6 @@ export function App() {
     dispatch({ type: 'select', id: (waiting[0] ?? ordered[0])!.id })
   }, [selected, ordered, waiting])
 
-  const home = useMemo(() => {
-    const dir = state.profiles.find((p) => p.name === 'default')?.config_dir ?? state.profiles[0]?.config_dir
-    return dir ? dir.replace(/\/[^/]+\/?$/, '') : null
-  }, [state.profiles])
 
   const select = useCallback((id: string) => dispatch({ type: 'select', id }), [])
 
@@ -171,6 +191,18 @@ export function App() {
     dispatch({ type: 'session.updated', session: s })
     dispatch({ type: 'select', id: s.id })
     setDialog(false)
+  }, [])
+
+  /** Masque une ancienne session (`transcripts.hide`) ; retirée aussitôt de la liste. */
+  const hidePast = useCallback(async (p: PastEntry) => {
+    await call('transcripts.hide', { profile: p.profile, claude_session_id: p.claude_session_id })
+    dispatch({ type: 'past.hidden', profile: p.profile, claude_session_id: p.claude_session_id })
+  }, [])
+
+  /** Retire une session arrêtée de la liste du démon ; la page la retire aussitôt. */
+  const forget = useCallback(async (id: string) => {
+    await call('sessions.forget', { id })
+    dispatch({ type: 'session.removed', id })
   }, [])
 
   const onSessionUpdated = useCallback((s: Session) => dispatch({ type: 'session.response', session: s }), [])
@@ -202,6 +234,9 @@ export function App() {
         <Sidebar
           groups={groups}
           past={past}
+          pastGroups={pastGroups}
+          onForget={forget}
+          onHidePast={hidePast}
           profiles={state.profiles}
           home={home}
           selectedId={state.selectedId}
@@ -218,6 +253,7 @@ export function App() {
           onTermSize={onTermSize}
           onLink={setLink}
           onSessionUpdated={onSessionUpdated}
+          onForget={forget}
         />
       </main>
       {dialog && (

@@ -59,6 +59,12 @@ function str(o: Obj, k: string, max: number, opts: { nonEmpty?: boolean } = {}):
   return v
 }
 
+function bool(o: Obj, k: string): boolean {
+  const v = o[k]
+  if (typeof v !== 'boolean') throw new ValidationError(`« ${k} » doit être un booléen`)
+  return v
+}
+
 function oneOf<T extends string>(o: Obj, k: string, values: readonly T[]): T {
   const v = o[k]
   if (typeof v !== 'string' || !(values as readonly string[]).includes(v)) {
@@ -135,6 +141,7 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       return out
     case 'sessions.get':
     case 'sessions.stop':
+    case 'sessions.forget':
       out.id = uuid(o, 'id')
       return out
     case 'sessions.resize':
@@ -188,6 +195,12 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
     case 'transcripts.list':
       optional(o, out, 'profile', (x, k) => str(x, k, MAX_SHORT, { nonEmpty: true }))
       optional(o, out, 'limit', (x, k) => int(x, k, 1, 1000))
+      optional(o, out, 'include_hidden', (x, k) => bool(x, k))
+      return out
+    case 'transcripts.hide':
+    case 'transcripts.unhide':
+      out.profile = str(o, 'profile', MAX_SHORT, { nonEmpty: true })
+      out.claude_session_id = uuid(o, 'claude_session_id')
       return out
   }
 }

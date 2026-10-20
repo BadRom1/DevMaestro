@@ -124,6 +124,11 @@ export interface Session {
    * un démon plus ancien (voir `sessionDisplayName`).
    */
   display_name?: string
+  /**
+   * Arrêtée et reprenable : Claude Code a un transcript pour elle. Absent
+   * avec un démon plus ancien (inconnu : la reprise reste proposée).
+   */
+  resumable?: boolean
 }
 
 export type Effect =
@@ -172,6 +177,10 @@ export interface PastSession {
   message_count: number | null
   /** Nom à afficher, calculé par le démon (absent avec un démon plus ancien). */
   display_name?: string | null
+  /** Masquée par l'utilisateur (seulement avec `include_hidden`). */
+  hidden?: boolean | null
+  /** Dernière activité, si le démon la donne sous ce nom (sinon `last_timestamp`). */
+  last_activity?: string | null
 }
 
 export type PermissionDecision = 'allow' | 'allow_always' | 'deny'
@@ -227,6 +236,7 @@ export interface Methods {
     params: { id: string; title?: string | null; color?: SessionColor | null }
     result: { session: Session }
   }
+  'sessions.forget': { params: { id: string }; result: { forgotten: boolean } }
   'sessions.setMode': { params: { id: string; mode: SettableMode }; result: { sent: unknown } }
   'sessions.answerPermission': {
     params: { id: string; request_id: number; decision: PermissionDecision; message?: string }
@@ -237,9 +247,11 @@ export interface Methods {
     result: unknown
   }
   'transcripts.list': {
-    params: { profile?: string; limit?: number }
+    params: { profile?: string; limit?: number; include_hidden?: boolean }
     result: { profile: string; sessions: PastSession[] }
   }
+  'transcripts.hide': { params: { profile: string; claude_session_id: string }; result: { hidden: boolean } }
+  'transcripts.unhide': { params: { profile: string; claude_session_id: string }; result: { hidden: boolean } }
 }
 
 export type MethodName = keyof Methods
@@ -256,9 +268,12 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'sessions.stop',
   'sessions.setMode',
   'sessions.update',
+  'sessions.forget',
   'sessions.answerPermission',
   'sessions.answerQuestion',
   'transcripts.list',
+  'transcripts.hide',
+  'transcripts.unhide',
 ]
 
 /** Codes d'erreur JSON-RPC du démon (protocole § 3). */
@@ -281,3 +296,5 @@ export type Notification =
   | { method: 'session.updated'; params: { session: Session } }
   | { method: 'session.effect'; params: { id: string; effect: Effect } }
   | { method: 'session.resync'; params: { id: string; snapshot: Snapshot } }
+  /** Session retirée de la liste du démon (`sessions.forget`). */
+  | { method: 'session.removed'; params: { id: string } }

@@ -25,6 +25,7 @@ import { glyphFor } from '../state/status'
 import { TerminalView } from '../terminal/TerminalView'
 import { Meter, StatusGlyph, profileClass } from './common'
 import { PermissionCard, QuestionCard } from './RequestCards'
+import { ForgetConfirm } from './ForgetConfirm'
 import { ColorBar, ColorPicker, RenameField } from './SessionIdentity'
 
 /** Changement de mode : appel, réessai unique et délai de confirmation (voir `modeSwitch`). */
@@ -82,16 +83,21 @@ function Header({
   profiles,
   termSize,
   onSessionUpdated,
+  onForget,
 }: {
   session: Session
   project: ProjectInfo | undefined
   profiles: Profile[]
   termSize: { cols: number; rows: number } | null
   onSessionUpdated: (s: Session) => void
+  onForget: (id: string) => Promise<void>
 }) {
   const [busy, setBusy] = useState<'stop' | 'resume' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [renaming, setRenaming] = useState(false)
+  const [forgetting, setForgetting] = useState(false)
+  // `false` seulement si le démon l'affirme (absent : démon plus ancien, la reprise reste proposée).
+  const notResumable = session.resumable === false
   const { sw, request } = useModeSwitch(session)
   const glyph = glyphFor(session.status)
   const m = session.metrics
@@ -217,22 +223,44 @@ function Header({
               {busy === 'stop' ? 'Arrêt…' : 'Arrêter'}
             </button>
           ) : (
-            <button
-              className="btn sm"
-              disabled={busy !== null}
-              onClick={() =>
-                void run(
-                  'resume',
-                  () => call('sessions.resume', { id: session.id, ...(termSize ?? {}) }),
-                  'Reprise impossible',
-                )
-              }
-            >
-              {busy === 'resume' ? 'Reprise…' : 'Reprendre'}
-            </button>
+            <>
+              <button
+                className="btn sm"
+                disabled={busy !== null || notResumable}
+                title={
+                  notResumable
+                    ? 'Claude Code n’a pas de transcript pour cette session (aucun échange enregistré) : elle ne peut pas être reprise.'
+                    : 'Relancer Claude Code sur cette conversation'
+                }
+                onClick={() =>
+                  void run(
+                    'resume',
+                    () => call('sessions.resume', { id: session.id, ...(termSize ?? {}) }),
+                    'Reprise impossible',
+                  )
+                }
+              >
+                {busy === 'resume' ? 'Reprise…' : 'Reprendre'}
+              </button>
+              <button
+                className="btn sm ghost"
+                disabled={busy !== null || forgetting}
+                title="Retirer cette session arrêtée de la liste de DevMaestro"
+                onClick={() => setForgetting(true)}
+              >
+                Retirer de la liste
+              </button>
+            </>
           )}
         </div>
       </div>
+      {forgetting && !session.alive && (
+        <ForgetConfirm
+          name={name}
+          onConfirm={() => onForget(session.id)}
+          onCancel={() => setForgetting(false)}
+        />
+      )}
       <div className="sh-2">
         <span>{glyph.label}</span>
         <span title="Fenêtre de contexte">
@@ -247,6 +275,11 @@ function Header({
           <b>{relativeTime(session.last_activity)}</b>
         </span>
         {session.possibly_stale && <span className="chip pend">peut-être obsolète</span>}
+        {!session.alive && notResumable && (
+          <span className="chip" title="Claude Code n’a enregistré aucun transcript pour cette session">
+            pas de transcript : reprise impossible
+          </span>
+        )}
         {sw.phase === 'idle' && sw.error && (
           <span className="inline-err" role="alert">
             {sw.error}
@@ -280,6 +313,7 @@ export function SessionPane({
   onTermSize,
   onLink,
   onSessionUpdated,
+  onForget,
 }: {
   session: Session | null
   project: ProjectInfo | undefined
@@ -290,6 +324,7 @@ export function SessionPane({
   onTermSize: (cols: number, rows: number) => void
   onLink: (url: string) => void
   onSessionUpdated: (s: Session) => void
+  onForget: (id: string) => Promise<void>
 }) {
   const pending = session?.pending ?? []
   const termHost = useRef<HTMLDivElement>(null)
@@ -318,6 +353,7 @@ export function SessionPane({
           profiles={profiles}
           termSize={termSize}
           onSessionUpdated={onSessionUpdated}
+          onForget={onForget}
         />
       ) : (
         <div className="sh">

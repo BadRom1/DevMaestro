@@ -195,7 +195,7 @@ async fn run(paths: Paths, scrubbed: Vec<String>) -> Result<(), String> {
         pty: Box::new(NativePty),
         vcs: Box::new(GitCli::default()),
         profiles: Box::new(FsProfileSource::new(paths.home.clone())),
-        transcripts: Box::new(FsTranscriptSource),
+        transcripts: Box::new(FsTranscriptSource::default()),
         store: Box::new(store),
         clock: Box::new(SystemClock),
     };

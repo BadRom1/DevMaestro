@@ -32,6 +32,7 @@ const api: DevMaestroApi = {
   },
   requestTerminalPort: () => ipcRenderer.send(Ipc.requestPort),
   openExternal: (url) => ipcRenderer.invoke(Ipc.openExternal, String(url)),
+  home: () => ipcRenderer.invoke(Ipc.home) as Promise<string | null>,
 }
 
 contextBridge.exposeInMainWorld('devmaestro', api)

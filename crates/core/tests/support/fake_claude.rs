@@ -251,6 +251,40 @@ impl Fake {
         }
     }
 
+    /// Comme Claude Code : une ligne dans
+    /// `<config>/projects/<cwd encodé>/<session_id>.jsonl` (`CLAUDE_CONFIG_DIR`,
+    /// sinon `~/.claude`), sauf avec un marqueur de session enfant hérité
+    /// (`CLAUDE_CODE_CHILD_SESSION`), qui coupe l'enregistrement.
+    fn write_transcript(&self) {
+        if std::env::var_os("CLAUDE_CODE_CHILD_SESSION").is_some() {
+            out("Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker\r\n");
+            return;
+        }
+        let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")));
+        let Some(config) = config else { return };
+        let encoded: String = self
+            .cwd
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let dir = config.join("projects").join(encoded);
+        let _ = std::fs::create_dir_all(&dir);
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let line = json!({"type": "system", "sessionId": self.session_id, "cwd": self.cwd,
+                          "timestamp": now});
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(format!("{}.jsonl", self.session_id)))
+        {
+            let _ = f.write_all(format!("{line}\n").as_bytes());
+        }
+    }
+
     /// `/hook-perime <mode>` : un hook neutre (`Notification`) qui porte un
     /// autre mode que le mode courant, comme un hook émis avant un Shift+Tab
     /// et arrivé après.
@@ -920,6 +954,9 @@ fn main() {
     let mut ev = fake.base("SessionStart");
     ev["source"] = json!(if resumed { "resume" } else { "startup" });
     ev["model"] = json!(fake.args.model.clone().unwrap_or("claude-opus-5-5".into()));
+    // Transcript écrit avant le premier hook : une session vue « inactive »
+    // par le démon est donc toujours reprenable.
+    fake.write_transcript();
     fake.hook("SessionStart", ev);
     fake.statusline();
     if let Some(p) = fake.args.prompt.clone() {

@@ -48,6 +48,8 @@ export interface DevMaestroApi {
   requestTerminalPort(): void
   /** Ouvre un lien http(s) dans le navigateur (après confirmation dans l'app). */
   openExternal(url: string): Promise<{ ok: true } | { ok: false; error: RpcFailure }>
+  /** Dossier personnel de l'utilisateur (lecture seule), `null` si inconnu. */
+  home(): Promise<string | null>
 }
 
 /** Messages du canal du terminal, processus principal → page. */
@@ -83,4 +85,5 @@ export const Ipc = {
   requestPort: 'devmaestro:request-port',
   port: 'devmaestro:port',
   openExternal: 'devmaestro:open-external',
+  home: 'devmaestro:home',
 } as const

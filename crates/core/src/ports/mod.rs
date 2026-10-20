@@ -5,9 +5,11 @@
 //! ([`SessionStore`]). Les autres ports de l'architecture (§ 16 : `Forge`,
 //! `QuotaSource`, `Notifier`) arrivent avec les lots qui en ont besoin.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -24,14 +26,29 @@ pub trait ProfileSource {
     fn profiles(&self) -> io::Result<Vec<Profile>>;
 }
 
-/// Découverte des anciennes sessions d'un profil, de la plus récente à la
-/// plus ancienne, au plus `limit` si elle est donnée.
+/// Découverte des anciennes sessions d'un profil.
 pub trait TranscriptSource {
+    /// Anciennes sessions, de la plus récente à la plus ancienne, sans celles
+    /// de `exclude` (nom du fichier ou `session_id`), au plus `limit` après
+    /// cette exclusion.
     fn past_sessions(
         &self,
         profile: &Profile,
         limit: Option<usize>,
+        exclude: &HashSet<String>,
     ) -> io::Result<Vec<PastSession>>;
+
+    /// Noms (sans `.jsonl`) de tous les transcripts du profil : de quoi savoir
+    /// sans lecture si `--resume <id>` est possible. Peut être mis en cache.
+    fn transcript_ids(&self, profile: &Profile) -> Arc<HashSet<String>>;
+
+    /// Un transcript existe-t-il pour ce `session_id` ?
+    fn has_transcript(&self, profile: &Profile, session_id: &str) -> bool {
+        self.transcript_ids(profile).contains(session_id)
+    }
+
+    /// Résumé du transcript de ce `session_id`, s'il existe.
+    fn past_session(&self, profile: &Profile, session_id: &str) -> Option<PastSession>;
 }
 
 /// Commande à lancer dans un PTY.
@@ -146,4 +163,17 @@ pub trait SessionStore: Send {
     fn upsert(&self, record: &SessionRecord) -> io::Result<()>;
     /// Toutes les sessions, de la plus récente à la plus ancienne (`updated_at`).
     fn load_all(&self) -> io::Result<Vec<SessionRecord>>;
+    /// Retire une session (`sessions.forget`) ; absente : rien à faire.
+    fn delete(&self, id: &Uuid) -> io::Result<()>;
+    /// Masque un transcript de `transcripts.list` (déjà masqué : rien à faire).
+    fn hide_transcript(
+        &self,
+        profile: &str,
+        claude_session_id: &str,
+        at: OffsetDateTime,
+    ) -> io::Result<()>;
+    /// Démasque un transcript ; `false` s'il n'était pas masqué.
+    fn unhide_transcript(&self, profile: &str, claude_session_id: &str) -> io::Result<bool>;
+    /// `claude_session_id` masqués d'un profil.
+    fn hidden_transcripts(&self, profile: &str) -> io::Result<HashSet<String>>;
 }
