@@ -33,6 +33,18 @@ const api: DevMaestroApi = {
   requestTerminalPort: () => ipcRenderer.send(Ipc.requestPort),
   openExternal: (url) => ipcRenderer.invoke(Ipc.openExternal, String(url)),
   home: () => ipcRenderer.invoke(Ipc.home) as Promise<string | null>,
+  settings: () => ipcRenderer.invoke(Ipc.settingsGet),
+  updateSettings: (patch) => ipcRenderer.invoke(Ipc.settingsSet, patch),
+  flushSettings: (patch) => ipcRenderer.send(Ipc.settingsFlush, patch),
+  pickFolder: () => ipcRenderer.invoke(Ipc.pickFolder) as Promise<string | null>,
+  copyText: (text) => ipcRenderer.invoke(Ipc.copyText, String(text)) as Promise<boolean>,
+  onSelectSession(cb) {
+    const h = (_e: IpcRendererEvent, id: unknown) => {
+      if (typeof id === 'string') cb(id)
+    }
+    ipcRenderer.on(Ipc.selectSession, h)
+    return () => void ipcRenderer.removeListener(Ipc.selectSession, h)
+  },
 }
 
 contextBridge.exposeInMainWorld('devmaestro', api)

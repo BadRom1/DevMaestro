@@ -16,7 +16,8 @@ import {
 } from '../state/format'
 import { RESOLVING_GROUP, pastFolderMissing, type PastEntry, type PastGroup, type ProjectGroup } from '../state/projects'
 import { glyphFor } from '../state/status'
-import { PathLabel, StatusGlyph, profileClass } from './common'
+import { PathLabel, ProfileBadge, StatusGlyph } from './common'
+import { useSettings } from '../settings'
 import { ForgetConfirm, HideConfirm } from './ForgetConfirm'
 import { ColorBar } from './SessionIdentity'
 
@@ -98,6 +99,17 @@ export function Sidebar(props: {
   const { isCollapsed, toggle } = useCollapsed()
   const pastOpen = !isCollapsed(PAST_SECTION)
   const pastListId = useId()
+  const { settings, label: labelOf } = useSettings()
+
+  /** Retrait ou masquage : confirmation dans l'app, sauf si elle est coupée dans les réglages. */
+  function ask(key: string, act: () => Promise<void>, what: string) {
+    if (settings.confirmRemoval) {
+      setConfirm(key)
+      return
+    }
+    setError(null)
+    act().catch((e: unknown) => setError(`${what} impossible : ${errorText(e)}`))
+  }
 
   async function resume(p: PastEntry) {
     setBusy(p.claude_session_id)
@@ -123,16 +135,17 @@ export function Sidebar(props: {
         <button
           className="srow"
           aria-current={s.id === props.selectedId}
-          aria-label={`${name}, ${branch}, ${glyph.label}, ${s.profile}${color ? `, couleur ${COLOR_LABELS[color].toLowerCase()}` : ''}, ${missing ? ', dossier supprimé' : ''}, dernière activité ${relativeTime(s.last_activity)}`}
+          aria-label={`${name}, ${branch}, ${glyph.label}, profil ${labelOf(s.profile).long}${color ? `, couleur ${COLOR_LABELS[color].toLowerCase()}` : ''}, ${missing ? ', dossier supprimé' : ''}, dernière activité ${relativeTime(s.last_activity)}`}
           title={`${name}\n${branch} · ${s.cwd}${missing ? ' (dossier supprimé)' : ''}`}
           onClick={() => props.onSelect(s.id)}
           onContextMenu={(e) => {
             if (!forgettable) return
             e.preventDefault()
-            setConfirm(s.id)
+            ask(s.id, () => props.onForget(s.id), 'Retrait')
           }}
         >
           <StatusGlyph glyph={glyph} />
+          <ProfileBadge profile={s.profile} profiles={props.profiles} />
           <span className="names">
             <span className="nm">
               <ColorBar color={color} />
@@ -152,7 +165,7 @@ export function Sidebar(props: {
             className="row-act"
             aria-label={`Retirer « ${name} » de la liste`}
             title="Retirer de la liste"
-            onClick={() => setConfirm(s.id)}
+            onClick={() => ask(s.id, () => props.onForget(s.id), 'Retrait')}
           >
             ×
           </button>
@@ -181,7 +194,7 @@ export function Sidebar(props: {
         <button
           onContextMenu={(e) => {
             e.preventDefault()
-            setConfirm(key)
+            ask(key, () => props.onHidePast(p), 'Masquage')
           }}
           className="srow"
           aria-busy={busy === p.claude_session_id}
@@ -189,12 +202,13 @@ export function Sidebar(props: {
           title={
             missing
               ? `Le dossier ${p.cwd} n’existe plus (worktree supprimé ?) : reprise impossible`
-              : `${p.cwd ?? 'dossier inconnu'} · profil ${p.profile}${p.first_prompt ? `\n${p.first_prompt}` : ''}`
+              : `${p.cwd ?? 'dossier inconnu'} · profil ${labelOf(p.profile).long} (${p.profile})${p.first_prompt ? `\n${p.first_prompt}` : ''}`
           }
-          aria-label={`${missing ? '' : 'Reprendre '}${label}${p.git_branch ? `, branche ${p.git_branch}` : ''}${missing ? ', dossier supprimé, reprise impossible' : ''}, profil ${p.profile}, ${relativeTime(last)}`}
+          aria-label={`${missing ? '' : 'Reprendre '}${label}${p.git_branch ? `, branche ${p.git_branch}` : ''}${missing ? ', dossier supprimé, reprise impossible' : ''}, profil ${labelOf(p.profile).long}, ${relativeTime(last)}`}
           onClick={() => void resume(p)}
         >
           <span className="st past" aria-hidden="true" />
+          <ProfileBadge profile={p.profile} profiles={props.profiles} />
           <span className="names">
             <span className="nm-t">{label}</span>
             {(p.git_branch || missing) && (
@@ -211,7 +225,7 @@ export function Sidebar(props: {
           aria-label={`Masquer « ${label} »`}
           title="Masquer cette ancienne session"
           disabled={busy === p.claude_session_id}
-          onClick={() => setConfirm(key)}
+          onClick={() => ask(key, () => props.onHidePast(p), 'Masquage')}
         >
           ×
         </button>
@@ -236,10 +250,13 @@ export function Sidebar(props: {
         <span className="lbl">Projets</span>
         <span className="hint">par dépôt git ou dossier</span>
       </div>
+      {error && (
+        <p className="inline-err" role="alert">
+          {error}
+        </p>
+      )}
       {props.groups.length === 0 && <p className="empty-note">Aucune session pour l’instant.</p>}
       {props.groups.map((g) => {
-        const profiles = new Set(g.sessions.map((s) => s.profile))
-        const single = profiles.size === 1 ? [...profiles][0]! : null
         const key = `proj:${g.key}`
         return (
           <Group
@@ -251,7 +268,7 @@ export function Sidebar(props: {
             onToggle={() => toggle(key)}
             extra={
               <>
-                {single && <span className={`chip ${profileClass(single, props.profiles)}`}>{single}</span>}
+                {g.missing && <span className="gone">dossier supprimé</span>}
                 {g.waiting > 0 && (
                   <span className="count" aria-label={`${g.waiting} à répondre`}>
                     {g.waiting} ⚠
@@ -274,11 +291,6 @@ export function Sidebar(props: {
           <span className="hint">à reprendre</span>
         </button>
         <div id={pastListId} hidden={!pastOpen}>
-          {error && (
-            <p className="inline-err" role="alert">
-              {error}
-            </p>
-          )}
           {props.past.length === 0 && <p className="empty-note">Aucune ancienne session trouvée.</p>}
           {props.pastGroups.map((g) => {
             const placeholder = g.key === RESOLVING_GROUP
@@ -293,12 +305,15 @@ export function Sidebar(props: {
                 open={placeholder ? resolvingOpen : !isCollapsed(key)}
                 onToggle={() => (placeholder ? setResolvingOpen((o) => !o) : toggle(key))}
                 extra={
+                  <>
+                  {g.missing && <span className="gone">dossier supprimé</span>}
                   <span
                     className="hint grp-n"
                     aria-label={`${g.entries.length} session${g.entries.length > 1 ? 's' : ''}, dernière activité ${relativeTime(latest)}`}
                   >
                     {g.entries.length} · {shortAgo(latest)}
                   </span>
+                  </>
                 }
               >
                 {g.entries.map(pastRow)}

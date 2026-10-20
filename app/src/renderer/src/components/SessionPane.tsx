@@ -26,7 +26,8 @@ import {
 import { displayedMode, idleMode, modeReducer, normalizeMode } from '../state/modeSwitch'
 import { glyphFor } from '../state/status'
 import { TerminalView } from '../terminal/TerminalView'
-import { Meter, StatusGlyph, profileClass } from './common'
+import { Meter, ProfileChip, StatusGlyph } from './common'
+import { useSettings } from '../settings'
 import { PermissionCard, QuestionCard } from './RequestCards'
 import { ForgetConfirm } from './ForgetConfirm'
 import { ColorBar, ColorPicker, RenameField } from './SessionIdentity'
@@ -99,6 +100,7 @@ function Header({
   const [error, setError] = useState<string | null>(null)
   const [renaming, setRenaming] = useState(false)
   const [forgetting, setForgetting] = useState(false)
+  const { settings } = useSettings()
   // `false` seulement si le démon l'affirme (absent : démon plus ancien, la reprise reste proposée).
   const block = resumeBlock(session, project)
   const missing = folderMissing(session, project)
@@ -170,9 +172,7 @@ function Header({
         <span className="where" title={`${project?.root ?? session.project_root ?? session.cwd} · ${branch}`}>
           {projectName} <span>/</span> {branch}
         </span>
-        <span className={`chip ${profileClass(session.profile, profiles)}`} title="Profil Claude Code">
-          {session.profile}
-        </span>
+        <ProfileChip profile={session.profile} profiles={profiles} />
         <span className="chip" title="Modèle">
           {model}
         </span>
@@ -246,7 +246,11 @@ function Header({
                 className="btn sm ghost"
                 disabled={busy !== null || forgetting}
                 title="Retirer cette session arrêtée de la liste de DevMaestro"
-                onClick={() => setForgetting(true)}
+                onClick={() => {
+                  if (settings.confirmRemoval) setForgetting(true)
+                  else
+                    onForget(session.id).catch((e: unknown) => setError(`Retrait impossible : ${errorText(e)}`))
+                }}
               >
                 Retirer de la liste
               </button>
@@ -321,6 +325,7 @@ export function SessionPane({
   profiles,
   stale,
   scheme,
+  themeKey,
   termSize,
   onTermSize,
   onLink,
@@ -332,6 +337,8 @@ export function SessionPane({
   profiles: Profile[]
   stale: number[]
   scheme: 'light' | 'dark'
+  /** Change à chaque changement de couleurs : le terminal relit les jetons. */
+  themeKey: string
   termSize: { cols: number; rows: number } | null
   onTermSize: (cols: number, rows: number) => void
   onLink: (url: string) => void
@@ -385,6 +392,7 @@ export function SessionPane({
           sessionId={session?.id ?? null}
           alive={session?.alive ?? false}
           scheme={scheme}
+          themeKey={themeKey}
           onSize={onTermSize}
           onLink={onLink}
           hostRef={termHost}

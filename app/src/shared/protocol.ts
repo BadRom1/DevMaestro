@@ -252,7 +252,8 @@ export interface Methods {
       cols?: number
       rows?: number
     }
-    result: { session: Session }
+    /** `warnings` : messages du démon en français (mode dangereux remplacé…). */
+    result: { session: Session; warnings?: string[] }
   }
   'sessions.resume': {
     params:
@@ -267,7 +268,7 @@ export interface Methods {
           cols?: number
           rows?: number
         }
-    result: { session: Session }
+    result: { session: Session; warnings?: string[] }
   }
   'sessions.resize': { params: { id: string; cols: number; rows: number }; result: { cols: number; rows: number } }
   'sessions.stop': { params: { id: string }; result: { stopping: boolean; alive: boolean } }

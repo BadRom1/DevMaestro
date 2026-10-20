@@ -4,6 +4,7 @@
   --fg: #dde2ec; --muted: #8a93a6; --faint: #5f6779;
   --accent: #86a8ff; --accent-ink: #0f1218;
   --wait: #f2a93b; --run: #55c4a2; --idle: #8a93a6; --done: #7fb069; --err: #ef6b6b; --stop: #6b7385;
+  --add: #55c4a2; --del: #ef6b6b;
   --sel: rgba(134, 168, 255, 0.3);
   --f-body: "IBM Plex Sans", system-ui, sans-serif;
   --f-label: "IBM Plex Sans Condensed", "IBM Plex Sans", system-ui, sans-serif;
@@ -19,7 +20,7 @@
     --bg: #eef1f6; --panel: #ffffff; --panel-2: #f3f5f9; --sunk: #f7f8fb; --line: #d9dee8; --line-2: #c9d0dc;
     --fg: #1a1f2c; --muted: #5b6476; --faint: #8b93a3;
     --accent: #2f5bd3; --accent-ink: #ffffff;
-    --wait: #b26a00; --run: #11866a; --idle: #6b7385; --done: #3f7d2c; --err: #c33b3b; --stop: #8b93a3;
+    --wait: #b26a00; --run: #11866a; --idle: #6b7385; --done: #3f7d2c; --err: #c33b3b; --stop: #8b93a3; --add: #11866a; --del: #c33b3b;
     --sel: rgba(47, 91, 211, 0.22);
     --col-gris: #7a8294; --col-bleu: #0072b2; --col-vert: #009e73; --col-jaune: #b8a200;
     --col-orange: #d18a00; --col-rouge: #d55e00; --col-violet: #7b5cc4; --col-rose: #cc79a7;
@@ -30,7 +31,7 @@
   --bg: #eef1f6; --panel: #ffffff; --panel-2: #f3f5f9; --sunk: #f7f8fb; --line: #d9dee8; --line-2: #c9d0dc;
   --fg: #1a1f2c; --muted: #5b6476; --faint: #8b93a3;
   --accent: #2f5bd3; --accent-ink: #ffffff;
-  --wait: #b26a00; --run: #11866a; --idle: #6b7385; --done: #3f7d2c; --err: #c33b3b; --stop: #8b93a3;
+  --wait: #b26a00; --run: #11866a; --idle: #6b7385; --done: #3f7d2c; --err: #c33b3b; --stop: #8b93a3; --add: #11866a; --del: #c33b3b;
   --sel: rgba(47, 91, 211, 0.22);
   --col-gris: #7a8294; --col-bleu: #0072b2; --col-vert: #009e73; --col-jaune: #b8a200;
   --col-orange: #d18a00; --col-rouge: #d55e00; --col-violet: #7b5cc4; --col-rose: #cc79a7;
@@ -102,8 +103,11 @@ button { cursor: pointer }
 @media (prefers-reduced-motion: reduce) { .st.running { animation: none } }
 
 .chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line-2); border-radius: 99px; padding: 0 7px; font-size: 11.5px; color: var(--muted); white-space: nowrap }
-.chip.p0 { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)) }
-.chip.p1 { border-color: color-mix(in srgb, var(--done) 55%, var(--line)) }
+/* Teintes de profil (décoratives : la lettre du badge et le libellé portent l'information). */
+.p0 { --pt: var(--accent) } .p1 { --pt: var(--col-violet) } .p2 { --pt: var(--col-vert) } .p3 { --pt: var(--col-orange) }
+.chip.p0, .chip.p1, .chip.p2, .chip.p3 { border-color: color-mix(in srgb, var(--pt) 55%, var(--line)) }
+.pbadge { display: inline-grid; place-items: center; flex: none; min-width: 16px; height: 16px; padding: 0 3px; border-radius: 4px; font-family: var(--f-label); font-size: 10.5px; font-weight: 600; line-height: 1; color: var(--fg); background: color-mix(in srgb, var(--pt, var(--muted)) 22%, transparent); border: 1px solid color-mix(in srgb, var(--pt, var(--muted)) 70%, transparent) }
+.chip .pbadge { margin-left: -4px }
 .chip.pend { color: var(--wait); border-color: var(--wait) }
 .chip.bad { color: var(--err); border-color: var(--err) }
 
@@ -143,7 +147,7 @@ button { cursor: pointer }
 .srow .nm-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .srow .names .br { font-size: 11px; color: var(--faint); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .srow .sub { display: flex; gap: 6px; align-items: center; min-width: 0 }
-.srow .gone { flex: none; font-size: 10.5px; color: var(--err); border: 1px solid currentColor; border-radius: 99px; padding: 0 5px; line-height: 1.4 }
+.srow .gone, .proj-h .gone { flex: none; font-size: 10.5px; color: var(--err); border: 1px solid currentColor; border-radius: 99px; padding: 0 5px; line-height: 1.4 }
 .srow .ago { margin-left: auto; font-size: 11.5px; color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums }
 .old { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 8px }
 .old .srow[aria-busy="true"] { opacity: .6 }
@@ -232,3 +236,51 @@ select.mode { background: var(--panel-2); border: 1px solid var(--line-2); borde
 .mf .err { color: var(--err); font-size: 12.5px; margin-right: auto }
 
 @media (max-width: 900px) { .viewA { grid-template-columns: 220px minmax(0, 1fr) } .grid3 { grid-template-columns: minmax(0, 1fr) } }
+
+/* Réglages et « Nouvelle session » (maquette) */
+.stabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); padding: 0 12px }
+.stabs.inline { padding: 0 }
+.stabs [role="tab"] { border: 0; background: transparent; padding: 8px 12px; color: var(--muted); border-bottom: 2px solid transparent; display: inline-flex; gap: 6px; align-items: center }
+.stabs [role="tab"][aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent) }
+.tabpanel { display: grid; gap: 12px }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px }
+.linkish { border: 0; background: none; padding: 0; color: var(--accent); text-decoration: underline; font-size: 11.5px }
+.linkish[disabled] { color: var(--faint); text-decoration: none }
+kbd { font-family: var(--f-mono); font-size: 11px; border: 1px solid var(--line-2); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--panel-2) }
+.resume-list { border: 1px solid var(--line); border-radius: var(--r); padding: 6px 8px; margin: 0; display: grid; gap: 2px; max-height: 220px; overflow: auto }
+.resume-list legend { padding: 0 4px }
+.rrow { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 5px; min-width: 0 }
+.rrow:hover { background: var(--panel-2) }
+.rrow .rname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 }
+.rrow .hint { white-space: nowrap }
+.presets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px }
+.preset { border: 1px solid var(--line-2); border-radius: 8px; padding: 9px 10px; background: transparent; text-align: left; display: grid; gap: 6px }
+.preset[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent) }
+.preset small { color: var(--muted); font-size: 11.5px }
+.preset .sw { display: flex; gap: 3px }
+.preset .sw i { width: 16px; height: 16px; border-radius: 3px; display: block; border: 1px solid rgba(127, 127, 127, .35) }
+.row-inline { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center }
+.colors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 18px }
+.crow { display: flex; align-items: center; gap: 8px; min-width: 0 }
+.crow input[type="color"] { width: 36px; height: 24px; padding: 0; border: 1px solid var(--line-2); border-radius: 4px; background: none; flex: none; cursor: pointer }
+.crow .nm { flex: 1; min-width: 0 }
+.crow .hex { font-family: var(--f-mono); font-size: 11.5px; color: var(--faint) }
+.preview { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 8px; background: var(--panel-2); color: var(--fg) }
+.preview .row { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; font-size: 12.5px }
+.preview .pv { display: inline-flex; gap: 6px; align-items: center }
+.preview .diff { font-family: var(--f-mono); font-size: 12px; border-radius: 4px; overflow: hidden }
+.preview .diff .add { background: color-mix(in srgb, var(--add) 13%, transparent); padding: 1px 6px }
+.preview .diff .del { background: color-mix(in srgb, var(--del) 13%, transparent); padding: 1px 6px }
+.callout { font-size: 12.5px; color: var(--muted); border-left: 2px solid var(--accent); padding-left: 10px; margin: 0 }
+.optrow { display: flex; gap: 8px; align-items: flex-start; font-size: 13px }
+.optrow input { margin-top: 3px }
+.lrow { display: grid; grid-template-columns: auto minmax(70px, 120px) minmax(0, 1fr) 64px auto; gap: 8px; align-items: center }
+.lrow .tech { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.lrow .inline-err { grid-column: 1 / -1; padding: 0 }
+.lrow input { background: var(--sunk); border: 1px solid var(--line-2); border-radius: var(--r); padding: 4px 8px; width: 100%; min-width: 0 }
+.pprofiles { display: grid; gap: 4px }
+.pprow { display: grid; grid-template-columns: minmax(0, 1fr) 200px; gap: 8px; align-items: center }
+.pprow .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.pprow select { background: var(--sunk); border: 1px solid var(--line-2); border-radius: var(--r); padding: 4px 8px }
+.conn.notice { border-color: var(--wait); justify-content: space-between }
+@media (max-width: 900px) { .grid2, .presets, .colors { grid-template-columns: minmax(0, 1fr) } }

@@ -9,10 +9,13 @@ import { NewSessionDialog } from './components/NewSessionDialog'
 import { SessionPane } from './components/SessionPane'
 import { Sidebar } from './components/Sidebar'
 import { TopBar } from './components/TopBar'
-import { fallbackProject, groupByProject, groupPast, pastToOffer, sidebarOrder, type PastEntry } from './state/projects'
+import { ancestorToResolve, fallbackProject, groupByProject, groupPast, pastToOffer, sidebarOrder, type PastEntry } from './state/projects'
 import { daemonSaysFolderExists } from './state/format'
 import { initialState, needsResolve, reducer } from './state/store'
-import { applyThemeMode, effectiveScheme, loadThemeMode, type ThemeMode } from './theme'
+import { SettingsDialog } from './components/SettingsDialog'
+import { useSettings } from './settings'
+import { buildProjectChoices } from './state/newSession'
+import { applyTheme, effectiveScheme, type ThemeMode } from './theme'
 
 function connectionText(c: ConnectionState): { text: string; bad: boolean } | null {
   switch (c.state) {
@@ -55,9 +58,17 @@ const RESOLVE_RETRY_MS = 60_000
 
 export function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
-  const [themeMode, setThemeMode] = useState<ThemeMode>(loadThemeMode)
+  const { settings, update: updateSettings } = useSettings()
+  const themeMode: ThemeMode = settings.theme.mode
   const scheme = useScheme(themeMode)
+  // Thème appliqué à chaque changement (mode, palette, couleurs) et quand le système change de mode.
+  useEffect(() => applyTheme(settings.theme), [settings.theme, scheme])
+  const themeKey = useMemo(() => `${scheme}:${JSON.stringify(settings.theme)}`, [scheme, settings.theme])
   const [dialog, setDialog] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const closeSettings = useCallback(() => setSettingsOpen(false), [])
+  /** Avertissements du démon au lancement (mode dangereux remplacé…). */
+  const [notices, setNotices] = useState<string[]>([])
   const [link, setLink] = useState<string | null>(null)
   const closeDialog = useCallback(() => setDialog(false), [])
   const closeLink = useCallback(() => setLink(null), [])
@@ -171,6 +182,11 @@ export function App() {
         p.cwd ? [{ cwd: p.cwd, project_root: null, exists: typeof p.cwd_exists === 'boolean' ? p.cwd_exists : undefined }] : [],
       ),
     ]
+    // Dossiers disparus : situer le plus haut ancêtre disparu (résolution des parents, un par un).
+    for (const d of [...dirs]) {
+      const up = ancestorToResolve(d.cwd, state.projects)
+      if (up) dirs.push({ cwd: up, project_root: null, exists: undefined })
+    }
     for (const s of dirs) {
       const opts = { daemonSaysExists: s.exists, rechecked: rechecked.current.has(s.cwd) }
       if (resolving.current.has(s.cwd) || !needsResolve(state, s.cwd, Date.now(), opts)) continue
@@ -222,11 +238,20 @@ export function App() {
     [termSize],
   )
 
-  const onLaunched = useCallback((s: Session) => {
+  const onLaunched = useCallback((s: Session, warnings: string[]) => {
     dispatch({ type: 'session.updated', session: s })
     dispatch({ type: 'select', id: s.id })
+    setNotices(warnings.filter((w) => typeof w === 'string' && w.trim() !== ''))
     setDialog(false)
   }, [])
+
+  // Clic sur une notification desktop : afficher la session.
+  useEffect(() => api.onSelectSession?.((id) => dispatch({ type: 'select', id })), [])
+
+  const projectChoices = useMemo(
+    () => buildProjectChoices({ sessions, past, projects: state.projects, home }),
+    [sessions, past, state.projects, home],
+  )
 
   /** Masque une ancienne session (`transcripts.hide`) ; retirée aussitôt de la liste. */
   const hidePast = useCallback(async (p: PastEntry) => {
@@ -258,16 +283,23 @@ export function App() {
         waitingCount={waiting.length}
         onNextWaiting={() => waiting[0] && select(waiting[0].id)}
         themeMode={themeMode}
-        onTheme={(m) => {
-          // Appliqué tout de suite : le terminal relit les jetons au rendu suivant.
-          applyThemeMode(m)
-          setThemeMode(m)
-        }}
+        onTheme={(m) => updateSettings({ theme: { ...settings.theme, mode: m } })}
         onNew={() => setDialog(true)}
+        onSettings={() => setSettingsOpen(true)}
       />
       <div className={`conn${banner?.bad ? ' bad' : ''}`} role="status" aria-live="polite" hidden={!banner}>
         {banner?.text}
       </div>
+      {notices.length > 0 && (
+        <div className="conn notice" role="alert">
+          <span>
+            <b>Avertissement du démon :</b> {notices.join(' ')}
+          </span>
+          <button className="btn sm ghost" onClick={() => setNotices([])} aria-label="Fermer l’avertissement">
+            ×
+          </button>
+        </div>
+      )}
       <main className="viewA">
         <Sidebar
           groups={groups}
@@ -288,6 +320,7 @@ export function App() {
           profiles={state.profiles}
           stale={selected ? (state.stale[selected.id] ?? []) : []}
           scheme={scheme}
+          themeKey={themeKey}
           termSize={termSize}
           onTermSize={onTermSize}
           onLink={setLink}
@@ -298,10 +331,24 @@ export function App() {
       {dialog && (
         <NewSessionDialog
           profiles={state.profiles}
-          defaultCwd={selectedProject?.worktree_root ?? selected?.cwd ?? ''}
+          sessions={sessions}
+          past={past}
+          projects={state.projects}
+          home={home}
+          projectProfiles={settings.projectProfiles}
+          initialCwd={selected?.cwd ?? null}
           termSize={termSize}
           onClose={closeDialog}
           onLaunched={onLaunched}
+        />
+      )}
+      {settingsOpen && (
+        <SettingsDialog
+          profiles={state.profiles}
+          projects={projectChoices}
+          home={home}
+          scheme={scheme}
+          onClose={closeSettings}
         />
       )}
       {link && <LinkDialog url={link} onClose={closeLink} />}

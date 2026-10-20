@@ -1,6 +1,8 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 
+import { useSettings } from '../settings'
 import { truncateStart } from '../state/format'
+import { profileTone } from '../state/profileTone'
 import type { Glyph } from '../state/status'
 import { meterLevel } from '../state/quotas'
 
@@ -32,8 +34,31 @@ export function Meter({ pct, width, label }: { pct: number | null | undefined; w
 }
 
 export function profileClass(profile: string, profiles: { name: string }[]): string {
-  const i = profiles.findIndex((p) => p.name === profile)
-  return i < 0 ? '' : `p${i % 2}`
+  return `p${profileTone(profile, profiles)}`
+}
+
+/** Badge court d'un profil (« P », « W ») ; libellé long et nom technique en infobulle. */
+export function ProfileBadge({ profile, profiles }: { profile: string; profiles: { name: string }[] }) {
+  const { label } = useSettings()
+  const l = label(profile)
+  const tip = `Profil ${l.long} (${profile})`
+  return (
+    <span className={`pbadge ${profileClass(profile, profiles)}`} title={tip} aria-hidden="true">
+      {l.short}
+    </span>
+  )
+}
+
+/** Libellé long d'un profil, badge compris, nom technique en infobulle. */
+export function ProfileChip({ profile, profiles, className = '' }: { profile: string; profiles: { name: string }[]; className?: string }) {
+  const { label } = useSettings()
+  const l = label(profile)
+  return (
+    <span className={`chip ${profileClass(profile, profiles)} ${className}`.trim()} title={`Profil Claude Code ${l.long} (${profile})`}>
+      <ProfileBadge profile={profile} profiles={profiles} />
+      {l.long}
+    </span>
+  )
 }
 
 /** Largeur d'un caractère de la police (à chasse fixe) de `el`, mesurée sur un canevas. */

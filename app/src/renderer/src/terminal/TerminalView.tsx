@@ -34,6 +34,7 @@ export function TerminalView({
   sessionId,
   alive,
   scheme,
+  themeKey,
   onSize,
   onLink,
   emptyText,
@@ -42,6 +43,8 @@ export function TerminalView({
   sessionId: string | null
   alive: boolean
   scheme: 'light' | 'dark'
+  /** Clé des couleurs du thème (palette, couleurs choisies). */
+  themeKey?: string
   onSize?: (cols: number, rows: number) => void
   /** Lien OSC 8 activé dans le terminal (http/https seulement). */
   onLink?: (url: string) => void
@@ -221,7 +224,7 @@ export function TerminalView({
 
   useEffect(() => {
     if (live.current) live.current.term.options.theme = terminalTheme(scheme)
-  }, [scheme, ready])
+  }, [scheme, themeKey, ready])
 
   return (
     <div className="term">

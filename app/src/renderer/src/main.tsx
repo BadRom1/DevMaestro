@@ -11,15 +11,41 @@ import './styles.css'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 
-import { requestTerminalPort } from './api'
+import { defaultSettings, normalizeSettings, type AppSettings } from '../../shared/settings'
+import { api, requestTerminalPort } from './api'
 import { App } from './App'
-import { applyThemeMode, loadThemeMode } from './theme'
+import { SettingsProvider } from './settings'
+import { applyTheme, legacyThemeMode } from './theme'
 
-applyThemeMode(loadThemeMode())
+/** Réglages du processus principal avant le premier rendu (pas d'éclair de thème). */
+async function loadSettings(): Promise<AppSettings> {
+  try {
+    const r = await Promise.race([
+      Promise.resolve(api.settings?.()),
+      new Promise<null>((ok) => setTimeout(() => ok(null), 2000)),
+    ])
+    if (!r) return defaultSettings()
+    let s = normalizeSettings(r.settings)
+    // Premier lancement après le lot 4 : reprendre le mode choisi alors (stocké dans la page).
+    const legacy = r.fresh ? legacyThemeMode() : null
+    if (legacy && legacy !== s.theme.mode) {
+      s = { ...s, theme: { ...s.theme, mode: legacy } }
+      void api.updateSettings({ theme: s.theme })
+    }
+    return s
+  } catch {
+    return defaultSettings()
+  }
+}
+
 requestTerminalPort()
-
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-)
+void loadSettings().then((initial) => {
+  applyTheme(initial.theme)
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <SettingsProvider initial={initial}>
+        <App />
+      </SettingsProvider>
+    </StrictMode>,
+  )
+})

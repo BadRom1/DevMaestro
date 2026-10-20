@@ -17,12 +17,17 @@ export function Modal({
   onClose,
   children,
   width,
+  busy = false,
 }: {
   title: string
   onClose: () => void
   children: ReactNode
   width?: number
+  /** Action en cours : Échap, le fond et × ne ferment pas. */
+  busy?: boolean
 }) {
+  const busyRef = useRef(busy)
+  busyRef.current = busy
   const titleId = useId()
   const box = useRef<HTMLDivElement>(null)
   const onCloseRef = useRef(onClose)
@@ -40,7 +45,7 @@ export function Modal({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
-        onCloseRef.current()
+        if (!busyRef.current) onCloseRef.current()
         return
       }
       if (e.key !== 'Tab' || !box.current) return
@@ -68,7 +73,7 @@ export function Modal({
   }, [])
 
   return (
-    <div className="scrim" onMouseDown={(e) => e.target === e.currentTarget && onCloseRef.current()}>
+    <div className="scrim" onMouseDown={(e) => e.target === e.currentTarget && !busyRef.current && onCloseRef.current()}>
       <div
         className="modal"
         role="dialog"
@@ -79,7 +84,7 @@ export function Modal({
       >
         <div className="mh">
           <h2 id={titleId}>{title}</h2>
-          <button className="btn ghost sm x" onClick={() => onCloseRef.current()} aria-label="Fermer">
+          <button className="btn ghost sm x" onClick={() => onCloseRef.current()} aria-label="Fermer" disabled={busy}>
             ×
           </button>
         </div>

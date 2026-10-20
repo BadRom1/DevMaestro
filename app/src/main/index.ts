@@ -10,7 +10,10 @@ import path from 'node:path'
 import {
   BrowserWindow,
   MessageChannelMain,
+  Notification,
   app,
+  clipboard,
+  dialog,
   ipcMain,
   session,
   shell,
@@ -21,7 +24,10 @@ import {
 
 import { Ipc, type CallResult, type PortDown, type RpcFailure } from '../shared/bridge'
 import { validHome } from '../shared/home'
-import { ErrorCode, RENDERER_METHODS, type MethodName } from '../shared/protocol'
+import { ErrorCode, RENDERER_METHODS, type Demand, type Effect, type MethodName, type Session } from '../shared/protocol'
+import { SettingsError } from '../shared/settings'
+import { NotifyDecider, notificationContent } from './notifyLogic'
+import { SettingsStore } from './settingsStore'
 import { DaemonClient } from './daemon/client'
 import { defaultSocketPath } from './daemon/paths'
 import { TerminalRelay } from './daemon/relay'
@@ -56,12 +62,96 @@ const client = new DaemonClient({
   log,
 })
 const relay = new TerminalRelay(client, { log })
+const settings = new SettingsStore(app.getPath('userData'), log)
+const settingsLoaded = settings.load()
+
+/* ---------- Notifications desktop ---------- */
+
+/** Dernier état connu de chaque session (titre des notifications). */
+const sessionCache = new Map<string, Session>()
+const decider = new NotifyDecider()
+/** Notification visible par session (gardée en référence : sinon ramassée avec ses gestionnaires). */
+const live = new Map<string, Notification>()
+
+function closeNotification(id: string): void {
+  const n = live.get(id)
+  if (!n) return
+  live.delete(id)
+  n.close()
+}
+
+function focusSession(id: string): void {
+  const win = mainWindow
+  if (!win) return
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+  toPage(Ipc.selectSession, id)
+}
+
+async function notifyWaiting(sessionId: string, requestId: number, demand: Demand): Promise<void> {
+  const decision = decider.decide(sessionId, requestId, {
+    enabled: settings.settings.notifications.enabled && Notification.isSupported(),
+    windowFocused: mainWindow?.isFocused() ?? false,
+    visibleSessionId: relay.visible,
+  })
+  if (decision.action === 'skip') return
+  let s = sessionCache.get(sessionId) ?? null
+  if (!s) {
+    try {
+      s = ((await client.request('sessions.get', { id: sessionId })) as { session: Session }).session
+      sessionCache.set(sessionId, s)
+    } catch {
+      /* titre de repli */
+    }
+  }
+  // La demande a pu être close pendant l'attente : ne jamais notifier une demande résolue.
+  if (!decider.stillExpected(sessionId, requestId)) return
+  if (decision.replace) closeNotification(sessionId)
+  const { title, body } = notificationContent(s, demand)
+  // Pas de son : les hooks de l'utilisateur (peon-ping) s'en chargent.
+  const n = new Notification({ title, body, silent: true, urgency: 'normal' })
+  n.on('click', () => {
+    decider.dismissed(sessionId)
+    live.delete(sessionId)
+    focusSession(sessionId)
+  })
+  n.on('close', () => {
+    if (live.get(sessionId) === n) {
+      live.delete(sessionId)
+      decider.dismissed(sessionId)
+    }
+  })
+  live.set(sessionId, n)
+  n.show()
+}
+
+function onEffect(id: string, effect: Effect): void {
+  if (effect.type === 'notify_waiting') void notifyWaiting(id, effect.request_id, effect.pending)
+  else if (effect.type === 'request_resolved' && decider.resolved(id, effect.request_id)) closeNotification(id)
+}
 
 client.on('pty', (id, data) => relay.onPty(id, data))
 client.on('notification', (n) => {
   if (n.method === 'session.resync') {
     relay.onNotification(n)
     return
+  }
+  if (n.method === 'session.updated') {
+    const s = (n.params as { session?: Session }).session
+    if (s?.id) {
+      sessionCache.set(s.id, s)
+      if (decider.stale(s.id, s.pending.map((p) => p.request_id))) closeNotification(s.id)
+    }
+  } else if (n.method === 'session.effect') {
+    const p = n.params as { id?: string; effect?: Effect }
+    if (typeof p.id === 'string' && p.effect) onEffect(p.id, p.effect)
+  } else if (n.method === 'session.removed') {
+    const id = (n.params as { id?: string }).id
+    if (typeof id === 'string') {
+      sessionCache.delete(id)
+      if (decider.stale(id, null)) closeNotification(id)
+    }
   }
   if (n.method === 'session.updated' || n.method === 'session.effect' || n.method === 'session.removed' || n.method === 'quotas.updated') {
     toPage(Ipc.notification, { method: n.method, params: n.params })
@@ -74,6 +164,8 @@ client.on('state', (s) => {
 })
 
 let mainWindow: BrowserWindow | null = null
+/** Contenus de la page de la fenêtre (gardé après sa fermeture, pour les réglages envoyés en partant). */
+let pageContentsId: number | null = null
 let port: MessagePortMain | null = null
 
 function toPage(channel: string, payload: unknown): void {
@@ -133,6 +225,7 @@ function createWindow(): BrowserWindow {
       devTools: dev,
     },
   })
+  pageContentsId = win.webContents.id
   win.once('ready-to-show', () => win.show())
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null
@@ -234,6 +327,46 @@ function registerIpc(): void {
   })
   ipcMain.handle(Ipc.connection, (e) => (trusted(e) ? client.state : null))
   ipcMain.handle(Ipc.home, (e) => (trusted(e) ? validHome(homedir()) : null))
+  ipcMain.handle(Ipc.settingsGet, async (e) => {
+    if (!trusted(e)) return null
+    await settingsLoaded
+    return { settings: settings.settings, fresh: settings.fresh }
+  })
+  ipcMain.handle(Ipc.settingsSet, async (e, patch: unknown) => {
+    if (!trusted(e)) return UNTRUSTED
+    await settingsLoaded
+    try {
+      return { ok: true, settings: await settings.update(patch) }
+    } catch (err) {
+      if (err instanceof SettingsError) {
+        return { ok: false, error: { code: ErrorCode.InvalidParams, message: `réglages refusés : ${err.message}` } }
+      }
+      return failure(err)
+    }
+  })
+  // Fermeture de la page : réglages en attente, appliqués tout de suite (écriture attendue avant de quitter).
+  ipcMain.on(Ipc.settingsFlush, (e, patch: unknown) => {
+    // La fenêtre peut être en train de se fermer : on reconnaît sa page par l'identifiant de ses contenus.
+    if (!trusted(e) && !(pageContentsId !== null && e.sender.id === pageContentsId && e.senderFrame?.parent == null)) return
+    void settingsLoaded.then(() =>
+      settings.update(patch).catch((err: unknown) => log(`réglages de fermeture non enregistrés : ${(err as Error).message}`)),
+    )
+  })
+  ipcMain.handle(Ipc.pickFolder, async (e) => {
+    if (!trusted(e) || !mainWindow) return null
+    const r = await dialog.showOpenDialog(mainWindow, {
+      title: 'Dossier de la session',
+      properties: ['openDirectory', 'dontAddToRecent'],
+    })
+    const p = r.canceled ? null : (r.filePaths[0] ?? null)
+    // Chemin absolu, sans caractère nul (le démon vérifie qu'il existe).
+    return p && path.isAbsolute(p) && !p.includes('\0') && p.length <= 4096 ? p : null
+  })
+  ipcMain.handle(Ipc.copyText, (e, text: unknown) => {
+    if (!trusted(e) || typeof text !== 'string' || text.length > 100_000) return false
+    clipboard.writeText(text)
+    return true
+  })
   ipcMain.handle(Ipc.openExternal, async (e, url: unknown) => {
     if (!trusted(e)) return UNTRUSTED
     try {
@@ -263,6 +396,19 @@ void app.whenReady().then(() => {
   mainWindow = createWindow()
   // Le processus GPU tourne une fois la première image prête.
   mainWindow.once('ready-to-show', () => setTimeout(logDisplayPlatform, 300))
+})
+
+// Avant de quitter : terminer l'écriture des réglages (une seule fois).
+let settingsFlushed = false
+app.on('before-quit', (e) => {
+  if (settingsFlushed) return
+  e.preventDefault()
+  settingsFlushed = true
+  // Les réglages envoyés à la fermeture de la page passent d'abord par `settingsLoaded`.
+  void settingsLoaded
+    .then(() => new Promise((ok) => setImmediate(ok)))
+    .then(() => settings.flush())
+    .finally(() => app.quit())
 })
 
 // Une seule fenêtre : la fermer quitte l'app. Le démon et les sessions continuent.

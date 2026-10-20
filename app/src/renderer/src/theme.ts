@@ -1,33 +1,39 @@
-/** Thème clair / sombre / auto, porté par `data-theme` sur `<html>`. */
+/** Thème clair / sombre / auto, palettes et couleurs personnalisées, appliqués sur `<html>`. */
 import type { ITheme } from '@xterm/xterm'
 
-export type ThemeMode = 'light' | 'dark' | 'system'
-const KEY = 'devmaestro.theme'
+import type { ThemeSettings } from '../../shared/settings'
+import { ALL_OVERRIDABLE, resolveScheme, themeOverrides, type Scheme } from './state/themeTokens'
 
-export function loadThemeMode(): ThemeMode {
+export type { ThemeMode } from '../../shared/settings'
+
+/** Ancienne clé (lot 4) : lue une fois pour reprendre le mode choisi. */
+export const LEGACY_THEME_KEY = 'devmaestro.theme'
+
+export function legacyThemeMode(): ThemeSettings['mode'] | null {
   try {
-    const v = localStorage.getItem(KEY)
-    if (v === 'light' || v === 'dark' || v === 'system') return v
+    const v = localStorage.getItem(LEGACY_THEME_KEY)
+    return v === 'light' || v === 'dark' || v === 'system' ? v : null
   } catch {
-    /* stockage indisponible */
+    return null
   }
-  return 'system'
 }
 
-export function applyThemeMode(mode: ThemeMode): void {
+export function systemPrefersLight(): boolean {
+  return window.matchMedia('(prefers-color-scheme: light)').matches
+}
+
+export function effectiveScheme(mode: ThemeSettings['mode']): Scheme {
+  return resolveScheme(mode, systemPrefersLight())
+}
+
+/** Pose `data-theme` et les couleurs de la palette et de l'utilisateur pour le mode affiché. */
+export function applyTheme(theme: ThemeSettings): void {
   const root = document.documentElement
-  if (mode === 'system') delete root.dataset.theme
-  else root.dataset.theme = mode
-  try {
-    localStorage.setItem(KEY, mode)
-  } catch {
-    /* stockage indisponible */
-  }
-}
-
-export function effectiveScheme(mode: ThemeMode): 'light' | 'dark' {
-  if (mode !== 'system') return mode
-  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+  if (theme.mode === 'system') delete root.dataset.theme
+  else root.dataset.theme = theme.mode
+  for (const k of ALL_OVERRIDABLE) root.style.removeProperty(`--${k}`)
+  const values = themeOverrides(theme, effectiveScheme(theme.mode))
+  for (const [k, v] of Object.entries(values)) root.style.setProperty(`--${k}`, v)
 }
 
 function token(name: string): string {

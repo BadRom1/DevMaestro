@@ -3,41 +3,9 @@
  * proposées pour « Toujours », réponses aux questions.
  */
 import type { PendingRequest, Question, QuestionAnswers } from '../../../shared/protocol'
+import { str, summarizeToolInput, truncate } from '../../../shared/summary'
 
-function str(v: unknown): string | null {
-  return typeof v === 'string' && v.length > 0 ? v : null
-}
-
-function truncate(s: string, max = 400): string {
-  return s.length > max ? s.slice(0, max - 1) + '…' : s
-}
-
-/** Résumé lisible de l'entrée d'un outil (commande, fichier, URL…). */
-export function summarizeToolInput(tool: string, input: unknown): string {
-  const o = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
-  switch (tool) {
-    case 'Bash':
-      return truncate(str(o.command) ?? JSON.stringify(input))
-    case 'Edit':
-    case 'MultiEdit':
-    case 'Write':
-    case 'Read':
-    case 'NotebookEdit':
-      return str(o.file_path) ?? str(o.notebook_path) ?? truncate(JSON.stringify(input))
-    case 'WebFetch':
-      return str(o.url) ?? truncate(JSON.stringify(input))
-    case 'WebSearch':
-      return str(o.query) ?? truncate(JSON.stringify(input))
-    case 'Glob':
-    case 'Grep': {
-      const p = str(o.pattern)
-      const path = str(o.path)
-      return p ? (path ? `${p} dans ${path}` : p) : truncate(JSON.stringify(input))
-    }
-    default:
-      return input === undefined ? '' : truncate(JSON.stringify(input))
-  }
-}
+export { summarizeToolInput }
 
 const DESTINATIONS: Record<string, string> = {
   localSettings: 'réglages locaux du projet',

@@ -14,6 +14,45 @@ export interface ProjectGroup {
   isGit: boolean
   sessions: Session[]
   waiting: number
+  /** Le dossier du groupe a disparu (déplacé ou supprimé). */
+  missing: boolean
+}
+
+function parentDir(p: string): string | null {
+  const t = p.replace(/\/+$/, '')
+  const i = t.lastIndexOf('/')
+  if (i <= 0) return t === '' || t === '/' ? null : '/'
+  return t.slice(0, i)
+}
+
+/** Dossier disparu sans dépôt retrouvé par le démon (ni ancêtre retenu) ? */
+function orphanMissing(info: ProjectInfo | undefined): boolean {
+  return !!info && info.exists === false && !info.is_git && !(info.inferred && info.root)
+}
+
+/**
+ * Pour un dossier disparu sans dépôt retrouvé : le plus haut ancêtre disparu
+ * juste sous le dossier existant le plus proche (ex. `…/planner` pour
+ * `…/planner/wonderful-elbakyan-3dac24` quand tout `planner` a été déplacé).
+ * On remonte tant que le parent est connu comme disparu (`projects.resolve`
+ * mis en cache) ; un parent pas encore résolu arrête la remontée (voir
+ * `ancestorToResolve`). `null` si le dossier n'est pas dans ce cas.
+ */
+export function missingGroupDir(cwd: string, projects: Record<string, ProjectInfo>): string | null {
+  if (!orphanMissing(projects[cwd])) return null
+  let dir = cwd
+  for (let parent = parentDir(dir); parent && projects[parent]?.exists === false; parent = parentDir(dir)) {
+    dir = parent
+  }
+  return dir
+}
+
+/** Prochain ancêtre à résoudre pour situer un dossier disparu, ou `null`. */
+export function ancestorToResolve(cwd: string, projects: Record<string, ProjectInfo>): string | null {
+  const top = missingGroupDir(cwd, projects)
+  if (!top) return null
+  const parent = parentDir(top)
+  return parent && !projects[parent] ? parent : null
 }
 
 export function projectKey(s: Pick<Session, 'cwd' | 'project_root'>, info: ProjectInfo | undefined): string {
@@ -47,14 +86,15 @@ export function groupByProject(
   const groups = new Map<string, ProjectGroup>()
   for (const s of sessions) {
     const info = projects[s.cwd]
-    const key = projectKey(s, info)
+    const gone = missingGroupDir(s.cwd, projects)
+    const key = gone ?? projectKey(s, info)
     let g = groups.get(key)
     if (!g) {
-      const root = info?.root ?? s.project_root ?? s.cwd
+      const root = gone ?? info?.root ?? s.project_root ?? s.cwd
       const isGit = info?.is_git ?? false
       // Hors dépôt : groupe par dossier, nommé comme lui (« ~ » pour le dossier personnel).
       const name = isGit ? (info?.name ?? basename(root)) : folderName(root, home)
-      g = { key, root, name, isGit, sessions: [], waiting: 0 }
+      g = { key, root, name, isGit, sessions: [], waiting: 0, missing: !!gone }
       groups.set(key, g)
     }
     g.sessions.push(s)
@@ -105,6 +145,8 @@ export interface PastGroup {
   entries: PastEntry[]
   /** Activité la plus récente du groupe. */
   latest: number
+  /** Le dossier du groupe a disparu (déplacé ou supprimé, sans dépôt retrouvé). */
+  missing: boolean
 }
 
 /**
@@ -121,6 +163,7 @@ export function groupPast(entries: PastEntry[], projects: Record<string, Project
     let name: string
     let root: string | null
     let isGit = false
+    let missing = false
     const info = p.cwd ? projects[p.cwd] : undefined
     if (!p.cwd) {
       key = 'dossier:?'
@@ -137,15 +180,18 @@ export function groupPast(entries: PastEntry[], projects: Record<string, Project
       name = info.name ?? basename(top)
       isGit = true
     } else {
-      // Hors dépôt : le dossier, ou pour un dossier disparu l'ancêtre retenu par le démon.
-      const dir = info.root || p.cwd
+      // Hors dépôt : le dossier ; pour un dossier disparu, l'ancêtre retenu par le
+      // démon, sinon le plus haut ancêtre disparu (voir `missingGroupDir`).
+      const gone = missingGroupDir(p.cwd, projects)
+      if (gone) missing = true
+      const dir = gone ?? (info.root || p.cwd)
       key = `dossier:${dir}`
       root = dir
       name = folderName(dir, home)
     }
     let g = groups.get(key)
     if (!g) {
-      g = { key, name, root, isGit, entries: [], latest: 0 }
+      g = { key, name, root, isGit, entries: [], latest: 0, missing }
       groups.set(key, g)
     }
     g.entries.push(p)

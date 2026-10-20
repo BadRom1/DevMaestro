@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import type { DaemonProfileQuota, Profile, Session } from '../../../shared/protocol'
 import { errorText } from '../api'
+import { useSettings } from '../settings'
 import { formatReset, relativeTime } from '../state/format'
 import {
   QUOTA_REFRESH_MS,
@@ -12,7 +13,7 @@ import {
   type WindowMeta,
 } from '../state/quotas'
 import type { ThemeMode } from '../theme'
-import { Meter, StatusGlyph, profileClass } from './common'
+import { Meter, ProfileChip, StatusGlyph } from './common'
 
 const THEMES: [ThemeMode, string][] = [
   ['light', 'Clair'],
@@ -58,8 +59,8 @@ function QuotaLine({
   )
 }
 
-function quotaTitle(q: QuotaView): string {
-  const parts = [`Forfait du profil ${q.profile}`]
+function quotaTitle(q: QuotaView, label: string): string {
+  const parts = [`Forfait du profil ${label} (${q.profile})`]
   if (q.source) parts.push(`source : ${sourceLabel(q.source)}`)
   if (q.fetchedAt) parts.push(`relevé ${relativeTime(q.fetchedAt)}`)
   if (q.error) parts.push(`erreur : ${q.error}`)
@@ -142,7 +143,9 @@ export function TopBar(props: {
   themeMode: ThemeMode
   onTheme: (m: ThemeMode) => void
   onNew: () => void
+  onSettings: () => void
 }) {
+  const { label: labelOf } = useSettings()
   const quotas = quotaViews(props.sessions, props.profiles, props.daemonQuotas)
   return (
     <header className="top">
@@ -152,8 +155,8 @@ export function TopBar(props: {
       </div>
       <div className="quotas" aria-label="Quotas par profil">
         {quotas.map((q) => (
-          <div className="quota" key={q.profile} title={quotaTitle(q)}>
-            <span className={`who chip ${profileClass(q.profile, props.profiles)}`}>{q.profile}</span>
+          <div className="quota" key={q.profile} title={quotaTitle(q, labelOf(q.profile).long)}>
+            <ProfileChip profile={q.profile} profiles={props.profiles} className="who" />
             <QuotaLine k="5 h" pct={q.fiveHour?.used_pct ?? null} reset={formatReset(q.fiveHour?.resets_at)} error={q.error} meta={q.fiveHourMeta} />
             <QuotaLine k="hebdo" pct={q.sevenDay?.used_pct ?? null} reset={formatReset(q.sevenDay?.resets_at)} error={q.error} meta={q.sevenDayMeta} />
           </div>
@@ -183,6 +186,9 @@ export function TopBar(props: {
           </button>
         ))}
       </div>
+      <button className="btn" onClick={props.onSettings}>
+        Réglages
+      </button>
       <button className="btn pri" onClick={props.onNew}>
         + Nouvelle session
       </button>

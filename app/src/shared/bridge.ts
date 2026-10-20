@@ -10,6 +10,7 @@
  *   suivent.
  */
 import type { Methods, MethodName, Notification, Snapshot } from './protocol'
+import type { AppSettings, SettingsPatch } from './settings'
 
 export type ConnectionState =
   | { state: 'connecting'; attempt: number; detail?: string }
@@ -50,6 +51,21 @@ export interface DevMaestroApi {
   openExternal(url: string): Promise<{ ok: true } | { ok: false; error: RpcFailure }>
   /** Dossier personnel de l'utilisateur (lecture seule), `null` si inconnu. */
   home(): Promise<string | null>
+  /** Réglages de l'app (gardés par le processus principal). `fresh` : aucun fichier encore. */
+  settings(): Promise<{ settings: AppSettings; fresh: boolean } | null>
+  /** Modifie les réglages (validés par le processus principal) ; renvoie les réglages à jour. */
+  updateSettings(patch: SettingsPatch): Promise<{ ok: true; settings: AppSettings } | { ok: false; error: RpcFailure }>
+  /** Sélecteur de dossier du système ; `null` si annulé. */
+  pickFolder(): Promise<string | null>
+  /**
+   * Envoi sans réponse des réglages pas encore enregistrés, à la fermeture de
+   * la page (le processus principal les écrit avant de quitter).
+   */
+  flushSettings(patch: SettingsPatch): void
+  /** Copie un texte dans le presse-papiers. */
+  copyText(text: string): Promise<boolean>
+  /** Une notification desktop a été cliquée : afficher cette session. */
+  onSelectSession(cb: (id: string) => void): () => void
 }
 
 /** Messages du canal du terminal, processus principal → page. */
@@ -86,4 +102,10 @@ export const Ipc = {
   port: 'devmaestro:port',
   openExternal: 'devmaestro:open-external',
   home: 'devmaestro:home',
+  settingsGet: 'devmaestro:settings-get',
+  settingsSet: 'devmaestro:settings-set',
+  settingsFlush: 'devmaestro:settings-flush',
+  pickFolder: 'devmaestro:pick-folder',
+  copyText: 'devmaestro:copy-text',
+  selectSession: 'devmaestro:select-session',
 } as const
