@@ -17,6 +17,7 @@ const FRIENDLY: Record<number, string> = {
   [-32016]: 'le dossier de la session n’existe plus (worktree supprimé ?)',
   [ErrorCode.WorktreeBusy]: 'une session tourne dans ce worktree : arrête-la d’abord',
   [ErrorCode.WorktreeDirty]: 'le worktree a des modifications non commitées',
+  [ErrorCode.FileChanged]: 'le fichier a été modifié depuis son ouverture',
   [ErrorCode.Timeout]: 'le démon n’a pas répondu à temps',
   [ErrorCode.Disconnected]: 'démon non connecté',
 }

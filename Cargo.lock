@@ -190,6 +190,7 @@ dependencies = [
  "nix 0.31.3",
  "notify",
  "portable-pty",
+ "ring",
  "rusqlite",
  "serde_json",
  "tempfile",

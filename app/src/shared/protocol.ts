@@ -474,13 +474,29 @@ export interface FilesList {
   truncated: boolean
 }
 
+/** Empreinte d'un fichier lu ou écrit (lot 7) : `sha256` du contenu, en hexadécimal minuscule. */
+export interface FileVersion {
+  size: number
+  mtime_ns: number | string
+  sha256: string
+}
+
 export interface FileContent {
   path: string
   size: number | null
   binary: boolean
   too_large: boolean
   content: string | null
+  /** Empreinte du contenu lu (lot 7) : `null` si trop gros ; absente avec un démon plus ancien (pas d'édition). */
+  version?: FileVersion | null
+  /** Modifiable dans l'app (lot 7) ; absent avec un démon d'avant (déduit du reste). */
+  editable?: boolean
+  /** Raison, en français, quand `editable` est faux. */
+  not_editable_reason?: string | null
 }
+
+/** Taille maximale d'un fichier écrit par `files.write` (octets UTF-8). */
+export const MAX_FILE_WRITE_BYTES = 2 * 1024 * 1024
 
 /* ---------- Sous-agents (v0.2, lot 5) ---------- */
 
@@ -748,6 +764,15 @@ export interface Methods {
   'sessions.input': { params: { id: string; data: string }; result: unknown }
   'files.list': { params: { id: string; path?: string }; result: FilesList }
   'files.read': { params: { id: string; path: string }; result: FileContent }
+  /**
+   * Écriture d'un fichier texte (lot 7) : `expected` est l'empreinte de la
+   * version ouverte (`null` : création d'un fichier qui n'existe pas).
+   * Conflit : `-32021`, `data: {version}` (version actuelle).
+   */
+  'files.write': {
+    params: { id: string; path: string; content: string; expected: { sha256: string } | null }
+    result: { version: FileVersion }
+  }
   /** Sous-agents de la session, par ordre de lancement, sans `report`. */
   'sessions.subagents': { params: { id: string }; result: { agents: Subagent[] } }
   /** Un sous-agent avec son `report`. */
@@ -803,6 +828,7 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'sessions.commitDiffFile',
   'files.list',
   'files.read',
+  'files.write',
   'sessions.input',
   'sessions.subagents',
   'sessions.subagent',
@@ -829,6 +855,8 @@ export const ErrorCode = {
   WorktreeBusy: -32019,
   /** `worktrees.remove` sans `force` : modifications non commitées (`data` : liste courte des fichiers). */
   WorktreeDirty: -32020,
+  /** `files.write` : le fichier a changé depuis son ouverture (`data` : `{version}` actuelle). */
+  FileChanged: -32021,
   /** Côté client : délai dépassé, connexion perdue (hors protocole). */
   Timeout: -1,
   Disconnected: -2,

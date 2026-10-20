@@ -441,15 +441,13 @@ impl Connection {
                     .await
                     .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
             }
-            "files.list" | "files.read" => {
+            "files.list" | "files.read" | "files.write" => {
                 // Système de fichiers et `git` : hors du runtime.
                 let (d2, params, m) = (d.clone(), params.clone(), method.to_owned());
-                tokio::task::spawn_blocking(move || {
-                    if m == "files.list" {
-                        d2.files_list(&params)
-                    } else {
-                        d2.files_read(&params)
-                    }
+                tokio::task::spawn_blocking(move || match m.as_str() {
+                    "files.list" => d2.files_list(&params),
+                    "files.read" => d2.files_read(&params),
+                    _ => d2.files_write(&params),
                 })
                 .await
                 .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??

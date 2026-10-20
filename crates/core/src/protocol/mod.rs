@@ -68,6 +68,9 @@ pub mod error_code {
     /// modifications non commitées ou des fichiers non suivis (liste dans
     /// `data.files`).
     pub const WORKTREE_DIRTY: i64 = -32020;
+    /// `files.write` refusé : le fichier a changé depuis sa lecture (version
+    /// actuelle dans `data.version`, `null` s'il n'existe plus).
+    pub const FILE_CONFLICT: i64 = -32021;
 }
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {

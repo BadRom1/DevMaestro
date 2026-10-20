@@ -14,6 +14,8 @@ import { NewSessionDialog } from './components/NewSessionDialog'
 import { SessionPane } from './components/SessionPane'
 import { Sidebar } from './components/Sidebar'
 import { TopBar } from './components/TopBar'
+import { UnsavedConfirm } from './components/UnsavedConfirm'
+import { guardLeave, hasUnsaved, unsavedPath } from './state/unsaved'
 import { ancestorToResolve, fallbackProject, groupByProject, groupPast, pastToOffer, sidebarOrder, type PastEntry } from './state/projects'
 import { daemonSaysFolderExists } from './state/format'
 import { initialState, needsResolve, reducer } from './state/store'
@@ -439,10 +441,32 @@ export function App() {
     dispatch({ type: 'select', id: (waiting[0] ?? ordered[0])!.id })
   }, [selected, ordered, waiting])
 
+  const selectedRef = useRef(state.selectedId)
+  selectedRef.current = state.selectedId
+  /**
+   * Choisir une session (puis `then`) : confirmation d'abord si un fichier
+   * modifié n'est pas enregistré dans la session affichée.
+   */
+  const select = useCallback((id: string, then?: () => void) => {
+    const go = () => {
+      dispatch({ type: 'select', id })
+      setExplicitSel(true)
+      then?.()
+    }
+    if (id === selectedRef.current) go()
+    else guardLeave(selectedRef.current, 'changer de session', go)
+  }, [])
 
-  const select = useCallback((id: string) => {
-    dispatch({ type: 'select', id })
-    setExplicitSel(true)
+  // Fermeture de la fenêtre (ou rechargement) avec un fichier modifié non enregistré :
+  // le processus principal demande confirmation par un dialogue natif (`will-prevent-unload`).
+  useEffect(() => {
+    const onUnload = (e: BeforeUnloadEvent) => {
+      if (!hasUnsaved()) return
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', onUnload)
+    return () => window.removeEventListener('beforeunload', onUnload)
   }, [])
 
   const resumePast = useCallback(
@@ -472,6 +496,8 @@ export function App() {
 
   /** Retire une session arrêtée de la liste du démon ; la page la retire aussitôt. */
   const forget = useCallback(async (id: string) => {
+    const path = unsavedPath(id)
+    if (path) throw new Error(`les modifications de « ${path} » ne sont pas enregistrées : enregistre-les ou annule-les d’abord`)
     await call('sessions.forget', { id })
     forgetViewMemory(id)
     dispatch({ type: 'session.removed', id })
@@ -508,9 +534,10 @@ export function App() {
     [selectedId],
   )
   const openAgent = useCallback((sessionId: string, agentId: string | null) => {
-    select(sessionId)
-    if (agentId) setAgentSel((m) => ({ ...m, [sessionId]: agentId }))
-    setOpenAgents((n) => n + 1)
+    select(sessionId, () => {
+      if (agentId) setAgentSel((m) => ({ ...m, [sessionId]: agentId }))
+      setOpenAgents((n) => n + 1)
+    })
   }, [select])
 
   const onSessionUpdated = useCallback((s: Session) => dispatch({ type: 'session.response', session: s }), [])
@@ -527,13 +554,13 @@ export function App() {
     savePaneOpen(browserStorage(), open)
   }, [])
   const openInKanban = useCallback(
-    (id: string) => {
-      select(id)
-      setKanbanPane(true)
-    },
+    (id: string) => select(id, () => setKanbanPane(true)),
     [setKanbanPane, select],
   )
-  const closeKanbanPane = useCallback(() => setKanbanPane(false), [setKanbanPane])
+  const closeKanbanPane = useCallback(
+    () => guardLeave(selectedRef.current, 'fermer le volet de la session', () => setKanbanPane(false)),
+    [setKanbanPane],
+  )
   /** Afficher une session : dans le volet en vue par statut, sinon la sélectionner. */
   const kanbanView = settings.view === 'statut'
   const show = useCallback((id: string) => (kanbanView ? openInKanban(id) : select(id)), [kanbanView, openInKanban, select])
@@ -608,7 +635,7 @@ export function App() {
         onNew={() => setDialog(true)}
         onSettings={() => setSettingsOpen(true)}
         view={settings.view}
-        onView={(v) => updateSettings({ view: v })}
+        onView={(v) => v !== settings.view && guardLeave(selectedRef.current, 'changer de vue', () => updateSettings({ view: v }))}
       />
       <div className={`conn${banner?.bad ? ' bad' : ''}`} role="status" aria-live="polite" hidden={!banner}>
         {banner?.text}
@@ -706,6 +733,7 @@ export function App() {
         />
       )}
       {link && <LinkDialog url={link} onClose={closeLink} />}
+      <UnsavedConfirm />
     </div>
   )
 }

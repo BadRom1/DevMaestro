@@ -5,12 +5,20 @@
  * à Claude » et « Voir le diff ». Une sélection de lignes (code) ou de blocs
  * (Markdown rendu) s'ajoute au brouillon de revue de la session, le même que
  * celui de l'onglet Diff, et part avec « Envoyer la revue ».
+ *
+ * « Modifier » (lot 7) : éditeur CodeMirror à la place de la lecture, avec
+ * « Enregistrer » (Ctrl+S, `files.write` avec l'empreinte de la version
+ * ouverte), bandeau de conflit si le fichier a changé depuis son ouverture,
+ * « Annuler les modifications », et retour en lecture après l'enregistrement.
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from 'react'
 
 import { ErrorCode, type DiffFile, type DiffSummary, type FileContent, type FileEntry, type Session } from '../../../shared/protocol'
-import { call, errorCode, errorText } from '../api'
+import { CallError, call, errorCode, errorText } from '../api'
 import { awaitingAnswer } from '../state/status'
+import { outcomeUncertain } from '../state/errors'
+import { canEdit, conflictVersion, editReducer, editable, eolStyle, expectedFor, isVersion, normalizeEol, notEditableReason, type EditState } from '../state/fileEdit'
+import { guardLeave, setUnsaved, subscribeLeave, unsavedVersion } from '../state/unsaved'
 import { STATUS_LABELS } from '../state/diff'
 import {
   ancestorDirs,
@@ -37,8 +45,8 @@ import { markdownSelection } from '../state/domSelection'
 import type { LineSpan } from '../state/sourceSelection'
 import { CodeView, lineGeometry, type SelectionPoint } from './CodeView'
 import { CommentBox, ReviewBar, linesLabel } from './ReviewBar'
-
-/** Aucun fichier dans le diff (référence stable). */
+import { EditDiffDialog } from './EditDiffDialog'
+import { FileEditor, type EditorHandle } from './FileEditor'
 
 /** Anti-rebond des rechargements après `session.diff_changed`. */
 const TREE_REFRESH_MS = 1000
@@ -75,6 +83,9 @@ export function forgetFilesMemory(id: string): void {
 }
 
 export const OLD_DAEMON_FILES = 'Le démon ne sait pas encore lister les fichiers : mets orchd à jour.'
+/** « Mentionner » et « Envoyer la revue » ramènent au terminal : pas pendant une édition modifiée. */
+const UNSAVED_BLOCKS = 'Enregistre ou annule d’abord tes modifications du fichier'
+export const OLD_DAEMON_WRITE = 'Le démon ne sait pas encore enregistrer les fichiers : mets orchd à jour.'
 
 function failure(e: unknown, what: string): string {
   return errorCode(e) === ErrorCode.MethodNotFound ? OLD_DAEMON_FILES : `${what} : ${errorText(e)}`
@@ -157,6 +168,35 @@ export function FilesView({
   const article = useRef<HTMLElement>(null)
   /** Défilement à rendre après le prochain chargement du contenu. */
   const restoreScroll = useRef<number | null>(memo.file ? memo.scroll : null)
+  /** Édition en cours (`null` : lecture). */
+  const [edit, dispatchEdit] = useReducer(editReducer, null)
+  const editRef = useRef<EditState | null>(edit)
+  editRef.current = edit
+  const editor = useRef<EditorHandle | null>(null)
+  /** « Voir les différences » ouvert, avec mon texte au moment de l'ouverture. */
+  const [diffOf, setDiffOf] = useState<{ mine: string } | null>(null)
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+
+  /**
+   * Écritures réussies : une lecture partie avant la dernière (relecture
+   * après `session.diff_changed`) est périmée et ignorée.
+   */
+  const writeGen = useRef(0)
+
+  // Modifications non enregistrées déclarées aux gardes (changement d'onglet, de session, fermeture) ;
+  // réinscrites si le registre les a oubliées alors que la vue reste montée.
+  const registry = useSyncExternalStore(subscribeLeave, unsavedVersion)
+  useEffect(() => {
+    setUnsaved(session.id, edit?.dirty ? edit.path : null)
+  }, [session.id, edit?.dirty, edit?.path, registry])
+  // Vue démontée : l'éditeur et son texte disparaissent avec elle.
+  useEffect(() => () => setUnsaved(session.id, null), [session.id])
 
   // État gardé par session : on le retrouve en revenant sur l'onglet ou la session.
   useEffect(() => {
@@ -252,10 +292,11 @@ export function FilesView({
       return
     }
     let alive = true
+    const gen = writeGen.current
     setViewError(null)
     setContent(null)
     call('files.read', { id: session.id, path: file })
-      .then((c) => alive && setContent(c))
+      .then((c) => alive && gen === writeGen.current && setContent(c))
       .catch((e: unknown) => alive && setViewError(failure(e, 'Lecture impossible')))
     return () => {
       alive = false
@@ -270,9 +311,16 @@ export function FilesView({
     let alive = true
     const t = setTimeout(() => {
       const scroll = body.current?.scrollTop ?? 0
+      const gen = writeGen.current
       call('files.read', { id: session.id, path: file })
         .then((c) => {
-          if (!alive) return
+          // Partie avant un enregistrement : contenu périmé.
+          if (!alive || gen !== writeGen.current) return
+          // En édition : le texte en cours reste ; on signale seulement que le fichier a changé sur le disque.
+          if (editRef.current?.path === file) {
+            dispatchEdit({ type: 'diskSeen', sha256: isVersion(c.version) ? c.version.sha256 : null })
+            return
+          }
           restoreScroll.current = scroll
           // Contenu changé pendant une sélection : lignes peut-être décalées.
           if (c.content !== contentRef.current?.content) {
@@ -301,12 +349,19 @@ export function FilesView({
     setPickStale(false)
   }, [file, raw])
 
+  // Autre fichier : l'édition (déjà confirmée par la garde) s'arrête.
+  useEffect(() => {
+    if (editRef.current && editRef.current.path !== file) dispatchEdit({ type: 'cancel' })
+    setDiffOf(null)
+  }, [file])
+
   // Extrait cliqué dans la revue : fichier ouvert puis ligne montrée (une fois par demande, pour cette session).
   useEffect(() => {
     if (!focusFile || focusFile.sessionId !== session.id || focusFile.n <= memo.focusN) return
     memo.focusN = focusFile.n
-    if (focusFile.path !== file) openFile(focusFile.path)
-    setPendingLine({ path: focusFile.path, line: focusFile.line })
+    const target = { path: focusFile.path, line: focusFile.line }
+    if (focusFile.path !== file) openFile(focusFile.path, null, () => setPendingLine(target))
+    else setPendingLine(target)
   }, [focusFile?.n])
 
   // Position de lecture rendue après un rechargement ou un retour sur l'onglet.
@@ -418,12 +473,146 @@ export function FilesView({
     setOpen((o) => new Set(o).add(r.path))
   }
 
-  function openFile(path: string, anchor: string | null = null) {
-    restoreScroll.current = null
-    setFile(path)
-    setRaw(false)
-    setPendingAnchor(anchor)
-    body.current?.scrollTo({ top: 0 })
+  /**
+   * Ouvre un fichier (arbre, lien Markdown, extrait de la revue) ; `then` est
+   * appelé une fois le fichier choisi. En édition, quitter le fichier demande
+   * confirmation s'il y a des modifications non enregistrées.
+   */
+  function openFile(path: string, anchor: string | null = null, then?: () => void) {
+    if (path === file && editRef.current) {
+      then?.()
+      return
+    }
+    guardLeave(session.id, 'ouvrir un autre fichier', () => {
+      if (editRef.current) dispatchEdit({ type: 'cancel' })
+      restoreScroll.current = null
+      setFile(path)
+      setRaw(false)
+      setPendingAnchor(anchor)
+      body.current?.scrollTo({ top: 0 })
+      then?.()
+    })
+  }
+
+  /** « Modifier » : la version affichée devient la version ouverte (Markdown : en source). */
+  function beginEdit() {
+    if (!file || !content || content.content == null || !isVersion(content.version)) return
+    setPick(null)
+    setCommentText(null)
+    if (isMarkdown(file)) setRaw(true)
+    dispatchEdit({ type: 'begin', path: file, content: content.content, version: content.version })
+  }
+
+  /** Version actuelle relue pour un conflit (diff et « Écraser quand même »). */
+  function loadCurrent(path: string) {
+    call('files.read', { id: session.id, path })
+      .then((c) => {
+        if (!mounted.current || editRef.current?.path !== path) return
+        dispatchEdit({
+          type: 'currentLoaded',
+          content: c.binary || c.too_large ? null : c.content,
+          version: isVersion(c.version) ? c.version : undefined,
+        })
+      })
+      .catch((e: unknown) => {
+        if (mounted.current && editRef.current?.path === path) dispatchEdit({ type: 'currentFailed', error: `Version actuelle illisible : ${errorText(e)}` })
+      })
+  }
+
+  /** « Enregistrer » (Ctrl+S) ou, après la seconde confirmation, « Écraser quand même ». */
+  async function save(overwrite = false) {
+    const e = editRef.current
+    const h = editor.current
+    if (!e || !h) return
+    if (overwrite ? e.phase !== 'confirmOverwrite' : !editable(e)) return
+    // Rien de changé : retour en lecture, sans écrire.
+    if (!overwrite && !e.dirty && !e.conflict) {
+      dispatchEdit({ type: 'cancel' })
+      return
+    }
+    const expected = expectedFor({ ...e, phase: overwrite ? 'overwriting' : 'saving' })
+    if (expected === undefined) return
+    dispatchEdit({ type: overwrite ? 'overwrite' : 'save' })
+    // Par sécurité : fins de ligne du fichier ouvert (le collage et le dépôt sont déjà ramenés à ce style).
+    const text = normalizeEol(h.text(), eolStyle(e.base) === 'crlf' ? 'crlf' : 'lf')
+    try {
+      const r = await call('files.write', { id: session.id, path: e.path, content: text, expected })
+      writeGen.current++
+      if (!mounted.current) return
+      setContent((c) =>
+        c && c.path === e.path ? { ...c, content: text, size: isVersion(r?.version) ? r.version.size : c.size, version: isVersion(r?.version) ? r.version : null } : c,
+      )
+      dispatchEdit({ type: 'saved' })
+      requestAnimationFrame(() => body.current?.focus())
+    } catch (err) {
+      if (!mounted.current) return
+      const code = errorCode(err)
+      if (code === ErrorCode.FileChanged) {
+        const current = conflictVersion(err instanceof CallError ? err.failure.data : undefined)
+        dispatchEdit({ type: 'conflict', version: current })
+        // Fichier supprimé : rien à relire.
+        if (current !== null) loadCurrent(e.path)
+      } else if (code === ErrorCode.MethodNotFound) {
+        dispatchEdit({ type: 'failed', error: OLD_DAEMON_WRITE })
+      } else if (outcomeUncertain(code)) {
+        dispatchEdit({
+          type: 'failed',
+          error: `Enregistrement incertain : ${errorText(err)}. Il a peut-être abouti : enregistre de nouveau pour vérifier (un conflit sera signalé s’il a abouti).`,
+        })
+      } else {
+        dispatchEdit({ type: 'failed', error: `Enregistrement impossible : ${errorText(err)}` })
+      }
+    }
+  }
+
+  /** « Recharger (perdre mes modifications) » : la version actuelle devient la version ouverte. */
+  async function reload() {
+    const e = editRef.current
+    if (!e || !editable(e)) return
+    try {
+      const c = await call('files.read', { id: session.id, path: e.path })
+      if (!mounted.current || editRef.current?.path !== e.path) return
+      setContent(c)
+      if (!canEdit(c, false) || c.content == null || !isVersion(c.version) || eolStyle(c.content) === 'mixed') {
+        // Plus modifiable ici (binaire, trop gros…) : retour en lecture.
+        dispatchEdit({ type: 'cancel' })
+        return
+      }
+      editor.current?.reset(c.content)
+      dispatchEdit({ type: 'reload', content: c.content, version: c.version })
+      editor.current?.focus()
+    } catch (err) {
+      if (mounted.current) dispatchEdit({ type: 'currentFailed', error: `Rechargement impossible : ${errorText(err)}` })
+    }
+  }
+
+  /**
+   * Ctrl+S (Cmd+S) pendant l'édition, focus hors de l'éditeur (barre, bandeau) :
+   * enregistre ; jamais transmis plus loin (dans l'éditeur, CodeMirror l'a déjà traité).
+   */
+  function onViewKeyDown(ev: ReactKeyboardEvent<HTMLDivElement>) {
+    if (!edit || !(ev.ctrlKey || ev.metaKey) || ev.altKey || ev.shiftKey || ev.key.toLowerCase() !== 's') return
+    ev.stopPropagation()
+    if (ev.defaultPrevented) return
+    ev.preventDefault()
+    void save()
+  }
+
+  /** Fichier supprimé depuis son ouverture, « Fermer » : modifications abandonnées (confirmation), plus d'aperçu. */
+  function closeDeleted() {
+    guardLeave(session.id, 'fermer le fichier supprimé', () => {
+      dispatchEdit({ type: 'cancel' })
+      setContent(null)
+      setViewError('Le fichier a été supprimé depuis son ouverture.')
+    })
+  }
+
+  /** « Annuler les modifications » : retour en lecture (confirmation s'il y a des modifications). */
+  function cancelEdit() {
+    guardLeave(session.id, 'annuler les modifications', () => {
+      dispatchEdit({ type: 'cancel' })
+      requestAnimationFrame(() => body.current?.focus())
+    })
   }
 
   function onArticleClick(e: MouseEvent<HTMLElement>) {
@@ -468,6 +657,12 @@ export function FilesView({
   const hereComments = file ? fileComments(draft, file) : []
   const pickError = pick ? fileSelectionError(pick.span.line, pick.span.lineEnd) : null
   const draftFull = activeComments(draft).length >= MAX_COMMENTS
+  const parentDir = file && file.includes('/') ? file.slice(0, file.lastIndexOf('/')) : ''
+  const isSymlink = !!file && (cache[parentDir]?.some((e) => e.path === file && e.kind === 'symlink') ?? false)
+  const editPossible = !edit && content?.path === file && canEdit(content, isSymlink)
+  const refused = !edit && content?.path === file ? notEditableReason(content) : null
+  const mixedEol = editPossible && content?.content != null && eolStyle(content.content) === 'mixed'
+  const busy = edit?.phase === 'saving' || edit?.phase === 'overwriting'
 
   return (
     <div className={`fpane${showToc ? '' : ' notoc'}`}>
@@ -526,7 +721,7 @@ export function FilesView({
         </ul>
         {truncated.has('') && <p className="hint pad">Racine tronquée (2 000 entrées au plus).</p>}
       </nav>
-      <div className="fview">
+      <div className="fview" onKeyDown={onViewKeyDown}>
         <div className="fhead">
           <span className="crumbs" title={root ?? undefined}>
             {rootName ?? '…'}
@@ -542,10 +737,10 @@ export function FilesView({
           <span className="acts">
             {file && isMarkdown(file) && (
               <div className="seg" role="group" aria-label="Affichage du Markdown">
-                <button aria-pressed={!raw} onClick={() => setRaw(false)}>
+                <button aria-pressed={!raw} onClick={() => setRaw(false)} disabled={!!edit} title={edit ? 'Pendant l’édition, le Markdown reste en source' : undefined}>
                   Rendu
                 </button>
-                <button aria-pressed={raw} onClick={() => setRaw(true)}>
+                <button aria-pressed={raw} onClick={() => setRaw(true)} disabled={!!edit}>
                   Source
                 </button>
               </div>
@@ -555,12 +750,46 @@ export function FilesView({
                 Voir le diff
               </button>
             )}
+            {editPossible && (
+              <button
+                className="btn sm"
+                disabled={mixedEol}
+                onClick={beginEdit}
+                title={mixedEol ? 'Fins de ligne mélangées (LF et CRLF) : l’éditeur ne saurait pas les conserver' : 'Modifier ce fichier dans l’app'}
+              >
+                Modifier
+              </button>
+            )}
+            {refused && (
+              <button className="btn sm" disabled title={refused} aria-label={`Modifier (impossible : ${refused})`}>
+                Modifier
+              </button>
+            )}
+            {edit && (
+              <>
+                {edit.dirty && (
+                  <span className="chip pend" role="status">
+                    Modifié, non enregistré
+                  </span>
+                )}
+                <button className="btn sm ghost" onClick={cancelEdit} disabled={busy}>
+                  Annuler les modifications
+                </button>
+                {edit.phase !== 'conflict' && edit.phase !== 'confirmOverwrite' && (
+                  <button className="btn sm pri" onClick={() => void save()} disabled={busy} aria-keyshortcuts="Control+S" title="Enregistrer (Ctrl+S)">
+                    {busy ? 'Enregistrement…' : 'Enregistrer'}
+                  </button>
+                )}
+              </>
+            )}
             <button
               className="btn sm"
-              disabled={!file || !session.alive || waiting}
+              disabled={!file || !session.alive || waiting || !!edit?.dirty}
               onClick={() => void mention()}
               title={
-                !session.alive
+                edit?.dirty
+                  ? UNSAVED_BLOCKS
+                  : !session.alive
                   ? 'La session ne tourne pas'
                   : waiting
                     ? 'Réponds d’abord à la demande en attente : le texte irait dans son dialogue'
@@ -575,7 +804,7 @@ export function FilesView({
               {mentionError}
             </span>
           )}
-          {tooBigToColor && (
+          {!edit && tooBigToColor && (
             <span className="hint">
               {rendered ? 'Blocs de code non colorés' : 'Coloration désactivée'} : fichier de plus de 200 Kio ou 5 000 lignes.
             </span>
@@ -591,7 +820,93 @@ export function FilesView({
           {file && !content && !viewError && <p className="empty">Chargement…</p>}
           {content?.binary && <p className="empty">Fichier binaire : pas d’aperçu.</p>}
           {content?.too_large && <p className="empty">Fichier trop volumineux pour être affiché (2 Mio au plus).</p>}
-          {text != null &&
+          {edit && file && edit.path === file ? (
+            <div className="fedit">
+              {edit.phase === 'editing' && edit.diskChanged && (
+                <p className="ebanner info" role="status">
+                  Le fichier a changé sur le disque depuis son ouverture (sans doute Claude) : l’enregistrement te le signalera.
+                </p>
+              )}
+              {edit.error && (
+                <p className="ebanner bad" role="alert">
+                  {edit.error}
+                </p>
+              )}
+              {(edit.phase === 'conflict' || edit.phase === 'confirmOverwrite' || edit.phase === 'overwriting') && edit.conflict && (
+                <div className="ebanner warn" role="alert">
+                  <p>
+                    <b>
+                      {edit.conflict.version === null
+                        ? 'Le fichier a été supprimé depuis son ouverture.'
+                        : 'Le fichier a été modifié (sans doute par Claude) depuis son ouverture.'}
+                    </b>{' '}
+                    Tes modifications ne sont pas enregistrées.
+                  </p>
+                  {edit.conflict.loadError && <p className="inline-err">{edit.conflict.loadError}</p>}
+                  {edit.phase === 'conflict' && edit.conflict.version === null ? (
+                    <div className="eacts">
+                      <button className="btn sm" onClick={() => dispatchEdit({ type: 'askOverwrite' })}>
+                        Le recréer
+                      </button>
+                      <button className="btn sm" onClick={closeDeleted}>
+                        Fermer
+                      </button>
+                    </div>
+                  ) : edit.phase === 'conflict' ? (
+                    <div className="eacts">
+                      <button className="btn sm" onClick={() => setDiffOf({ mine: editor.current?.text() ?? '' })}>
+                        Voir les différences
+                      </button>
+                      <button className="btn sm" onClick={() => void reload()}>
+                        Recharger (perdre mes modifications)
+                      </button>
+                      <button
+                        className="btn sm danger"
+                        disabled={edit.conflict.version === undefined}
+                        title={edit.conflict.version === undefined ? 'Version actuelle encore inconnue' : undefined}
+                        onClick={() => dispatchEdit({ type: 'askOverwrite' })}
+                      >
+                        Écraser quand même
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="eacts">
+                      <span>
+                        {edit.conflict.version === null
+                          ? 'Recréer le fichier avec ta version ?'
+                          : 'Remplacer la version actuelle par la tienne ? Les changements faits sur le disque depuis l’ouverture seront perdus.'}
+                      </span>
+                      <button className="btn sm" autoFocus disabled={edit.phase === 'overwriting'} onClick={() => dispatchEdit({ type: 'cancelOverwrite' })}>
+                        Annuler
+                      </button>
+                      <button className="btn sm danger" disabled={edit.phase === 'overwriting'} onClick={() => void save(true)}>
+                        {edit.conflict.version === null
+                          ? edit.phase === 'overwriting'
+                            ? 'Création…'
+                            : 'Le recréer'
+                          : edit.phase === 'overwriting'
+                            ? 'Écrasement…'
+                            : 'Écraser'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+              <FileEditor
+                key={edit.path}
+                path={edit.path}
+                text={edit.base}
+                readOnly={!editable(edit)}
+                onDirty={(dirty) => dispatchEdit({ type: 'change', dirty })}
+                onSave={() => void save()}
+                handleRef={editor}
+              />
+              <p className="hint ehint">
+                <kbd>Ctrl</kbd>+<kbd>S</kbd> : enregistrer · <kbd>Ctrl</kbd>+<kbd>F</kbd> : rechercher · <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd> :
+                annuler / refaire · <kbd>Échap</kbd> puis <kbd>Tab</kbd> : sortir de l’éditeur
+              </p>
+            </div>
+          ) : text != null &&
             (rendered ? (
               // HTML produit par markdown-it sans HTML brut (échappé) ni image chargée ; code coloré par highlight.js (échappé).
               <article
@@ -611,7 +926,7 @@ export function FilesView({
                 onSelect={commentText === null ? choose : () => undefined}
               />
             ))}
-          {pick && file && (
+          {pick && file && !edit && (
             <div className="selfloat" style={{ top: pick.top, left: pick.left }}>
               {commentText !== null ? (
                 <CommentBox
@@ -652,14 +967,25 @@ export function FilesView({
             review={review}
             files={reviewFiles}
             onSent={onSent}
+            blockedReason={edit?.dirty ? UNSAVED_BLOCKS : null}
             onOpenFile={(path, line) => {
-              if (path !== file) openFile(path)
-              setPendingLine({ path, line })
+              if (path !== file) openFile(path, null, () => setPendingLine({ path, line }))
+              else setPendingLine({ path, line })
             }}
             {...(onOpenCommit ? { onOpenCommit } : {})}
           />
         )}
       </div>
+      {diffOf && edit && (
+        <EditDiffDialog
+          path={edit.path}
+          base={edit.base}
+          current={edit.conflict?.content ?? null}
+          currentError={edit.conflict?.loadError ?? null}
+          mine={diffOf.mine}
+          onClose={() => setDiffOf(null)}
+        />
+      )}
       {showToc && rendered && (
         <nav className="toc" aria-label="Sur cette page">
           <span className="lbl">Sur cette page</span>

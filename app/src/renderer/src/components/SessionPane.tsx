@@ -44,6 +44,7 @@ import { runningCount, runningLabel } from '../state/subagents'
 import { ForgetConfirm } from './ForgetConfirm'
 import { ColorBar, ColorPicker, RenameField } from './SessionIdentity'
 import { sortFiles } from '../state/diff'
+import { guardLeave } from '../state/unsaved'
 import type { DiffFile } from '../../../shared/protocol'
 
 type Tab = 'conversation' | 'terminal' | 'diff' | 'commits' | 'files' | 'agents'
@@ -408,7 +409,14 @@ export function SessionPane({
   const dock = useRequestDock(session?.id ?? null, keys, () => typingElsewhere(termHost.current))
   const { settings } = useSettings()
   /** Onglet ouvert au départ : réglage « Onglet par défaut d'une session » (Terminal tant qu'il n'est pas choisi). */
-  const [tab, setTab] = useState<Tab>(() => settings.ui.sessionTab)
+  const [tab, setTabNow] = useState<Tab>(() => settings.ui.sessionTab)
+  const tabRef = useRef(tab)
+  tabRef.current = tab
+  /** Changement d'onglet : confirmation d'abord si un fichier modifié n'est pas enregistré (onglet Fichiers). */
+  const setTab = (next: Tab) => {
+    if (next === tabRef.current) return
+    guardLeave(session?.id ?? null, 'changer d’onglet', () => setTabNow(next))
+  }
   /**
    * Conversations déjà ouvertes : la vue reste montée (masquée) quand on change
    * d'onglet, pour garder le fil, sa position et les volets dépliés.

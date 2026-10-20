@@ -351,6 +351,13 @@ pub enum FileError {
     NotRegular,
     /// Pas un dossier.
     NotDir,
+    /// Accès refusé par les droits du système (`EACCES`, `EPERM`).
+    Denied,
+    /// Écriture refusée (lecture seule, fichier binaire, non UTF-8, trop gros…).
+    Refused(String),
+    /// Le fichier a changé depuis sa lecture : version actuelle (`None` s'il
+    /// n'existe plus). Rien n'a été écrit.
+    Conflict(Option<crate::domain::files::FileVersion>),
     Io(String),
 }
 
@@ -373,6 +380,11 @@ pub struct ReadFile {
     pub bytes: Option<Vec<u8>>,
     /// Chemin réel relatif à la racine (liens suivis).
     pub resolved: String,
+    /// Version du contenu lu, `None` s'il n'a pas été lu (trop gros).
+    pub version: Option<crate::domain::files::FileVersion>,
+    /// Raison pour laquelle l'écriture serait refusée d'avance, côté disque
+    /// (lien final, lecture seule) ; `None` : rien ne l'empêche.
+    pub not_editable: Option<String>,
 }
 
 /// Accès en lecture au dossier d'une session, confiné à sa racine
@@ -389,6 +401,20 @@ pub trait FileAccess: Send + Sync {
     /// suivre de lien et sans taille (voir [`FileAccess::lstat`]) ; `true` si
     /// la lecture a été coupée.
     fn list_dir(&self, root: &Path, rel: &str) -> Result<(Vec<RawEntry>, bool), FileError>;
+    /// Écrit `content` dans le fichier `rel` (chemin normalisé non vide),
+    /// atomiquement (temporaire dans le même dossier puis renommage), si sa
+    /// version actuelle a l'empreinte `expected` ; `None` : création, le
+    /// fichier ne doit pas exister. Dossier parent existant, sous la racine
+    /// (liens internes suivis), jamais sous `.git` ; dernier composant ni lien
+    /// ni autre chose qu'un fichier ordinaire ; fichier existant texte UTF-8
+    /// de 2 Mio au plus, accessible en écriture. Renvoie la nouvelle version.
+    fn write_beneath(
+        &self,
+        root: &Path,
+        rel: &str,
+        content: &[u8],
+        expected: Option<&str>,
+    ) -> Result<crate::domain::files::FileVersion, FileError>;
 }
 
 /// Une session telle qu'enregistrée en base.

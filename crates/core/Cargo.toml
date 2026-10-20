@@ -44,8 +44,12 @@ getrandom.workspace = true
 toml.workspace = true
 ureq.workspace = true
 notify.workspace = true
+ring.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Tests : aucune ouverture en écriture parasite lors d'un `files.write`
+# refusé (inotify, `IN_CLOSE_WRITE`).
+nix = { workspace = true, features = ["inotify"] }
 # Active `test-support` (faux claude) pour les tests seulement.
 devmaestro-core = { path = ".", features = ["test-support"] }

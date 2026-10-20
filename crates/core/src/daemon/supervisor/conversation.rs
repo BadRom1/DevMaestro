@@ -285,7 +285,9 @@ impl Daemon {
             }
         }
         for id in targets {
-            let _ = self.with_conversation(&id, |_| ());
+            // Suivi de la pompe : ce n'est pas une lecture (l'éviction garde
+            // les conversations les plus récemment lues par un client).
+            let _ = self.with_conversation(&id, false, |_| ());
         }
         // Sessions arrêtées depuis : leurs conversations comptent désormais.
         self.evict_idle_conversations(&Uuid::nil());
@@ -293,10 +295,12 @@ impl Daemon {
 
     /// La conversation d'une session, créée au besoin, à jour (actions en
     /// attente appliquées, fichiers relus), passée à `f`. Un changement fait
-    /// par `f` (sous-agent activé…) est signalé aussi. Bloquant.
+    /// par `f` (sous-agent activé…) est signalé aussi. `read` : lecture par
+    /// un client, qui compte pour l'éviction (`last_used`). Bloquant.
     fn with_conversation<T>(
         &self,
         id: &Uuid,
+        read: bool,
         f: impl FnOnce(&mut ConvState) -> T,
     ) -> Result<T, RpcError> {
         let Some(info) = self.session_info(id) else {
@@ -305,7 +309,9 @@ impl Daemon {
         };
         let (state, _) = self.conversation_state(id, &info)?;
         let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
-        st.last_used = Instant::now();
+        if read {
+            st.last_used = Instant::now();
+        }
         let before = st.conv.rev();
         let actions = self
             .conv_actions
@@ -709,7 +715,7 @@ impl Daemon {
         } else {
             None
         };
-        self.with_conversation(&id, |st| {
+        self.with_conversation(&id, true, |st| {
             if let Some(a) = &agent {
                 if self.track_subagent(st, a, true).is_none() {
                     return Err(unknown_subagent(a));
@@ -753,7 +759,7 @@ impl Daemon {
             .as_deref()
             .and_then(Part::parse)
             .ok_or_else(|| RpcError::params("« part » : input, result ou text"))?;
-        let (agent, refs) = self.with_conversation(&id, |st| {
+        let (agent, refs) = self.with_conversation(&id, true, |st| {
             let e = st
                 .conv
                 .entry(&uid)

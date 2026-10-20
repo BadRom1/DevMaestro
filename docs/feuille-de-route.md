@@ -12,7 +12,7 @@ Tout le travail est sur la branche locale `v0.1` (non poussée). `main` (publié
 |---|---|---|
 | v0.1 | ✅ livrée | Démon `orchd`, sessions dans des PTY, hooks et statusline, permissions et questions depuis l'app, quotas par profil, notifications, thèmes, nouvelle session, anciennes sessions |
 | v0.2 | ✅ livrée, en essai | Diff et revue, onglet Fichiers (Markdown, coloration, sélection envoyée à Claude), vue par statut (filtre, volet), sous-agents, worktrees (création, nettoyage), palette par mode |
-| v0.3 | 🔜 en cours | ✅ Finitions et zoom (lot 8), ✅ commits (lot 9), ✅ vue conversation (lots 10 à 12) ; ensuite édition de fichiers (lot 7) |
+| v0.3 | 🔜 en cours | ✅ Finitions et zoom (lot 8), ✅ commits (lot 9), ✅ vue conversation (lots 10 à 12), ✅ édition de fichiers (lot 7) |
 
 ### Commits de la branche `v0.1`
 
@@ -37,7 +37,7 @@ Tout le travail est sur la branche locale `v0.1` (non poussée). `main` (publié
 |---|---|---|---|
 | **8. Finitions d'interface** | Sélecteurs alignés (Nouvelle session : profil / modèle / mode, branche / base / emplacement) ; carte de question qui ne masque plus le contenu (zone réservée en bas, repliable) ; import d'un thème JSON ; réglages avec en-tête fixe (titre + croix toujours visibles) et coins arrondis préservés par la barre de défilement ; zoom de l'interface (Ctrl + / Ctrl − / Ctrl 0, réglage, terminal compris) | Retours de l'essai du 2026-10-20 ; accessibilité (taille de texte) | ✅ validé |
 | **9. Historique des commits** | Onglet « Commits » d'une session : commits de la branche depuis la base (auteur, date, message), diff de chaque commit avec le même lecteur que l'onglet Diff, commentaire d'une ligne de commit envoyé à Claude | Suivre ce que les sessions ont commité (mode « derniers commits » pour le trunk-based) | ✅ validé |
-| **7. Édition de fichiers** | Modifier un fichier depuis l'onglet Fichiers, enregistrement refusé si Claude l'a modifié entre-temps | Souhaitée, non obligatoire | 🔜 en cours |
+| **7. Édition de fichiers** | Modifier un fichier depuis l'onglet Fichiers, enregistrement refusé si Claude l'a modifié entre-temps | Souhaitée, non obligatoire | ✅ livré, à essayer |
 | **Prototype n° 5. Vue conversation** | Mesures sur le transcript, voie A retenue ([ADR 0005](adr/0005-vue-conversation.md)) | Décider avant de coder | ✅ fait ([spike 05](spikes/05-vue-conversation.md)) |
 | **10 à 12. Vue conversation** | Suivi du transcript par le démon, onglet « Conversation » (fil, outils, sous-agents, indicateur d'activité), saisie depuis la vue | Lire et piloter une session comme dans Claude Desktop | ✅ livré (7776f92), essai de bout en bout réussi avec un vrai `claude`, à essayer à l'écran |
 | **13. GitHub** | Issues pour lancer des sessions (une par sous-issue d'un epic), suivi des PR et de la CI, **revue des PR GitHub dans l'app** | Livraison et CI ; demande « pas urgente » | ⏳ demande un ADR : aujourd'hui seule la connexion aux quotas est permise (passer par la CLI `gh` de l'utilisateur ?) |

@@ -4,7 +4,7 @@
  * minimal (identifiants UUID, entiers bornés, énumérations, chaînes de
  * longueur bornée). Les champs inconnus sont retirés. Messages en français.
  */
-import { COMMIT_RANGES, FULL_PARTS, MAX_TITLE, SESSION_COLORS, type MethodName } from '../shared/protocol'
+import { COMMIT_RANGES, FULL_PARTS, MAX_FILE_WRITE_BYTES, MAX_TITLE, SESSION_COLORS, type MethodName } from '../shared/protocol'
 import { ZOOM_DIRECTIONS, type ZoomDirection } from '../shared/settings'
 import { WORKTREE_LOCATIONS, branchNameProblem } from '../shared/worktrees'
 
@@ -192,6 +192,51 @@ function relPath(o: Obj, k: string): string {
   return v
 }
 
+/**
+ * Chemin d'un fichier à écrire (`files.write`) : relatif à la racine de la
+ * session, sans composant vide, `.` ou `..` (le démon revérifie après
+ * résolution des liens).
+ */
+function writePath(o: Obj, k: string): string {
+  const v = relPath(o, k)
+  if (v.startsWith('/')) throw new ValidationError(`« ${k} » doit être un chemin relatif`)
+  if (v.split('/').some((c) => c === '' || c === '.' || c === '..')) {
+    throw new ValidationError(`« ${k} » doit être un chemin relatif sans « . », « .. » ni « // »`)
+  }
+  return v
+}
+
+/** Moitié de paire de substitution UTF-16 isolée : non encodable en UTF-8 (deviendrait U+FFFD). */
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
+/** Contenu d'un fichier écrit : texte (vide permis), 2 Mio d'UTF-8 au plus, sans moitié de paire isolée. */
+function fileContent(o: Obj, k: string): string {
+  const v = o[k]
+  if (typeof v !== 'string') throw new ValidationError(`« ${k} » doit être une chaîne`)
+  // Borne grossière avant l'encodage (une unité UTF-16 donne au moins un octet).
+  if (v.length > MAX_FILE_WRITE_BYTES || new TextEncoder().encode(v).length > MAX_FILE_WRITE_BYTES) {
+    throw new ValidationError(`« ${k} » est trop long (2 Mio au plus)`)
+  }
+  if (LONE_SURROGATE_RE.test(v)) throw new ValidationError(`« ${k} » n’est pas du texte Unicode valide`)
+  return v
+}
+
+/** Empreinte SHA-256 : 64 caractères hexadécimaux en minuscules. */
+const SHA256_RE = /^[0-9a-f]{64}$/
+
+/** Version attendue d'un fichier écrit : `null` (création) ou exactement `{sha256}` ; la clé est obligatoire. */
+function expectedVersion(o: Obj, k: string): { sha256: string } | null {
+  if (!Object.prototype.hasOwnProperty.call(o, k)) throw new ValidationError(`« ${k} » est obligatoire (objet ou null)`)
+  const v = o[k]
+  if (v === null) return null
+  if (typeof v !== 'object' || Array.isArray(v)) throw new ValidationError(`« ${k} » doit être un objet ou null`)
+  const h = (v as Obj).sha256
+  if (typeof h !== 'string' || !SHA256_RE.test(h)) {
+    throw new ValidationError(`« ${k}.sha256 » doit être une empreinte SHA-256 (64 caractères hexadécimaux en minuscules)`)
+  }
+  return { sha256: h }
+}
+
 /** Nom de branche (ou référence de base) : règles prudentes de `git check-ref-format`. */
 function branchName(o: Obj, k: string): string {
   const v = str(o, k, MAX_SHORT * 2, { nonEmpty: true })
@@ -346,6 +391,12 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
     case 'files.read':
       out.id = uuid(o, 'id')
       out.path = relPath(o, 'path')
+      return out
+    case 'files.write':
+      out.id = uuid(o, 'id')
+      out.path = writePath(o, 'path')
+      out.content = fileContent(o, 'content')
+      out.expected = expectedVersion(o, 'expected')
       return out
     case 'sessions.diffFile':
       out.id = uuid(o, 'id')

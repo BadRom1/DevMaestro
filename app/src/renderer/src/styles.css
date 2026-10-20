@@ -415,6 +415,20 @@ tr.cm td { padding: 6px 12px 8px 60px; white-space: normal }
 .selfloat > .inline-err { display: inline-block; background: var(--panel); border: 1px solid var(--err); border-radius: var(--r); padding: 4px 8px }
 .selfloat .cbox { width: min(460px, 70vw); box-shadow: 0 8px 24px rgba(0, 0, 0, .25) }
 .fview { grid-template-rows: auto minmax(0, 1fr) auto }
+/* Édition d'un fichier (lot 7) : bandeaux au-dessus, éditeur CodeMirror sur toute la hauteur (il défile lui-même). */
+.fbody:has(> .fedit) { overflow: hidden }
+.fedit { display: flex; flex-direction: column; height: 100%; min-height: 0 }
+.feditor { flex: 1 1 auto; min-height: 0; overflow: hidden }
+.feditor .cm-editor { height: 100% }
+.ehint { margin: 0; padding: 4px 12px; border-top: 1px solid var(--line) }
+.ebanner { margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 12.5px; display: grid; gap: 6px }
+.ebanner p { margin: 0 }
+.ebanner.info { color: var(--muted); background: var(--panel-2) }
+.ebanner.bad { color: var(--err); background: color-mix(in srgb, var(--err) 8%, var(--panel)) }
+.ebanner.warn { background: color-mix(in srgb, var(--wait) 10%, var(--panel)); border-bottom-color: var(--wait) }
+.ebanner .eacts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center }
+.ebanner .eacts > span { margin-right: 4px }
+.ediff { border: 1px solid var(--line); border-radius: var(--r); overflow: auto; max-height: 62vh }
 /* Extraits de fichiers dans la revue (onglets Diff et Fichiers). */
 .fcomments { flex-basis: 100%; font-size: 12.5px }
 .fcomments summary { cursor: pointer; color: var(--muted) }

@@ -388,6 +388,21 @@ function createWindow(): BrowserWindow {
     if (key.step) void changeZoom(key.step)
   })
   win.webContents.on('did-finish-load', () => void settingsLoaded.then(applyZoom))
+  // La page refuse de se décharger (fichier modifié non enregistré, lot 7) : dialogue natif, en français.
+  win.webContents.on('will-prevent-unload', (e) => {
+    const choice = dialog.showMessageBoxSync(win, {
+      type: 'warning',
+      title: 'Modifications non enregistrées',
+      message: 'Un fichier modifié n’est pas enregistré.',
+      detail: 'Si tu quittes maintenant, tes modifications seront perdues.',
+      buttons: ['Rester', 'Quitter sans enregistrer'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    })
+    // `preventDefault` ici ignore le refus de la page : la fenêtre se ferme (ou se recharge).
+    if (choice === 1) e.preventDefault()
+  })
   win.once('ready-to-show', () => win.show())
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null

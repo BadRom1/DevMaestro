@@ -87,8 +87,9 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `-32018` | sous-agent inconnu dans cette session (`sessions.subagent`) |
 | `-32019` | `worktrees.remove` refusé : « une session tourne dans ce worktree » (session vivante du démon dont le `cwd` est dans ce worktree) ; aussi `sessions.launch` / `sessions.resume` dans un worktree en cours de suppression (« ce worktree est en cours de suppression ») |
 | `-32020` | `worktrees.remove` refusé sans `force` : le worktree a des modifications non commitées ou des fichiers non suivis non ignorés ; `data: {files: [chemins], total}` (au plus 20 chemins, relatifs au worktree) |
+| `-32021` | `files.write` refusé : « le fichier a été modifié depuis son ouverture » ; `data: {version}` (version actuelle, `null` si le fichier n'existe plus) ; rien n'est écrit |
 
-Une erreur peut porter un champ `data` (objet) avec des détails structurés, en plus de `code` et `message` ; il n'est présent que là où ce document le décrit (aujourd'hui : commentaires de fichier de `sessions.sendReview`, `{index, path, line, line_end}` ; `-32020` de `worktrees.remove`, `{files, total}`). Un client doit ignorer un `data` qu'il ne connaît pas.
+Une erreur peut porter un champ `data` (objet) avec des détails structurés, en plus de `code` et `message` ; il n'est présent que là où ce document le décrit (aujourd'hui : commentaires de fichier de `sessions.sendReview`, `{index, path, line, line_end}` ; `-32020` de `worktrees.remove`, `{files, total}` ; `-32021` de `files.write`, `{version}`). Un client doit ignorer un `data` qu'il ne connaît pas.
 
 ## 4. Méthodes
 
@@ -122,7 +123,8 @@ Une erreur peut porter un champ `data` (objet) avec des détails structurés, en
 | `sessions.commitDiff` | `{id, sha}` | `{sha, base, files, truncated, skipped_non_utf8}` |
 | `sessions.commitDiffFile` | `{id, sha, path}` | `{hunks, binary, too_large}` |
 | `files.list` | `{id, path?}` | `{root, path, entries, truncated}` (voir « Fichiers d'une session ») |
-| `files.read` | `{id, path}` | `{path, size, binary, too_large, content}` |
+| `files.read` | `{id, path}` | `{path, size, binary, too_large, content, version, editable, not_editable_reason}` |
+| `files.write` | `{id, path, content, expected: {sha256} \| null}` | `{version}` (voir « Fichiers d'une session ») |
 | `sessions.subagents` | `{id}` | `{agents: [Sous-agent]}`, ordre de lancement, **sans** `report` (voir « Sous-agents ») |
 | `sessions.subagent` | `{id, agent_id}` | `Sous-agent` **avec** `report` |
 | `conversation.get` | `{id, before?, limit?}` | `{segments, entries: [Entrée], has_more, invalid_lines}` (voir « Vue conversation ») |
@@ -306,7 +308,7 @@ Mêmes garde-fous que le diff (§ « Diff et relecture ») : CLI `git` durcie, c
 
 ### Fichiers d'une session (v0.2, lot 3)
 
-**Racine** : la racine du worktree si le dossier de la session est dans un dépôt git (même si la session a été lancée dans un sous-dossier), sinon le dossier de la session ; toujours résolue (`root`, chemin absolu). Les deux méthodes marchent pour une session arrêtée tant que son dossier existe. Erreurs : `-32001` session inconnue, `-32016` dossier disparu, `-32602` chemin refusé ou invalide (message en français), `-32603` échec de lecture ou de `git`.
+**Racine** : la racine du worktree si le dossier de la session est dans un dépôt git (même si la session a été lancée dans un sous-dossier), sinon le dossier de la session ; toujours résolue (`root`, chemin absolu). Les trois méthodes marchent pour une session arrêtée tant que son dossier existe (pour `files.write`, c'est l'utilisateur qui écrit, pas Claude). Erreurs : `-32001` session inconnue, `-32016` dossier disparu, `-32602` chemin refusé ou invalide, écriture refusée (message en français), `-32021` conflit d'écriture, `-32603` échec de lecture, d'écriture ou de `git`.
 
 **Chemins** (`path`) : relatifs à la racine, séparés par `/` (`""` ou absent : la racine). Refusés (`-32602`) : chemin absolu, composant `..`, octet nul, composant `.git` quelle que soit la casse (`.GIT`, `.Git`… : systèmes de fichiers insensibles à la casse ; jamais listé ni lu). Tout accès au disque passe par `openat2(2)` depuis la racine avec `RESOLVE_BENEATH` et `RESOLVE_NO_MAGICLINKS` : aucune résolution ne sort de la racine, même par un lien symbolique remplacé entre deux appels (noyau sans `openat2` : repli sur la résolution du chemin et une vérification qu'il reste dans la racine, moins robuste face à un lien remplacé entre deux appels ; un avertissement est journalisé une fois). Hors du runtime du démon. Limites assumées (la session peut de toute façon écrire dans ce dossier) : un point de montage (y compris un *bind mount*) sous la racine est parcouru comme un dossier ordinaire, et un lien physique (*hard link*) vers un fichier de `.git` est lisible comme n'importe quel fichier.
 
@@ -331,14 +333,35 @@ Mêmes garde-fous que le diff (§ « Diff et relecture ») : CLI `git` durcie, c
 **`files.read {id, path}`** :
 
 ```json
-{"path": "README.md", "size": 9, "binary": false, "too_large": false, "content": "# Projet\n"}
+{"path": "README.md", "size": 9, "binary": false, "too_large": false, "content": "# Projet\n",
+ "version": {"size": 9, "mtime_ns": 1760951234123456789,
+             "sha256": "0d6c…(64 caractères hexadécimaux minuscules)"},
+ "editable": true, "not_editable_reason": null}
 ```
 
 - Les liens symboliques sont suivis s'ils restent **dans** la racine (`RESOLVE_BENEATH` : un lien absolu, même vers la racine, est refusé), jamais vers `.git`. Le fichier est d'abord ouvert en `O_PATH` (aucun effet de bord) et doit être un fichier ordinaire : dossier, FIFO, périphérique ou socket refusés (`-32602`) ; puis il est rouvert pour la lecture (même inode vérifié).
 - Au plus **2 Mio** : au-delà, `too_large: true`, `content: null` (rien n'est lu). Binaire (octet nul dans les 8 000 premiers octets) : `binary: true`, `content: null`. Sinon `content` : le texte en UTF-8 (octets invalides remplacés par « � »). `path` : le chemin demandé, normalisé.
+- **`version`** (v0.3, lot 7) : `{size, mtime_ns, sha256}` du contenu lu : taille en octets, date de modification en nanosecondes depuis l'époque Unix (entier ; dépasse la précision d'un `number` JavaScript, purement indicatif), empreinte SHA-256 des **octets bruts** lus (pas du texte où les octets invalides sont remplacés), en hexadécimal minuscule. Présente aussi pour un fichier binaire ; `null` si `too_large` (rien n'est lu). C'est elle qu'on renvoie dans `expected` de `files.write`.
+- **`editable`**, **`not_editable_reason`** (v0.3, lot 7) : `false` et une raison en français quand `files.write` refuserait d'avance ce fichier, `true` et `null` sinon. Raisons, dans cet ordre : « fichier trop gros pour être modifié (2 Mio au plus) » (`too_large`), « fichier binaire », « le fichier n'est pas un texte UTF-8 valide » (`content` lu avec pertes), « c'est un lien symbolique : il n'est pas suivi pour écrire » (dernier composant du chemin demandé ; un lien interne plus haut sur le chemin n'empêche rien), « fichier en lecture seule », « dossier en lecture seule » (`faccessat W_OK` sur le fichier, puis sur son dossier, où le temporaire est créé). Indicatif : `files.write` revérifie tout au moment d'écrire.
 - Un fichier ignoré par `.gitignore` reste lisible par son chemin (seule la liste le masque).
 - « Mentionner à Claude » : le front tape `@<path> ` par `sessions.input` (sans Entrée).
 - « Envoyer à Claude » une sélection de lignes (v0.2, lot 3 bis) : commentaire de fichier (`kind: "file"`) de `sessions.sendReview`, voir § Diff et relecture ; le démon relit les lignes avec les mêmes garanties que `files.read`.
+
+**`files.write {id, path, content, expected}`** (v0.3, lot 7) : écrit un fichier texte sous la racine.
+
+```json
+{"id": "…", "path": "src/a.rs", "content": "fn a() {}\n", "expected": {"sha256": "<sha256 de la version lue>"}}
+→ {"version": {"size": 10, "mtime_ns": 1760951299000000000, "sha256": "<sha256 de content>"}}
+```
+
+- `content` : texte (chaîne JSON, donc UTF-8), écrit **octet pour octet** (fins de ligne conservées telles qu'envoyées, aucun saut de ligne ajouté), au plus **2 Mio** en octets UTF-8, sans octet nul dans les 8 000 premiers octets (il serait relu comme binaire) : `-32602` sinon.
+- `expected` : **obligatoire** ; `{sha256}` (64 caractères hexadécimaux minuscules, la `version.sha256` de `files.read`) pour remplacer un fichier existant, `null` pour en **créer** un qui n'existe pas. Absent ou d'une autre forme : `-32602`.
+- **Conflit** `-32021` « le fichier a été modifié depuis son ouverture », `data: {version}`, rien n'est écrit : l'empreinte actuelle diffère de `expected.sha256` ; ou `expected` vaut `null` et le fichier existe ; ou `expected` est donné et le fichier n'existe plus (`data: {version: null}`). « Écraser quand même » : renvoyer avec `expected: {sha256: data.version.sha256}` (ou `null` si `data.version` est `null`).
+- **Chemin** : mêmes règles que `files.read` (normalisé, jamais `.git` quelle que soit la casse). Le **dossier parent** doit exister et être accessible (`-32602` « le dossier parent n'existe pas », « dossier parent inaccessible » sans droit de traversée) ; il est ouvert sous la racine avec `openat2` `RESOLVE_BENEATH` (liens symboliques suivis s'ils restent dans la racine, refusé si son chemin réel passe par `.git`) et ce descripteur est gardé d'un bout à l'autre : tout le reste se fait par rapport à lui, sur le seul dernier composant, sans suivre de lien. Le **dernier composant** ne doit pas être un lien symbolique (même interne : « c'est un lien symbolique : il n'est pas suivi pour écrire »), ni un dossier, une FIFO, un périphérique ou une socket (`-32602`).
+- **Fichier existant** : refusé (`-32602`) s'il dépasse 2 Mio, s'il est binaire (octet nul), s'il n'est pas un texte UTF-8 valide (`files.read` en a remplacé les octets invalides par « � » : le réécrire le corromprait) ou s'il n'est pas accessible en écriture (« fichier en lecture seule », testé par `faccessat(W_OK)` comme `editable` : le renommage passerait outre, il ne le fait pas). Le fichier visé n'est **jamais ouvert en écriture** (seulement en lecture, pour son empreinte) : un refus ou un conflit ne réveille aucun surveillant (`IN_CLOSE_WRITE` d'inotify). Dossier où le temporaire ne peut pas être créé : « dossier en lecture seule ».
+- **Écriture atomique** : fichier temporaire `.devmaestro-<16 hex>.tmp` créé dans le même dossier (`O_CREAT | O_EXCL | O_NOFOLLOW`), avec les droits de l'original (`rwx` de `st_mode & 0o777`, appliqués par `fchmod`, donc sans le masque ; les bits setuid, setgid et sticky ne sont pas repris), ou `0o666` moins le masque du démon pour un nouveau fichier ; contenu écrit puis `fsync` ; **empreinte revérifiée** juste avant le renommage (même inode, même empreinte ; création : toujours absent), puis `renameat2` dans le dossier ouvert (sans option pour un remplacement, avec `RENAME_NOREPLACE` pour une création : un fichier apparu entre-temps donne `-32021`), puis `fsync` du dossier (au mieux). En cas d'échec après sa création, le temporaire est supprimé. `version` rendue : celle du fichier écrit (même inode que ce que relira `files.read`).
+- Limites assumées : le fichier écrit est un **nouvel inode** ; seuls les bits `rwx` des droits sont repris : les ACL POSIX, les attributs étendus (étiquette SELinux, *capabilities* de fichier…) et les bits setuid, setgid et sticky de l'original sont perdus ; le propriétaire et le groupe du nouveau fichier sont ceux du démon (l'utilisateur) ; un lien physique (*hard link*) vers l'ancien fichier n'est plus partagé (comme avec tout éditeur qui écrit par renommage), et un changement fait entre la dernière vérification et le renommage (fenêtre de quelques microsecondes) est écrasé. Un noyau sans `openat2` ouvre le dossier parent par le repli de `files.read`.
+- `session.diff_changed` suit naturellement (le sondage du diff voit le changement) ; le temporaire peut apparaître un instant dans un `files.list` hors dépôt.
 
 ### Sous-agents d'une session (v0.2, lot 5)
 

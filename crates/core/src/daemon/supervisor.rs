@@ -589,8 +589,22 @@ fn file_error(e: crate::ports::FileError, rel: &str) -> RpcError {
             "« {shown} » n'est pas un fichier ordinaire (dossier, FIFO, périphérique…)"
         )),
         FileError::NotDir => RpcError::params(format!("« {shown} » n'est pas un dossier")),
+        FileError::Denied => RpcError::params(format!("« {shown} » : accès refusé")),
+        FileError::Refused(why) => {
+            RpcError::params(format!("« {shown} » : modification refusée : {why}"))
+        }
+        FileError::Conflict(version) => RpcError::new(
+            error_code::FILE_CONFLICT,
+            "le fichier a été modifié depuis son ouverture",
+        )
+        .with_data(json!({"version": version.as_ref().map(file_version_json)})),
         FileError::Io(m) => RpcError::new(error_code::INTERNAL_ERROR, m),
     }
+}
+
+/// `{size, mtime_ns, sha256}` d'une version de fichier.
+fn file_version_json(v: &crate::domain::files::FileVersion) -> Value {
+    json!({"size": v.size, "mtime_ns": v.mtime_ns, "sha256": v.sha256})
 }
 
 /// Instantané, historique éventuel, flux de sortie et terminal d'une session.
@@ -2387,13 +2401,78 @@ impl Daemon {
             Some(b) if looks_binary(b) => (true, false, Value::Null),
             Some(b) => (false, false, json!(String::from_utf8_lossy(b))),
         };
+        // Ce que `files.write` refuserait d'avance (il revérifie tout).
+        let not_editable: Option<String> = if too_large {
+            Some("fichier trop gros pour être modifié (2 Mio au plus)".into())
+        } else if binary {
+            Some("fichier binaire".into())
+        } else if f
+            .bytes
+            .as_deref()
+            .is_some_and(|b| std::str::from_utf8(b).is_err())
+        {
+            Some("le fichier n'est pas un texte UTF-8 valide".into())
+        } else {
+            f.not_editable.clone()
+        };
         Ok(json!({
             "path": rel,
             "size": f.size,
             "binary": binary,
             "too_large": too_large,
             "content": content,
+            "version": f.version.as_ref().map(file_version_json),
+            "editable": not_editable.is_none(),
+            "not_editable_reason": not_editable,
         }))
+    }
+
+    /// `files.write {id, path, content, expected: {sha256} | null}` : écrit
+    /// un fichier texte sous la racine, atomiquement, s'il n'a pas changé
+    /// depuis sa lecture (`-32021` sinon, version actuelle dans `data`).
+    /// Bloquant.
+    pub fn files_write(&self, params: &Value) -> Result<Value, RpcError> {
+        use crate::domain::files::{check_write_content, normalize_rel, valid_sha256};
+        let id = session_id_param(params)?;
+        let rel = normalize_rel(
+            &opt_str(params, "path")?.ok_or_else(|| RpcError::params("« path » manquant"))?,
+        )
+        .map_err(RpcError::params)?;
+        if rel.is_empty() {
+            return Err(RpcError::params("« path » : un fichier attendu"));
+        }
+        let content = match params.get("content") {
+            Some(Value::String(c)) => c,
+            Some(_) => return Err(RpcError::params("« content » : texte attendu")),
+            None => return Err(RpcError::params("« content » manquant")),
+        };
+        let expected = match params.get("expected") {
+            None => {
+                return Err(RpcError::params(
+                    "« expected » manquant : {sha256} ou null pour créer le fichier",
+                ));
+            }
+            Some(Value::Null) => None,
+            Some(Value::Object(o)) => match o.get("sha256").and_then(Value::as_str) {
+                Some(h) if valid_sha256(h) => Some(h),
+                _ => {
+                    return Err(RpcError::params(
+                        "« expected.sha256 » : 64 caractères hexadécimaux minuscules attendus",
+                    ));
+                }
+            },
+            Some(_) => {
+                return Err(RpcError::params("« expected » : {sha256} ou null attendu"));
+            }
+        };
+        check_write_content(content).map_err(RpcError::params)?;
+        let (_, root, _) = self.files_root(&id)?;
+        let v = self
+            .deps
+            .files
+            .write_beneath(&root, &rel, content.as_bytes(), expected)
+            .map_err(|e| file_error(e, &rel))?;
+        Ok(json!({"version": file_version_json(&v)}))
     }
 
     // ----------------------------------------------------------------- quotas

@@ -202,8 +202,11 @@ export function ReviewBar({
   onSent,
   onOpenFile,
   onOpenCommit,
+  blockedReason = null,
 }: {
   session: Session
+  /** Envoi impossible pour l'instant (raison affichée), ex. fichier modifié non enregistré. */
+  blockedReason?: string | null
   draft: ReviewDraft
   review: (a: ReviewAction) => void
   /** Liste du diff (les commentaires de diff hors de cette liste ne partent pas). */
@@ -229,7 +232,7 @@ export function ReviewBar({
   const full = count >= MAX_COMMENTS
 
   async function send() {
-    if (!built || !session.alive || waiting || sending) return
+    if (!built || !session.alive || waiting || sending || blockedReason) return
     setSending(true)
     setSendError(null)
     setRejected(null)
@@ -301,10 +304,12 @@ export function ReviewBar({
       <button
         type="button"
         className="btn pri"
-        disabled={!built || !session.alive || waiting || sending}
+        disabled={!built || !session.alive || waiting || sending || !!blockedReason}
         onClick={() => void send()}
         title={
-          !session.alive
+          blockedReason
+            ? blockedReason
+            : !session.alive
             ? 'La session ne tourne pas : reprends-la pour lui envoyer la revue.'
             : waiting
               ? 'Réponds d’abord à la demande en attente (permission ou question).'

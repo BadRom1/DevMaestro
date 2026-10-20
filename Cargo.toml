@@ -36,3 +36,8 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 # Version vérifiée sur crates.io le 2026-10-20 (`cargo info`, API crates.io :
 # dernière stable 8.2.0, la 9.0 est encore en rc). Sans les dépendances macOS.
 notify = { version = "8.2.0", default-features = false }
+# Édition de fichiers (v0.3, lot 7) : empreinte SHA-256 du contenu. `ring` est
+# déjà dans le Cargo.lock (TLS de `ureq` par rustls) : aucune crate de plus.
+# Version vérifiée sur crates.io le 2026-10-20 (`cargo info` : 0.17.14, la
+# dernière ; `sha2` 0.11.1 aurait ajouté `digest` et ses dépendances).
+ring = { version = "0.17.14", default-features = false }
