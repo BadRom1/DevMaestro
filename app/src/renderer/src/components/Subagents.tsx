@@ -57,7 +57,8 @@ export function AgentDuration({ agent, className = 'dur' }: { agent: Subagent; c
     }
     paint()
     if (status !== 'running' || ended_at) return
-    return onTick(paint)
+    const off = onTick(paint)
+    return () => off()
   }, [started_at, ended_at, status])
   return <span ref={ref} className={className} />
 }

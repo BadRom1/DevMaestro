@@ -49,7 +49,9 @@ export function CommentBox({
   title?: string
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
-  useEffect(() => ref.current?.focus(), [])
+  useEffect(() => {
+    ref.current?.focus()
+  }, [])
   const n = [...text].length
   return (
     <div className="cbox">

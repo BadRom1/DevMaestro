@@ -54,6 +54,7 @@ const api: DevMaestroApi = {
     ipcRenderer.on(Ipc.openCleanup, h)
     return () => void ipcRenderer.removeListener(Ipc.openCleanup, h)
   },
+  logError: (text) => ipcRenderer.send(Ipc.rendererError, String(text)),
   zoomStep: (dir) => ipcRenderer.invoke(Ipc.zoomStep, String(dir)) as Promise<number | null>,
   onZoomChanged(cb) {
     const h = (_e: IpcRendererEvent, zoom: unknown) => {

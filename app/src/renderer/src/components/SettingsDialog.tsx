@@ -278,7 +278,11 @@ function ThemeImportPanel({ onDone, onCancel }: { onDone: (message: string) => v
     }
   }, [text])
 
-  useEffect(() => box.current?.scrollIntoView?.({ block: 'nearest' }), [])
+  // Corps en bloc : `scrollIntoView` renvoie une promesse dans Chromium récent, et un effet ne doit
+  // renvoyer qu'une fonction de nettoyage (sinon React plante au démontage : écran blanc).
+  useEffect(() => {
+    void box.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [])
 
   async function readFile(f: File | undefined) {
     setFileError(null)

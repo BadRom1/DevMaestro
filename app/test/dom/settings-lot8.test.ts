@@ -10,6 +10,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { defaultSettings, type AppSettings, type SettingsPatch } from '../../src/shared/settings'
+import { themeJson } from '../../src/renderer/src/state/themeTokens'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -179,5 +180,65 @@ describe('réglages : dialogue', () => {
     expect(document.querySelector('.import-box')).not.toBeNull()
     await act(async () => button('Abandonner').click())
     expect(document.querySelector('.import-box')).toBeNull()
+  })
+
+  /**
+   * Bug du 2026-10-20 (écran blanc définitif) : Chromium récent fait renvoyer
+   * une promesse à `scrollIntoView` ; l'effet du panneau d'import la renvoyait
+   * telle quelle (corps d'expression), React la prenait pour la fonction de
+   * nettoyage et levait « destroy_ is not a function » en fermant le panneau
+   * (« Appliquer ») : toute l'interface était démontée.
+   */
+  describe('« Appliquer » le thème copié (scrollIntoView qui renvoie une promesse, comme Chromium)', () => {
+    const original = Element.prototype.scrollIntoView
+    beforeEach(() => {
+      Element.prototype.scrollIntoView = function () {
+        return Promise.resolve() as unknown as void
+      }
+    })
+    afterEach(() => {
+      Element.prototype.scrollIntoView = original
+    })
+
+    const userSettings = (): AppSettings => ({
+      ...defaultSettings(),
+      theme: { mode: 'light', light: { palette: 'devmaestro', custom: {} }, dark: { palette: 'okabe', custom: {} } },
+    })
+
+    function renderWith(initial: AppSettings) {
+      host = document.createElement('div')
+      document.body.append(host)
+      root = createRoot(host)
+      const dialog = createElement(SettingsDialog, { profiles: [], projects: [], home: null, scheme: 'light', onClose: () => undefined })
+      act(() =>
+        root!.render(createElement(SettingsProvider, { initial, children: [createElement(Spy, { key: 's' }), createElement('div', { key: 'd' }, dialog)] })),
+      )
+    }
+
+    it.each([
+      ['identique au thème actuel', (t: AppSettings['theme']) => t],
+      ['différent du thème actuel', (t: AppSettings['theme']) => ({ ...t, mode: 'dark' as const, light: { palette: 'okabe' as const, custom: {} } })],
+    ])('JSON %s : pas d’exception, le dialogue reste affiché', (_name, change) => {
+      const initial = userSettings()
+      const errors: unknown[] = []
+      const onError = (e: ErrorEvent) => errors.push(e.error)
+      window.addEventListener('error', onError)
+      try {
+        renderWith(initial)
+        act(() => button('Copier le thème (JSON)').click())
+        act(() => button('Importer un thème (JSON)').click())
+        const target = change(initial.theme)
+        setValue(document.querySelector<HTMLTextAreaElement>('.import-box textarea')!, themeJson(target))
+        expect(document.querySelectorAll('.import-box .preview')).toHaveLength(2)
+        // L'aperçu est rendu, et le panneau se ferme dans le même geste.
+        act(() => button('Appliquer').click())
+        expect(errors).toEqual([])
+        expect(document.querySelector('.modal')).not.toBeNull()
+        expect(document.querySelector('.import-box')).toBeNull()
+        expect(latest!.theme).toEqual(target)
+      } finally {
+        window.removeEventListener('error', onError)
+      }
+    })
   })
 })

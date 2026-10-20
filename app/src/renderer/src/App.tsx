@@ -100,7 +100,9 @@ export function App() {
   const systemLight = useSystemPrefersLight()
   const scheme = resolveScheme(themeMode, systemLight)
   // Variables CSS posées avant l'affichage, à chaque changement (mode, palette, couleurs, système).
-  useLayoutEffect(() => applyTheme(settings.theme, scheme), [settings.theme, scheme])
+  useLayoutEffect(() => {
+    applyTheme(settings.theme, scheme)
+  }, [settings.theme, scheme])
   // Couleurs du terminal calculées des mêmes jetons (sans relire le CSS : aucun décalage).
   const termTheme = useMemo(() => terminalTheme(settings.theme, scheme), [settings.theme, scheme])
   const [dialog, setDialog] = useState(false)

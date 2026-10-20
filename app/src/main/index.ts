@@ -49,10 +49,12 @@ import {
   requestTimeoutMs,
   validateExternalUrl,
   validateParams,
+  validateRendererError,
   validateView,
   validateZoomDirection,
 } from './validate'
 import { zoomKey } from './zoom'
+import { RendererErrorLog } from './errorLog'
 
 const log = (msg: string): void => console.log(`[devmaestro] ${msg}`)
 
@@ -517,6 +519,18 @@ function registerIpc(): void {
         .then(() => applyZoom())
         .catch((err: unknown) => log(`réglages de fermeture non enregistrés : ${(err as Error).message}`)),
     )
+  })
+  // Erreurs de la page : au journal, dédoublonnées et limitées (une boucle d'erreurs ne le noie pas).
+  const pageErrors = new RendererErrorLog()
+  ipcMain.on(Ipc.rendererError, (e, text: unknown) => {
+    if (!trusted(e)) return
+    let clean: string
+    try {
+      clean = validateRendererError(text)
+    } catch {
+      return
+    }
+    for (const line of pageErrors.accept(clean, Date.now())) log(line)
   })
   ipcMain.handle(Ipc.zoomStep, async (e, dir: unknown) => {
     if (!trusted(e)) return null

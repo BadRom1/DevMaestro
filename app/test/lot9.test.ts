@@ -8,7 +8,8 @@ import { resolve } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { ValidationError, validateParams } from '../src/main/validate'
+import { RendererErrorLog } from '../src/main/errorLog'
+import { MAX_RENDERER_ERROR, ValidationError, validateParams, validateRendererError } from '../src/main/validate'
 import { RENDERER_METHODS, type CommitInfo, type CommitsList, type DiffFile } from '../src/shared/protocol'
 import {
   commitAriaLabel,
@@ -308,5 +309,36 @@ describe('styles : pas de collision de classes', () => {
     expect(dup).toEqual([])
     expect(counts.get('.crow')).toBe(1)
     expect(counts.get('.cmt-row')).toBe(1)
+  })
+})
+
+describe('journal des erreurs de la page (IPC)', () => {
+  it('texte seulement, caractères de contrôle neutralisés (sauf saut de ligne), borné', () => {
+    expect(validateRendererError('a\nb\u001b[31mc\u2028d')).toBe('a\nb [31mc d')
+    expect(validateRendererError('x'.repeat(20_000))).toHaveLength(MAX_RENDERER_ERROR)
+    for (const bad of [42, null, '', '   ', { message: 'x' }]) expect(() => validateRendererError(bad)).toThrow(ValidationError)
+  })
+})
+
+describe('journal des erreurs de la page : dédoublonnage et limite', () => {
+  it('un même message une fois par minute, 20 messages distincts au plus, puis « n supprimées »', () => {
+    const log = new RendererErrorLog(3, 60_000)
+    expect(log.accept('a', 0)).toEqual(['erreur de la page : a'])
+    expect(log.accept('a', 10)).toEqual([])
+    expect(log.accept('b', 20)).toEqual(['erreur de la page : b'])
+    expect(log.accept('c', 30)).toEqual(['erreur de la page : c'])
+    expect(log.accept('d', 40)).toEqual([])
+    expect(log.accept('a', 60_000)).toEqual([
+      '2 erreurs de la page supprimées (doublons ou limite de 3 par minute)',
+      'erreur de la page : a',
+    ])
+    expect(log.accept('e', 60_001)).toEqual(['erreur de la page : e'])
+  })
+
+  it('une seule suppression : au singulier', () => {
+    const log = new RendererErrorLog(20, 1000)
+    log.accept('a', 0)
+    log.accept('a', 1)
+    expect(log.accept('b', 1000)[0]).toBe('1 erreur de la page supprimée (doublons ou limite de 20 par minute)')
   })
 })

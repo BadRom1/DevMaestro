@@ -14,6 +14,8 @@ import { createRoot } from 'react-dom/client'
 import { defaultSettings, normalizeSettings, type AppSettings } from '../../shared/settings'
 import { api, requestTerminalPort } from './api'
 import { App } from './App'
+import { AppBoundary } from './components/AppBoundary'
+import { installErrorReporting, reportRendererError } from './errorReport'
 import { SettingsProvider } from './settings'
 import { resolveScheme } from './state/themeTokens'
 import { applyTheme, legacyThemeMode, systemPrefersLight } from './theme'
@@ -39,14 +41,20 @@ async function loadSettings(): Promise<AppSettings> {
   }
 }
 
+installErrorReporting()
 requestTerminalPort()
 void loadSettings().then((initial) => {
   applyTheme(initial.theme, resolveScheme(initial.theme.mode, systemPrefersLight()))
-  createRoot(document.getElementById('root')!).render(
+  createRoot(document.getElementById('root')!, {
+    // Rattrapée par aucun garde-fou (ne devrait plus arriver : `AppBoundary` entoure tout) : au journal.
+    onUncaughtError: (error, info) => reportRendererError('erreur d’affichage non rattrapée', error, info.componentStack),
+  }).render(
     <StrictMode>
-      <SettingsProvider initial={initial}>
-        <App />
-      </SettingsProvider>
+      <AppBoundary>
+        <SettingsProvider initial={initial}>
+          <App />
+        </SettingsProvider>
+      </AppBoundary>
     </StrictMode>,
   )
 })

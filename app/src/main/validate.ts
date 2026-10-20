@@ -411,3 +411,13 @@ export function validateZoomDirection(raw: unknown): ZoomDirection {
   if (!(ZOOM_DIRECTIONS as readonly unknown[]).includes(raw)) throw new ValidationError('taille de l’interface : in, out ou reset attendu')
   return raw as ZoomDirection
 }
+
+/** Erreur de la page pour le journal : texte, caractères de contrôle retirés (sauf saut de ligne), 4 000 caractères au plus. */
+export const MAX_RENDERER_ERROR = 4000
+
+export function validateRendererError(raw: unknown): string {
+  if (typeof raw !== 'string' || raw.trim() === '') throw new ValidationError('erreur de la page : texte attendu')
+  // eslint-disable-next-line no-control-regex
+  const clean = raw.slice(0, MAX_RENDERER_ERROR * 2).replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+  return clean.length > MAX_RENDERER_ERROR ? `${clean.slice(0, MAX_RENDERER_ERROR - 1)}…` : clean
+}

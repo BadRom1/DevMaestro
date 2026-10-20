@@ -76,6 +76,8 @@ export interface DevMaestroApi {
   zoomStep(dir: ZoomDirection): Promise<number | null>
   /** Taille de l'interface changée par le processus principal (raccourci clavier ou molette), en pour cent. */
   onZoomChanged(cb: (zoom: number) => void): () => void
+  /** Erreur de la page (non rattrapée, ou rattrapée par un garde-fou d'affichage) pour le journal du processus principal. */
+  logError(text: string): void
 }
 
 /** Messages du canal du terminal, processus principal → page. */
@@ -122,4 +124,5 @@ export const Ipc = {
   openCleanup: 'devmaestro:open-cleanup',
   zoomStep: 'devmaestro:zoom-step',
   zoomChanged: 'devmaestro:zoom-changed',
+  rendererError: 'devmaestro:renderer-error',
 } as const

@@ -5,6 +5,8 @@
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 
+import { ViewBoundary } from './ViewBoundary'
+
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
@@ -90,7 +92,10 @@ export function Modal({
             ×
           </button>
         </div>
-        {children}
+        {/* Une erreur d'affichage du contenu reste dans le dialogue (en-tête et × gardés). */}
+        <ViewBoundary label={title} kind="dialogue">
+          {children}
+        </ViewBoundary>
       </div>
     </div>
   )
