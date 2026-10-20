@@ -4,6 +4,7 @@
  * projet, sessions à reprendre. Calculs purs, testables sans DOM.
  */
 import type { PastSession, ProjectInfo, Session } from '../../../shared/protocol'
+import { rootFromCommonDir } from '../../../shared/worktrees'
 import { basename, resumeBlock, tildify } from './format'
 import { folderName, pastTime } from './projects'
 
@@ -43,6 +44,11 @@ export function projectKeyOf(cwd: string, info: ProjectInfo | undefined): string
   return `dossier:${info?.root || cwd}`
 }
 
+/** Clé de projet d'une session : son identité enregistrée (lot 6) d'abord, sinon déduite du dossier. */
+export function sessionProjectKey(s: Pick<Session, 'cwd' | 'project_common_dir'>, info: ProjectInfo | undefined): string {
+  return s.project_common_dir ? `git:${s.project_common_dir}` : projectKeyOf(s.cwd, info)
+}
+
 /**
  * Clé du profil par défaut d'un projet : pour un dépôt, la racine de son
  * worktree principal déduite du dossier commun (`<racine>/.git`), la même
@@ -78,6 +84,8 @@ export function mergeExtraChoices(known: ProjectChoice[], extras: ProjectChoice[
 
 interface Seen {
   cwd: string
+  /** Identité de projet enregistrée par le démon (sessions seulement). */
+  commonDir: string | null
   at: number
   profile: string
   branch: string | null
@@ -94,6 +102,7 @@ export function buildProjectChoices(args: {
   const seen: Seen[] = [
     ...args.sessions.map((s) => ({
       cwd: s.cwd,
+      commonDir: s.project_common_dir || null,
       at: time(s.last_activity ?? s.created_at),
       profile: s.profile,
       branch: s.branch,
@@ -104,6 +113,7 @@ export function buildProjectChoices(args: {
         ? [
             {
               cwd: p.cwd,
+              commonDir: null,
               at: pastTime(p),
               profile: p.profile,
               branch: p.git_branch,
@@ -116,16 +126,18 @@ export function buildProjectChoices(args: {
   const byKey = new Map<string, ProjectChoice & { dirAt: Map<string, { at: number; branch: string | null }> }>()
   for (const x of seen) {
     const info = projects[x.cwd]
-    const key = projectKeyOf(x.cwd, info)
-    const isGit = !!info?.is_git
-    const root = isGit ? (info?.root ?? info?.worktree_root ?? x.cwd) : info?.root || x.cwd
+    const key = x.commonDir ? `git:${x.commonDir}` : projectKeyOf(x.cwd, info)
+    const isGit = !!info?.is_git || !!x.commonDir
+    // Dossier non résolu (worktree supprimé) mais identité connue : racine déduite du dossier commun.
+    const identityRoot = !info?.is_git && x.commonDir ? rootFromCommonDir(x.commonDir) : null
+    const root = identityRoot ?? (isGit ? (info?.root ?? info?.worktree_root ?? x.cwd) : info?.root || x.cwd)
     let c = byKey.get(key)
     if (!c) {
       c = {
         key,
         name: isGit ? (info?.name ?? basename(root)) : folderName(root, home),
         root,
-        profileKey: profileKeyOf(x.cwd, info),
+        profileKey: identityRoot ?? profileKeyOf(x.cwd, info),
         isGit,
         dirs: [],
         latest: 0,
@@ -199,7 +211,7 @@ export function resumeCandidates(args: {
   const { projectKey, projects } = args
   const out: ResumeCandidate[] = []
   for (const s of args.sessions) {
-    if (s.alive || projectKeyOf(s.cwd, projects[s.cwd]) !== projectKey) continue
+    if (s.alive || sessionProjectKey(s, projects[s.cwd]) !== projectKey) continue
     if (resumeBlock(s, projects[s.cwd])) continue
     out.push({
       kind: 'session',

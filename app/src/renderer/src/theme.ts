@@ -33,6 +33,14 @@ export function applyTheme(theme: ThemeSettings, scheme: Scheme): void {
   for (const k of ALL_OVERRIDABLE) root.style.removeProperty(`--${k}`)
   const values = themeOverrides(theme, scheme)
   for (const [k, v] of Object.entries(values)) root.style.setProperty(`--${k}`, v)
+  // Sélection dérivée de l'accent effectif du mode (toutes palettes, couleurs choisies comprises), comme le terminal.
+  root.style.setProperty('--sel', selectionColor(schemeTokens(theme, scheme).accent, scheme))
+}
+
+/** Fond de sélection : l'accent à 22 % (clair) ou 30 % (sombre), en `#rrggbbaa`. */
+export function selectionColor(accent: string | undefined, scheme: Scheme): string {
+  const a = accent && /^#[0-9a-f]{6}$/i.test(accent) ? accent : scheme === 'light' ? '#2f5bd3' : '#86a8ff'
+  return `${a}${scheme === 'light' ? '38' : '4d'}`
 }
 
 /**
@@ -49,8 +57,8 @@ export function terminalThemeFrom(tokens: Record<string, string>, scheme: Scheme
     foreground: fg,
     cursor: fg,
     cursorAccent: sunk,
-    // Même sélection que `--sel` : l'accent à 22 % (clair) ou 30 % (sombre).
-    selectionBackground: `${accent}${scheme === 'light' ? '38' : '4d'}`,
+    // Même sélection que `--sel` (`selectionColor`).
+    selectionBackground: selectionColor(accent, scheme),
   }
   if (scheme === 'light') {
     return {

@@ -1,14 +1,14 @@
 /**
  * Palettes et couleurs personnalisées (calcul pur, testable sans DOM).
  *
- * Les valeurs de base des deux modes sont dans `styles.css` ; une palette ou
- * une couleur choisie s'y ajoute sous forme de propriétés CSS sur `<html>`,
- * pour le mode effectivement affiché. Les glyphes de statut gardent leur forme
+ * Les valeurs de base des deux modes sont dans `styles.css` ; la palette et
+ * les couleurs choisies **du mode effectivement affiché** (chaque mode a les
+ * siennes) s'y ajoutent sous forme de propriétés CSS sur `<html>`. Les glyphes de statut gardent leur forme
  * quelle que soit la couleur.
  */
-import type { ColorOverrides, PaletteName, ThemeSettings, ThemeToken } from '../../../shared/settings'
+import type { PaletteName, Scheme, ThemeSettings, ThemeToken } from '../../../shared/settings'
 
-export type Scheme = 'light' | 'dark'
+export type { Scheme } from '../../../shared/settings'
 
 /** Jetons neutres qu'une palette (contraste élevé) peut aussi changer. */
 export const NEUTRAL_TOKENS = ['bg', 'panel', 'panel-2', 'sunk', 'line', 'line-2', 'fg', 'muted', 'faint', 'accent-ink'] as const
@@ -66,15 +66,21 @@ export function resolveScheme(mode: ThemeSettings['mode'], systemPrefersLight: b
   return mode === 'system' ? (systemPrefersLight ? 'light' : 'dark') : mode
 }
 
-/** Propriétés CSS à poser sur `<html>` (sans `--`) pour ce mode : palette puis couleurs choisies. */
-export function themeOverrides(theme: Pick<ThemeSettings, 'palette' | 'custom'>, scheme: Scheme): Record<string, string> {
-  const palette = PALETTES[theme.palette] ?? PALETTES.devmaestro
-  return { ...palette[scheme], ...(theme.custom[scheme] as ColorOverrides) }
+/** Propriétés CSS à poser sur `<html>` (sans `--`) pour ce mode : sa palette puis ses couleurs choisies. */
+export function themeOverrides(theme: Pick<ThemeSettings, Scheme>, scheme: Scheme): Record<string, string> {
+  const { palette: name, custom } = theme[scheme]
+  const palette = PALETTES[name] ?? PALETTES.devmaestro
+  return { ...palette[scheme], ...custom }
 }
 
 /** Valeur effective d'un jeton (sélecteurs de couleur, aperçu). */
-export function tokenValue(theme: Pick<ThemeSettings, 'palette' | 'custom'>, scheme: Scheme, token: ThemeToken): string {
+export function tokenValue(theme: Pick<ThemeSettings, Scheme>, scheme: Scheme, token: ThemeToken): string {
   return { ...BASE[scheme], ...themeOverrides(theme, scheme) }[token]!
+}
+
+/** Valeur d'un jeton dans une palette, sans couleur choisie (pour savoir si une couleur est personnalisée). */
+export function paletteValue(palette: PaletteName, scheme: Scheme, token: ThemeToken): string {
+  return { ...BASE[scheme], ...(PALETTES[palette] ?? PALETTES.devmaestro)[scheme] }[token]!
 }
 
 /** Toutes les propriétés qu'une palette ou une personnalisation peut poser (pour les retirer). */
@@ -82,7 +88,7 @@ export const ALL_OVERRIDABLE: readonly string[] = [...NEUTRAL_TOKENS, ...Object.
 
 /** Thème à copier (JSON lisible, à coller ou partager). */
 export function themeJson(theme: ThemeSettings): string {
-  return JSON.stringify({ mode: theme.mode, palette: theme.palette, custom: theme.custom }, null, 2)
+  return JSON.stringify({ mode: theme.mode, light: theme.light, dark: theme.dark }, null, 2)
 }
 
 /** Neutres de `styles.css`, par mode (aperçu d'un mode autre que celui affiché). */
@@ -98,6 +104,6 @@ export const BASE_NEUTRALS: Record<Scheme, Record<(typeof NEUTRAL_TOKENS)[number
 }
 
 /** Tous les jetons d'un mode (neutres et sémantiques), palette et couleurs choisies comprises. */
-export function schemeTokens(theme: Pick<ThemeSettings, 'palette' | 'custom'>, scheme: Scheme): Record<string, string> {
+export function schemeTokens(theme: Pick<ThemeSettings, Scheme>, scheme: Scheme): Record<string, string> {
   return { ...BASE_NEUTRALS[scheme], ...BASE[scheme], ...themeOverrides(theme, scheme) }
 }

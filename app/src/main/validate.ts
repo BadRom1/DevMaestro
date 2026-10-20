@@ -5,6 +5,7 @@
  * longueur bornée). Les champs inconnus sont retirés. Messages en français.
  */
 import { MAX_TITLE, SESSION_COLORS, type MethodName } from '../shared/protocol'
+import { WORKTREE_LOCATIONS, branchNameProblem } from '../shared/worktrees'
 
 export class ValidationError extends Error {
   override name = 'ValidationError'
@@ -145,6 +146,50 @@ function relPath(o: Obj, k: string): string {
   return v
 }
 
+/** Nom de branche (ou référence de base) : règles prudentes de `git check-ref-format`. */
+function branchName(o: Obj, k: string): string {
+  const v = str(o, k, MAX_SHORT * 2, { nonEmpty: true })
+  const problem = branchNameProblem(v)
+  if (problem) throw new ValidationError(`« ${k} » : ${problem}`)
+  return v
+}
+
+/**
+ * Worktree demandé avec la session : `branch`, `base` facultative,
+ * `location` parmi les emplacements connus, `path` absolu seulement (et
+ * obligatoirement) pour `custom`.
+ */
+function worktreeRequest(o: Obj, k: string): Obj {
+  const v = o[k]
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new ValidationError(`« ${k} » doit être un objet`)
+  const w = v as Obj
+  const out: Obj = {}
+  try {
+    out.branch = branchName(w, 'branch')
+    optional(w, out, 'base', branchName)
+    out.location = oneOf(w, 'location', WORKTREE_LOCATIONS)
+    if (out.location === 'custom') out.path = absPath(w, 'path')
+    else if (present(w, 'path')) throw new ValidationError('« path » seulement pour l’emplacement custom')
+  } catch (e) {
+    throw new ValidationError(`${k} : ${(e as Error).message}`)
+  }
+  return out
+}
+
+/** Délai des opérations git longues du démon (création, liste, suppression de worktrees). */
+export const WORKTREE_TIMEOUT_MS = 120_000
+
+/**
+ * Délai d'attente d'une méthode relayée : 120 s pour `worktrees.*` et pour
+ * un lancement qui crée un worktree (extraction d'un gros dépôt) ;
+ * `undefined` : délai par défaut du client.
+ */
+export function requestTimeoutMs(method: MethodName, clean: Obj): number | undefined {
+  if (method === 'worktrees.list' || method === 'worktrees.remove') return WORKTREE_TIMEOUT_MS
+  if (method === 'sessions.launch' && clean.worktree !== undefined) return WORKTREE_TIMEOUT_MS
+  return undefined
+}
+
 /** Paramètres nettoyés pour `method`, ou `ValidationError`. */
 export function validateParams(method: MethodName, raw: unknown): Obj {
   const o = obj(raw)
@@ -173,6 +218,7 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       optional(o, out, 'mode', (x, k) => oneOf(x, k, LAUNCH_MODES))
       optional(o, out, 'prompt', (x, k) => str(x, k, MAX_TEXT))
       size(o, out)
+      optional(o, out, 'worktree', worktreeRequest)
       return out
     case 'sessions.resume':
       if (present(o, 'id')) {
@@ -288,6 +334,15 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
     case 'transcripts.unhide':
       out.profile = str(o, 'profile', MAX_SHORT, { nonEmpty: true })
       out.claude_session_id = uuid(o, 'claude_session_id')
+      return out
+    case 'worktrees.list':
+      out.root = absPath(o, 'root')
+      return out
+    case 'worktrees.remove':
+      out.root = absPath(o, 'root')
+      out.path = absPath(o, 'path')
+      out.delete_branch = bool(o, 'delete_branch')
+      out.force = bool(o, 'force')
       return out
   }
 }

@@ -13,6 +13,7 @@ pub mod state;
 pub mod statusline;
 pub mod subagents;
 pub mod transcript;
+pub mod worktree;
 
 pub use hooks::{BackgroundTask, HookCommon, HookEvent, HookKind, HookParseError, ToolCall};
 pub use metrics::{Metrics, ModelInfo, RateLimitWindow, RateLimits};

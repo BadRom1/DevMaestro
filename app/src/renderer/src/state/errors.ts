@@ -15,6 +15,8 @@ const FRIENDLY: Record<number, string> = {
   [-32014]: 'changement de mode impossible : mode courant inconnu ou hors du cycle Shift+Tab',
   [-32015]: 'Claude Code n’a pas de transcript pour cette session : impossible de la reprendre (retire-la de la liste)',
   [-32016]: 'le dossier de la session n’existe plus (worktree supprimé ?)',
+  [ErrorCode.WorktreeBusy]: 'une session tourne dans ce worktree : arrête-la d’abord',
+  [ErrorCode.WorktreeDirty]: 'le worktree a des modifications non commitées',
   [ErrorCode.Timeout]: 'le démon n’a pas répondu à temps',
   [ErrorCode.Disconnected]: 'démon non connecté',
 }
@@ -32,3 +34,13 @@ export function describeError(code: number, message: string): string {
   if (!message || message === f || code === ErrorCode.Disconnected) return f
   return `${f} (${message})`
 }
+
+/**
+ * Délai dépassé ou connexion perdue : l'opération a pu aboutir côté démon
+ * (création d'un worktree, suppression…). Le résultat est incertain.
+ */
+export function outcomeUncertain(code: number | null): boolean {
+  return code === ErrorCode.Timeout || code === ErrorCode.Disconnected
+}
+
+export const UNCERTAIN_TEXT = 'résultat incertain : vérifie la liste'

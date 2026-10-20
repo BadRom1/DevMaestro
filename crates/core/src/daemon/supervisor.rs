@@ -20,6 +20,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
 mod subagents;
+mod worktrees;
 
 use super::claude_config;
 use super::launch::{self, LaunchKind, LaunchSpec, ScopeSpec};
@@ -231,6 +232,7 @@ pub struct Deps {
     pub quotas: Box<dyn crate::ports::QuotaSource>,
     pub diff: Box<dyn crate::ports::DiffSource>,
     pub files: Box<dyn crate::ports::FileAccess>,
+    pub worktrees: Box<dyn crate::ports::WorktreeGit>,
 }
 
 /// Événement diffusé aux connexions. Léger : une connexion lente regroupe
@@ -250,6 +252,9 @@ pub enum Event {
     /// Les sous-agents d'une session ont changé (`session.subagents_changed`,
     /// liste relue au moment d'envoyer).
     SubagentsChanged(Uuid),
+    /// Les worktrees d'un projet ont changé (`project.worktrees_changed`,
+    /// racine du projet).
+    WorktreesChanged(PathBuf),
 }
 
 /// Anti-rebond du recalcul du diff d'une session.
@@ -502,6 +507,13 @@ pub struct Daemon {
     subagent_notify: Mutex<HashMap<Uuid, subagents::NotifyState>>,
     /// Un seul `git ls-files` à la fois par session.
     files_inflight: Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
+    /// Suivi des worktrees par projet (dossier commun), pour
+    /// `project.worktrees_changed`.
+    worktree_watch: Mutex<HashMap<PathBuf, worktrees::WorktreeWatch>>,
+    /// Verrou des créations et suppressions de worktrees, par dossier commun.
+    repo_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+    /// Worktrees en cours de suppression : aucun lancement ni reprise dedans.
+    removing: Mutex<std::collections::HashSet<PathBuf>>,
 }
 
 /// Liste des fichiers d'un dépôt, quand, pour quelle empreinte du diff et
@@ -678,6 +690,7 @@ impl Entry {
             color: self.session.color.clone(),
             first_prompt: self.session.first_prompt.clone(),
             session_name: self.session.metrics.session_name.clone(),
+            project_common_dir: self.session.project_common_dir.clone(),
         }
     }
 
@@ -708,6 +721,7 @@ impl Entry {
             "profile": s.profile,
             "cwd": s.cwd,
             "project_root": s.project_root,
+            "project_common_dir": s.project_common_dir,
             "branch": s.branch,
             "model": self.model,
             "mode": s.state.permission_mode.as_ref().map(|m| m.as_str()),
@@ -829,6 +843,9 @@ impl Daemon {
             files_cache: Mutex::new(HashMap::new()),
             subagent_notify: Mutex::new(HashMap::new()),
             files_inflight: Mutex::new(HashMap::new()),
+            worktree_watch: Mutex::new(HashMap::new()),
+            repo_locks: Mutex::new(HashMap::new()),
+            removing: Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -1072,6 +1089,7 @@ impl Daemon {
                 r.profile.clone(),
             );
             session.branch = r.branch.clone();
+            session.project_common_dir = r.project_common_dir.clone();
             session.title = r.title.clone();
             session.color = r.color.clone();
             session.first_prompt = r.first_prompt.clone();
@@ -1120,6 +1138,7 @@ impl Daemon {
         info!("{} session(s) relue(s) depuis la base", reg.sessions.len());
         drop(reg);
         self.refresh_resumable(None);
+        self.backfill_common_dirs();
     }
 
     // ---------------------------------------------------------------- lecture
@@ -1157,7 +1176,22 @@ impl Daemon {
                     path.display()
                 )));
             }
-            // Dossier disparu (worktree supprimé…) : projet deviné, rien n'est créé.
+            // Dossier disparu (worktree supprimé…) : d'abord le projet
+            // enregistré (sessions, worktrees créés par le démon), puis la
+            // déduction ; rien n'est créé.
+            if let Some((root, common_dir)) = self.known_project_of(path) {
+                return Ok(json!({
+                    "path": path,
+                    "exists": false,
+                    "inferred": true,
+                    "is_git": true,
+                    "root": root,
+                    "worktree_root": Value::Null,
+                    "common_dir": common_dir,
+                    "branch": Value::Null,
+                    "name": display_name(&root),
+                }));
+            }
             let vcs = |p: &Path| self.deps.vcs.resolve(p);
             return Ok(
                 match infer_missing_project(path, &|p: &Path| p.is_dir(), &vcs) {
@@ -2421,11 +2455,14 @@ impl Daemon {
         }
     }
 
-    /// `sessions.launch`.
+    /// `sessions.launch`, avec en option un nouveau worktree (`worktree`,
+    /// v0.2 lot 6) : créé avant le lancement, retiré (avec la branche créée)
+    /// si le lancement échoue. Bloquant (`git`) : à appeler hors du runtime.
     pub fn launch(self: &Arc<Self>, params: &Value) -> Result<Value, RpcError> {
         self.refuse_if_shutting_down()?;
         let cwd = opt_str(params, "cwd")?.ok_or_else(|| RpcError::params("« cwd » manquant"))?;
         let cwd = canonical_cwd(&cwd)?;
+        let worktree = worktrees::WorktreeParam::parse(params)?;
         let profile_name = opt_str(params, "profile")?
             .unwrap_or_else(|| crate::domain::profile::DEFAULT_PROFILE_NAME.to_owned());
         let id = Uuid::new_v4();
@@ -2443,6 +2480,13 @@ impl Daemon {
         };
         self.check_mode_allowed(plan.mode.as_ref(), false)?;
         let mut warnings = Vec::new();
+        // Tout est validé : le worktree est créé, la session y sera lancée.
+        let created = match &worktree {
+            Some(w) => Some(self.create_worktree(&cwd, w, &mut warnings)?),
+            None => None,
+        };
+        let cwd = created.as_ref().map_or(cwd, |c| c.path.clone());
+        plan.cwd = cwd.clone();
         if plan.mode.is_none() {
             plan.mode = self.effective_mode(&plan.cwd, &plan.profile, &mut warnings);
         }
@@ -2455,6 +2499,7 @@ impl Daemon {
             cwd,
             plan.profile.name.clone(),
         );
+        session.project_common_dir = repo.as_ref().map(|r| r.common_dir.clone());
         session.branch = repo.and_then(|r| r.branch);
         if let Some(p) = &plan.prompt {
             session.note_prompt(p);
@@ -2462,7 +2507,28 @@ impl Daemon {
         let mut entry = Entry::new(session, Terminal::new(plan.size), self.now());
 
         let mut reg = self.lock();
-        let (run, token) = self.spawn_run(id, &entry.terminal, &plan, false)?;
+        // Sous le verrou du registre : une suppression qui a marqué ce
+        // worktree voit ensuite cette session vivante, ou bien elle est refusée ici.
+        let refused = self.being_removed(&plan.cwd).then(|| {
+            RpcError::new(
+                error_code::WORKTREE_IN_USE,
+                "ce worktree est en cours de suppression",
+            )
+        });
+        let spawned = match refused {
+            Some(e) => Err(e),
+            None => self.spawn_run(id, &entry.terminal, &plan, false),
+        };
+        let (run, token) = match spawned {
+            Ok(spawned) => spawned,
+            Err(e) => {
+                drop(reg);
+                if let Some(c) = &created {
+                    self.rollback_worktree(c);
+                }
+                return Err(e);
+            }
+        };
         install_run(&mut reg, &mut entry, run, token, plan);
         info!(
             "session {id} lancée dans {} (profil {})",
@@ -2470,8 +2536,15 @@ impl Daemon {
             entry.session.profile
         );
         self.commit(&mut entry);
-        let result = json!({"session": entry.json(), "warnings": warnings});
+        let mut result = json!({"session": entry.json(), "warnings": warnings});
+        if let Some(c) = &created {
+            result["worktree"] = c.json();
+        }
         reg.sessions.insert(id, entry);
+        drop(reg);
+        if let Some(c) = &created {
+            self.worktrees_touched(&c.common_dir, &c.project_root);
+        }
         Ok(result)
     }
 
@@ -2565,6 +2638,13 @@ impl Daemon {
             })
             .collect();
         let cwd_exists = |p: &Path| cwd_known.get(p).copied().unwrap_or_else(|| p.is_dir());
+        // Dépôts des dossiers en jeu, lus par `git` (avec délai) avant de
+        // prendre le verrou du registre.
+        let repos: HashMap<PathBuf, crate::ports::RepoInfo> = cwd_known
+            .iter()
+            .filter(|(_, ok)| **ok)
+            .filter_map(|(c, _)| self.deps.vcs.resolve(c).map(|r| (c.clone(), r)))
+            .collect();
 
         let mut reg = self.lock();
         let existing = match (&by_id, &claude_id) {
@@ -2633,12 +2713,22 @@ impl Daemon {
             if plan.mode.is_none() {
                 plan.mode = self.effective_mode(&plan.cwd, &plan.profile, &mut warnings);
             }
+            if self.being_removed(&plan.cwd) {
+                return Err(RpcError::new(
+                    error_code::WORKTREE_IN_USE,
+                    "ce worktree est en cours de suppression",
+                ));
+            }
             let terminal = entry.terminal.clone();
             let (run, token) = self.spawn_run(id, &terminal, &plan, true)?;
             let now = self.now();
             let mut entry = reg.sessions.remove(&id).expect("présente");
             install_run(&mut reg, &mut entry, run, token, plan);
             entry.updated_at = now;
+            if entry.session.project_common_dir.is_none() {
+                entry.session.project_common_dir =
+                    repos.get(&entry.session.cwd).map(|r| r.common_dir.clone());
+            }
             info!(
                 "session {id} reprise (claude {})",
                 entry.session.claude_session_id
@@ -2684,7 +2774,13 @@ impl Daemon {
         if plan.mode.is_none() {
             plan.mode = self.effective_mode(&plan.cwd, &plan.profile, &mut warnings);
         }
-        let repo = self.deps.vcs.resolve(&cwd);
+        if self.being_removed(&plan.cwd) {
+            return Err(RpcError::new(
+                error_code::WORKTREE_IN_USE,
+                "ce worktree est en cours de suppression",
+            ));
+        }
+        let repo = repos.get(&cwd).cloned();
         let id = Uuid::new_v4();
         let mut session = Session::new(
             id,
@@ -2694,6 +2790,7 @@ impl Daemon {
             cwd,
             plan.profile.name.clone(),
         );
+        session.project_common_dir = repo.as_ref().map(|r| r.common_dir.clone());
         session.branch = repo.and_then(|r| r.branch);
         // Nom repris du transcript (premier prompt, titre de Claude Code) et
         // d'une autre entrée du démon pour la même conversation (titre, couleur).
@@ -3102,6 +3199,13 @@ impl Daemon {
                 | HookKind::StopFailure
         ) {
             self.schedule_diff_check(id, false);
+        }
+        // Fin de tour : `dirty` / `integrated` des worktrees du dépôt relus.
+        if matches!(event.kind, HookKind::Stop { .. } | HookKind::StopFailure)
+            && let Some(common) = entry.session.project_common_dir.clone()
+        {
+            let root = entry.session.project_root.clone();
+            self.schedule_worktrees_check(common, root, false);
         }
         handle
     }
@@ -3528,6 +3632,12 @@ impl Daemon {
         if let Some(t) = token {
             reg.forget_token(&t);
         }
+        if let Some(e) = reg.sessions.get(&id)
+            && let Some(common) = e.session.project_common_dir.clone()
+        {
+            let root = e.session.project_root.clone();
+            self.schedule_worktrees_check(common, root, false);
+        }
     }
 
     /// Nombre de sessions dont le processus tourne.
@@ -3853,6 +3963,7 @@ mod tests {
             color: None,
             first_prompt: None,
             session_name: None,
+            project_common_dir: None,
         };
         let mut later = r.clone();
         later.updated_at = OffsetDateTime::now_utc();

@@ -68,6 +68,10 @@ export interface DevMaestroApi {
   copyText(text: string): Promise<boolean>
   /** Une notification desktop a été cliquée : afficher cette session. */
   onSelectSession(cb: (id: string) => void): () => void
+  /** Dossier des worktrees gérés par l'app (`$XDG_DATA_HOME/devmaestro/worktrees`), `null` si inconnu. */
+  worktreesDir(): Promise<string | null>
+  /** Notification « branche intégrée » cliquée : ouvrir le nettoyage des worktrees de ce dépôt. */
+  onOpenCleanup(cb: (req: { root: string; path: string | null }) => void): () => void
 }
 
 /** Messages du canal du terminal, processus principal → page. */
@@ -110,4 +114,6 @@ export const Ipc = {
   pickFolder: 'devmaestro:pick-folder',
   copyText: 'devmaestro:copy-text',
   selectSession: 'devmaestro:select-session',
+  worktreesDir: 'devmaestro:worktrees-dir',
+  openCleanup: 'devmaestro:open-cleanup',
 } as const

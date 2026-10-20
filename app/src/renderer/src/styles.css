@@ -276,6 +276,12 @@ kbd { font-family: var(--f-mono); font-size: 11px; border: 1px solid var(--line-
 .preview .diff { font-family: var(--f-mono); font-size: 12px; border-radius: 4px; overflow: hidden }
 .preview .diff .add { background: color-mix(in srgb, var(--add) 13%, transparent); padding: 1px 6px }
 .preview .diff .del { background: color-mix(in srgb, var(--del) 13%, transparent); padding: 1px 6px }
+/* Apparence : un bloc par mode affiché (clair, sombre), chacun sa palette et ses couleurs. */
+.schemes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start }
+.scheme-block { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 12px; min-width: 0 }
+.scheme-block.on { border-color: var(--accent); border-width: 2px; padding: 9px 11px }
+.scheme-block h3 { margin: 0; font-size: 14px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
+.scheme-block .presets, .scheme-block .colors { grid-template-columns: minmax(0, 1fr) }
 .callout { font-size: 12.5px; color: var(--muted); border-left: 2px solid var(--accent); padding-left: 10px; margin: 0 }
 /* Case à cocher : case à gauche, libellé et aide à droite, même colonne pour toutes les rubriques
    (la règle `.field input` ne doit pas l'étirer sur toute la largeur). */
@@ -292,7 +298,7 @@ kbd { font-family: var(--f-mono); font-size: 11px; border: 1px solid var(--line-
 .pprow .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .pprow select { background: var(--sunk); border: 1px solid var(--line-2); border-radius: var(--r); padding: 4px 8px }
 .conn.notice { border-color: var(--wait); justify-content: space-between }
-@media (max-width: 900px) { .grid2, .presets, .colors { grid-template-columns: minmax(0, 1fr) } }
+@media (max-width: 900px) { .grid2, .presets, .colors, .schemes { grid-template-columns: minmax(0, 1fr) } }
 
 /* Onglet Diff (maquette) : lignes ajoutées/supprimées avec fond ET signe + / −. */
 .term-wrap { display: grid; min-height: 0; grid-area: 1 / 1 }
@@ -375,6 +381,10 @@ tr.cm td { padding: 6px 12px 8px 60px; white-space: normal }
 .codeview pre { margin: 0; padding: var(--pad) 0; font-family: var(--f-mono); font-size: 12.5px; line-height: var(--lh); white-space: pre; tab-size: 4 }
 .codeview .gutter { position: sticky; left: 0; z-index: 1; padding-inline: 10px 8px; text-align: right; color: var(--faint); background: var(--panel); border-right: 1px solid var(--line); user-select: none; cursor: pointer; font-variant-numeric: tabular-nums }
 .codeview .code { padding-inline: 12px 16px }
+/* Le <code> garde sinon la police du navigateur (font-family: monospace, ici DejaVu Sans Mono) : sa ligne de base
+   diffère de celle du <pre> (JetBrains Mono) et, hors échelle 1 (écran HiDPI, zoom), chaque ligne dépasse --lh
+   (20,5 à 20,8 px) : le code glisse sous les numéros, l'écart cumulé atteint une demi-ligne vers la ligne 18. */
+.codeview pre code { display: inline; font: inherit; line-height: inherit; padding: 0; margin: 0; background: none; border: 0 }
 .codeview .selband, .codeview .cmark { top: calc(var(--pad) + var(--l0) * var(--lh)); height: calc(var(--n) * var(--lh)) }
 .codeview .selband { position: absolute; left: 0; right: 0; background: var(--sel); pointer-events: none; z-index: 0 }
 .codeview .cmark { position: absolute; left: 0; width: 3px; background: var(--wait); z-index: 2 }
@@ -520,3 +530,55 @@ tr.cm td { padding: 6px 12px 8px 60px; white-space: normal }
 .ag-meta dt { color: var(--faint); font-size: 11px }
 .ag-meta dd { margin: 0 }
 .ag-cut { margin: 12px 26px 0; padding: 6px 10px; border: 1px solid var(--wait); border-radius: var(--r); color: var(--wait); font-size: 12.5px; max-width: 78ch }
+
+/* ---------- Worktrees (v0.2, lot 6) ---------- */
+.proj-hrow { display: flex; align-items: center; gap: 2px; padding-right: 6px }
+.proj-hrow .proj-h { flex: 1; min-width: 0 }
+.proj-act { flex: none; display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 6px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); font-size: 12px }
+.proj-act:hover, .proj-act:focus-visible { border-color: var(--line-2); color: var(--fg) }
+.proj-act.has { color: var(--done); border-color: color-mix(in srgb, var(--done) 45%, var(--line)) }
+.proj-act .n { font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums }
+.srow .integ { flex: none; font-size: 10.5px; color: var(--done); border: 1px solid currentColor; border-radius: 99px; padding: 0 5px; line-height: 1.4 }
+.row-act.wt-act { right: 30px; width: auto; padding: 0 6px; font-size: 11px }
+.row-act.wt-act:hover { color: var(--done) }
+.srow-line:has(.wt-act) .srow { padding-right: 96px }
+.wt-new { display: grid; gap: 8px; margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r) }
+.wt-path { margin: 0; overflow-wrap: anywhere }
+.wtrow { display: grid; grid-template-columns: 180px minmax(0, 1fr); column-gap: 10px; row-gap: 2px; align-items: center; font-size: 13px }
+.wtrow > .hint, .wtrow > .inline-err { grid-column: 2; padding: 0 }
+.wt-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px }
+.wt-item { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r) }
+.wt-item.gone-row { opacity: .75 }
+.wt-main { display: flex; align-items: flex-start; gap: 10px; min-width: 0 }
+.wt-main input { margin-top: 3px }
+.wt-names { display: grid; min-width: 0 }
+.wt-names .hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.wt-states { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding-left: 26px }
+.wt-branch { padding-left: 26px; font-size: 12.5px }
+.wt-result { padding-left: 26px; font-size: 12.5px }
+.wt-result.ok { color: var(--add) }
+.wt-result.bad { color: var(--err) }
+.wt-force { margin: 2px 0 0 26px }
+.wt-confirm { margin: 10px 0 0 }
+.wt-confirm ul { margin: 0; padding-left: 18px }
+/* Vue par statut : filtre par projet */
+.kview { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-height: 0 }
+.kside { display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0 }
+.khdr { display: flex; align-items: center; gap: 8px; flex-wrap: wrap }
+.khdr label { font-family: var(--f-label); font-weight: 500; color: var(--muted) }
+.khdr select { background: var(--sunk); border: 1px solid var(--line-2); border-radius: var(--r); padding: 4px 8px; max-width: 100%; min-width: 0 }
+.kview .kanban { flex: 1; min-height: 0 }
+.kempty { padding: 16px; display: grid; gap: 10px; justify-items: start; align-self: start }
+.kempty p { margin: 0 }
+.kcard { cursor: pointer }
+.kcard.sel { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent) }
+/* Volet ouvert : le kanban se replie en une colonne (statuts empilés) à gauche, la session à droite. */
+.kview.open { grid-template-columns: minmax(260px, 1fr) minmax(0, 2.6fr) }
+.kview.open .kanban { grid-template-columns: minmax(0, 1fr); align-content: start; overflow: auto }
+.kview.open .kcol { min-height: auto }
+.kview.open .kcards { overflow: visible }
+.kpane { display: flex; flex-direction: column; gap: 6px; min-height: 0; min-width: 0 }
+.kpane > .sess { flex: 1; min-height: 0 }
+.kpane-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0 }
+.kpane-bar .hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0 }
+@media (max-width: 1100px) { .kview.open { grid-template-columns: minmax(220px, 1fr) minmax(0, 2fr) } }

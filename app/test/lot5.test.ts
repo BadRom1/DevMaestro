@@ -16,6 +16,8 @@ import {
   normalizeSettings,
   profileLabel,
   validatePatch,
+  type ColorOverrides,
+  type PaletteName,
 } from '../src/shared/settings'
 import {
   buildProjectChoices,
@@ -109,7 +111,11 @@ describe('réglages : validation et fusion', () => {
       confirmRemoval: 'oui',
       profileLabels: { default: { long: ' Perso ', short: 'P' }, work: { long: '', short: 'W' } },
     })
-    expect(s.theme).toEqual({ mode: 'dark', palette: 'devmaestro', custom: { light: { accent: '#abcdef' }, dark: {} } })
+    expect(s.theme).toEqual({
+      mode: 'dark',
+      light: { palette: 'devmaestro', custom: { accent: '#abcdef' } },
+      dark: { palette: 'devmaestro', custom: {} },
+    })
     expect(s.notifications.enabled).toBe(false)
     expect(s.projectProfiles).toEqual({ '/p': 'work' })
     expect(s.confirmRemoval).toBe(true)
@@ -121,9 +127,9 @@ describe('réglages : validation et fusion', () => {
     const bad: unknown[] = [
       null,
       { inconnu: 1 },
-      { theme: { mode: 'violet', palette: 'okabe', custom: { light: {}, dark: {} } } },
-      { theme: { mode: 'dark', palette: 'okabe', custom: { light: { accent: '#fff' }, dark: {} } } },
-      { theme: { mode: 'dark', palette: 'okabe', custom: { light: { zzz: '#ffffff' }, dark: {} } } },
+      { theme: { mode: 'violet' } },
+      { theme: { light: { palette: 'okabe', custom: { accent: '#fff' } } } },
+      { theme: { light: { palette: 'okabe', custom: { zzz: '#ffffff' } } } },
       { notifications: { enabled: 'oui' } },
       { projectProfiles: { relatif: 'work' } },
       { projectProfiles: { '/p': '' } },
@@ -135,11 +141,11 @@ describe('réglages : validation et fusion', () => {
     ]
     for (const p of bad) expect(() => validatePatch(p), JSON.stringify(p)).toThrow(SettingsError)
     const p = validatePatch({
-      theme: { mode: 'light', palette: 'okabe', custom: { light: { err: '#FF0000' }, dark: {} } },
+      theme: { mode: 'light', light: { palette: 'okabe', custom: { err: '#FF0000' } } },
       projectProfiles: { '/p': 'work', '/q': null },
       profileLabels: { work: { long: ' Travail ', short: 'Tr' }, default: null },
     })
-    expect(p.theme?.custom.light).toEqual({ err: '#ff0000' })
+    expect(p.theme?.light?.custom).toEqual({ err: '#ff0000' })
     expect(p.profileLabels).toEqual({ work: { long: 'Travail', short: 'Tr' }, default: null })
     let s = applyPatch({ ...defaultSettings(), projectProfiles: { '/q': 'default' }, profileLabels: { default: { long: 'Perso', short: 'P' } } }, p)
     expect(s.projectProfiles).toEqual({ '/p': 'work' })
@@ -200,17 +206,23 @@ describe('réglages sur disque', () => {
 })
 
 describe('thème : palette et couleurs par mode', () => {
-  const custom = { light: { accent: '#123456' }, dark: { err: '#ff00ff' } }
+  const t = (light: PaletteName, dark: PaletteName, lc: ColorOverrides = {}, dc: ColorOverrides = {}) => ({
+    light: { palette: light, custom: lc },
+    dark: { palette: dark, custom: dc },
+  })
+  const lc = { accent: '#123456' }
+  const dc = { err: '#ff00ff' }
 
   it('palette puis couleurs choisies, mode par mode', () => {
-    expect(themeOverrides({ palette: 'devmaestro', custom: { light: {}, dark: {} } }, 'dark')).toEqual({})
-    expect(themeOverrides({ palette: 'okabe', custom }, 'light')).toMatchObject({ accent: '#123456', run: '#00785a' })
-    expect(themeOverrides({ palette: 'okabe', custom }, 'dark')).toMatchObject({ accent: '#cc79a7', err: '#ff00ff' })
-    expect(tokenValue({ palette: 'devmaestro', custom }, 'dark', 'accent')).toBe(BASE.dark.accent)
-    expect(tokenValue({ palette: 'devmaestro', custom }, 'light', 'accent')).toBe('#123456')
-    const hc = schemeTokens({ palette: 'contraste', custom: { light: {}, dark: {} } }, 'dark')
+    expect(themeOverrides(t('devmaestro', 'devmaestro'), 'dark')).toEqual({})
+    expect(themeOverrides(t('okabe', 'okabe', lc, dc), 'light')).toMatchObject({ accent: '#123456', run: '#00785a' })
+    expect(themeOverrides(t('okabe', 'okabe', lc, dc), 'dark')).toMatchObject({ accent: '#cc79a7', err: '#ff00ff' })
+    expect(tokenValue(t('devmaestro', 'devmaestro', lc, dc), 'dark', 'accent')).toBe(BASE.dark.accent)
+    expect(tokenValue(t('devmaestro', 'devmaestro', lc, dc), 'light', 'accent')).toBe('#123456')
+    const hc = schemeTokens(t('devmaestro', 'contraste'), 'dark')
     expect(hc).toMatchObject({ bg: '#000000', fg: '#ffffff', accent: '#ffd400' })
-    expect(schemeTokens({ palette: 'devmaestro', custom: { light: {}, dark: {} } }, 'light').bg).toBe('#eef1f6')
+    expect(schemeTokens(t('contraste', 'devmaestro'), 'dark').bg).toBe('#0f1218')
+    expect(schemeTokens(t('devmaestro', 'contraste'), 'light').bg).toBe('#eef1f6')
     expect(resolveScheme('system', true)).toBe('light')
     expect(resolveScheme('system', false)).toBe('dark')
     expect(resolveScheme('dark', true)).toBe('dark')
@@ -473,12 +485,12 @@ describe('réglages sur disque : erreurs et fermeture', () => {
     const st = new SettingsStore(dir)
     await st.load()
     // Comme le message de fermeture de la page : on n'attend pas `update`…
-    void st.update({ theme: { mode: 'dark', palette: 'okabe', custom: { light: {}, dark: {} } } })
+    void st.update({ theme: { mode: 'dark', dark: { palette: 'okabe', custom: {} } } })
     expect(st.pending).toBe(true)
     // … puis `before-quit` attend la fin des écritures.
     await st.flush()
     expect(st.pending).toBe(false)
-    expect(JSON.parse(readFileSync(path.join(dir, 'settings.json'), 'utf8')).theme.palette).toBe('okabe')
+    expect(JSON.parse(readFileSync(path.join(dir, 'settings.json'), 'utf8')).theme.dark.palette).toBe('okabe')
     // `flush` ne rejette jamais, même après un échec.
     const w = st as unknown as { write: (s: unknown) => Promise<void> }
     w.write = async () => {

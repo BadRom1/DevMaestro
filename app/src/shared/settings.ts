@@ -8,6 +8,8 @@
  * - `applyPatch` : réglages + modification validée.
  */
 
+import { DEFAULT_WORKTREE_LOCATIONS, branchPrefixProblem, type DefaultWorktreeLocation } from './worktrees'
+
 export type ThemeMode = 'light' | 'dark' | 'system'
 export const THEME_MODES: readonly ThemeMode[] = ['light', 'dark', 'system']
 
@@ -20,11 +22,29 @@ export const THEME_TOKENS: readonly ThemeToken[] = ['accent', 'wait', 'run', 'do
 
 export type ColorOverrides = Partial<Record<ThemeToken, string>>
 
+/** Mode effectivement affiché (« Auto » se résout en l'un des deux). */
+export type Scheme = 'light' | 'dark'
+export const SCHEMES: readonly Scheme[] = ['light', 'dark']
+
+/** Apparence d'un mode affiché : sa palette et ses couleurs choisies (qui s'y ajoutent). */
+export interface SchemeTheme {
+  palette: PaletteName
+  custom: ColorOverrides
+}
+
 export interface ThemeSettings {
   mode: ThemeMode
-  palette: PaletteName
-  /** Couleurs choisies par l'utilisateur, par mode (s'ajoutent à la palette). */
-  custom: { light: ColorOverrides; dark: ColorOverrides }
+  /** Utilisé en mode clair, et en « Auto » quand le système est clair. */
+  light: SchemeTheme
+  /** Utilisé en mode sombre, et en « Auto » quand le système est sombre. */
+  dark: SchemeTheme
+}
+
+/** Modification du thème : seuls les champs fournis sont remplacés (un mode entier à la fois). */
+export interface ThemePatch {
+  mode?: ThemeMode
+  light?: SchemeTheme
+  dark?: SchemeTheme
 }
 
 export interface AppSettings {
@@ -39,6 +59,19 @@ export interface AppSettings {
   profileLabels: Record<string, ProfileLabel>
   /** Vue principale : par projet (barre latérale et session) ou par statut (kanban). */
   view: MainView
+  /** Worktrees créés avec une session (v0.2, lot 6). */
+  worktrees: WorktreeSettings
+}
+
+export interface WorktreeSettings {
+  /** Emplacement par défaut des nouveaux worktrees. */
+  location: DefaultWorktreeLocation
+  /** Emplacement par projet (racine du worktree principal → emplacement), prioritaire. */
+  projectLocations: Record<string, DefaultWorktreeLocation>
+  /** Préfixe des branches proposées (« romain/ »…), vide par défaut. */
+  branchPrefix: string
+  /** Notification du bureau quand une branche est intégrée et qu'aucune session ne tourne dans son worktree. */
+  notifyIntegrated: boolean
 }
 
 export type MainView = 'projet' | 'statut'
@@ -55,8 +88,8 @@ export const MAX_LONG_LABEL = 30
 export const MAX_SHORT_LABEL = 3
 
 export interface SettingsPatch {
-  /** Remplace tout le thème. */
-  theme?: ThemeSettings
+  /** Fusionné : `mode`, `light` et `dark` fournis remplacent les actuels. */
+  theme?: ThemePatch
   notifications?: { enabled: boolean }
   /** Fusionné : `null` retire l'entrée. */
   projectProfiles?: Record<string, string | null>
@@ -64,6 +97,13 @@ export interface SettingsPatch {
   /** Fusionné : `null` rend les libellés par défaut. */
   profileLabels?: Record<string, ProfileLabel | null>
   view?: MainView
+  /** Champs fournis seulement ; `projectLocations` fusionné (`null` retire l'entrée). */
+  worktrees?: {
+    location?: DefaultWorktreeLocation
+    projectLocations?: Record<string, DefaultWorktreeLocation | null>
+    branchPrefix?: string
+    notifyIntegrated?: boolean
+  }
 }
 
 export const MAX_PROJECT_PROFILES = 500
@@ -73,13 +113,46 @@ const MAX_PROFILE = 200
 export function defaultSettings(): AppSettings {
   return {
     version: 1,
-    theme: { mode: 'system', palette: 'devmaestro', custom: { light: {}, dark: {} } },
+    theme: {
+      mode: 'system',
+      light: { palette: 'devmaestro', custom: {} },
+      dark: { palette: 'devmaestro', custom: {} },
+    },
     notifications: { enabled: true },
     projectProfiles: {},
     confirmRemoval: true,
     profileLabels: {},
     view: 'projet',
+    worktrees: { location: 'sibling', projectLocations: {}, branchPrefix: '', notifyIntegrated: true },
   }
+}
+
+function isLocation(v: unknown): v is DefaultWorktreeLocation {
+  return (DEFAULT_WORKTREE_LOCATIONS as readonly unknown[]).includes(v)
+}
+
+/** Réglages des worktrees lus d'un fichier : champ invalide → valeur par défaut. */
+function worktreesFrom(v: unknown): WorktreeSettings {
+  const d = defaultSettings().worktrees
+  if (!isObj(v)) return d
+  const projectLocations: Record<string, DefaultWorktreeLocation> = {}
+  if (isObj(v.projectLocations)) {
+    for (const [k, l] of Object.entries(v.projectLocations)) {
+      if (Object.keys(projectLocations).length >= MAX_PROJECT_PROFILES) break
+      if (isProjectKey(k) && isLocation(l)) projectLocations[k] = l
+    }
+  }
+  return {
+    location: isLocation(v.location) ? v.location : d.location,
+    projectLocations,
+    branchPrefix: typeof v.branchPrefix === 'string' && branchPrefixProblem(v.branchPrefix) === null ? v.branchPrefix : d.branchPrefix,
+    notifyIntegrated: typeof v.notifyIntegrated === 'boolean' ? v.notifyIntegrated : d.notifyIntegrated,
+  }
+}
+
+/** Emplacement des worktrees d'un projet : celui du projet, sinon le réglage global. */
+export function projectWorktreeLocation(s: WorktreeSettings, projectKey: string | null): DefaultWorktreeLocation {
+  return (projectKey ? s.projectLocations[projectKey] : undefined) ?? s.location
 }
 
 const INVISIBLE = /[\p{Cc}\p{Cf}\p{Z}\s]/u
@@ -157,26 +230,55 @@ function overrides(v: unknown, strict: boolean, where: string): ColorOverrides {
   return out
 }
 
-function theme(v: unknown, strict: boolean): ThemeSettings {
+function isPalette(v: unknown): v is PaletteName {
+  return (PALETTE_NAMES as readonly unknown[]).includes(v)
+}
+
+function isMode(v: unknown): v is ThemeMode {
+  return (THEME_MODES as readonly unknown[]).includes(v)
+}
+
+/**
+ * Thème lu d'un fichier : champ invalide → valeur par défaut. Ancien format
+ * (une palette pour tous les modes, `custom: { light, dark }`) : la palette est
+ * reprise dans les deux modes, chacun avec ses couleurs.
+ */
+function themeFrom(v: unknown): ThemeSettings {
   const d = defaultSettings().theme
-  if (!isObj(v)) {
-    if (strict) throw new SettingsError('« theme » doit être un objet')
-    return d
+  if (!isObj(v)) return d
+  const mode = isMode(v.mode) ? v.mode : d.mode
+  const legacyPalette = isPalette(v.palette) ? v.palette : d.light.palette
+  const legacyCustom = isObj(v.custom) ? v.custom : {}
+  const scheme = (k: Scheme): SchemeTheme => {
+    const s = v[k]
+    if (isObj(s)) return { palette: isPalette(s.palette) ? s.palette : d[k].palette, custom: overrides(s.custom, false, '') }
+    return { palette: legacyPalette, custom: overrides(legacyCustom[k], false, '') }
   }
-  const mode = (THEME_MODES as readonly unknown[]).includes(v.mode) ? (v.mode as ThemeMode) : null
-  const palette = (PALETTE_NAMES as readonly unknown[]).includes(v.palette) ? (v.palette as PaletteName) : null
-  if (strict && !mode) throw new SettingsError('« theme.mode » doit valoir light, dark ou system')
-  if (strict && !palette) throw new SettingsError('« theme.palette » inconnue')
-  const custom = isObj(v.custom) ? v.custom : strict ? null : {}
-  if (!custom) throw new SettingsError('« theme.custom » doit être un objet')
-  return {
-    mode: mode ?? d.mode,
-    palette: palette ?? d.palette,
-    custom: {
-      light: custom.light === undefined && !strict ? {} : overrides(custom.light ?? {}, strict, 'theme.custom.light'),
-      dark: custom.dark === undefined && !strict ? {} : overrides(custom.dark ?? {}, strict, 'theme.custom.dark'),
-    },
+  return { mode, light: scheme('light'), dark: scheme('dark') }
+}
+
+/** Modification du thème venue de la page : stricte, ancien format refusé. */
+function themePatch(v: unknown): ThemePatch {
+  if (!isObj(v)) throw new SettingsError('« theme » doit être un objet')
+  for (const k of Object.keys(v)) {
+    if (!['mode', 'light', 'dark'].includes(k)) throw new SettingsError(`réglage inconnu : theme.${k}`)
   }
+  const out: ThemePatch = {}
+  if (v.mode !== undefined) {
+    if (!isMode(v.mode)) throw new SettingsError('« theme.mode » doit valoir light, dark ou system')
+    out.mode = v.mode
+  }
+  for (const k of SCHEMES) {
+    const s = v[k]
+    if (s === undefined) continue
+    if (!isObj(s)) throw new SettingsError(`« theme.${k} » doit être un objet`)
+    for (const f of Object.keys(s)) {
+      if (!['palette', 'custom'].includes(f)) throw new SettingsError(`réglage inconnu : theme.${k}.${f}`)
+    }
+    if (!isPalette(s.palette)) throw new SettingsError(`« theme.${k}.palette » inconnue`)
+    out[k] = { palette: s.palette, custom: overrides(s.custom, true, `theme.${k}.custom`) }
+  }
+  return out
 }
 
 export class SettingsError extends Error {
@@ -196,7 +298,7 @@ export function normalizeSettings(raw: unknown): AppSettings {
   }
   return {
     version: 1,
-    theme: theme(raw.theme, false),
+    theme: themeFrom(raw.theme),
     notifications: {
       enabled: isObj(raw.notifications) && typeof raw.notifications.enabled === 'boolean' ? raw.notifications.enabled : true,
     },
@@ -204,6 +306,7 @@ export function normalizeSettings(raw: unknown): AppSettings {
     confirmRemoval: typeof raw.confirmRemoval === 'boolean' ? raw.confirmRemoval : d.confirmRemoval,
     profileLabels: labelsFrom(raw.profileLabels),
     view: (MAIN_VIEWS as readonly unknown[]).includes(raw.view) ? (raw.view as MainView) : d.view,
+    worktrees: worktreesFrom(raw.worktrees),
   }
 }
 
@@ -223,11 +326,11 @@ export function validatePatch(raw: unknown): SettingsPatch {
   if (!isObj(raw)) throw new SettingsError('modification des réglages : objet attendu')
   const out: SettingsPatch = {}
   for (const k of Object.keys(raw)) {
-    if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view'].includes(k)) {
+    if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view', 'worktrees'].includes(k)) {
       throw new SettingsError(`réglage inconnu : ${k}`)
     }
   }
-  if (raw.theme !== undefined) out.theme = theme(raw.theme, true)
+  if (raw.theme !== undefined) out.theme = themePatch(raw.theme)
   if (raw.notifications !== undefined) {
     if (!isObj(raw.notifications) || typeof raw.notifications.enabled !== 'boolean') {
       throw new SettingsError('« notifications.enabled » doit être un booléen')
@@ -269,12 +372,50 @@ export function validatePatch(raw: unknown): SettingsPatch {
     }
     out.profileLabels = pl
   }
+  if (raw.worktrees !== undefined) out.worktrees = worktreesPatch(raw.worktrees)
+  return out
+}
+
+function worktreesPatch(v: unknown): NonNullable<SettingsPatch['worktrees']> {
+  if (!isObj(v)) throw new SettingsError('« worktrees » doit être un objet')
+  const out: NonNullable<SettingsPatch['worktrees']> = {}
+  for (const k of Object.keys(v)) {
+    if (!['location', 'projectLocations', 'branchPrefix', 'notifyIntegrated'].includes(k)) {
+      throw new SettingsError(`réglage inconnu : worktrees.${k}`)
+    }
+  }
+  if (v.location !== undefined) {
+    if (!isLocation(v.location)) throw new SettingsError('« worktrees.location » doit valoir sibling, in_repo ou managed')
+    out.location = v.location
+  }
+  if (v.branchPrefix !== undefined) {
+    if (typeof v.branchPrefix !== 'string') throw new SettingsError('« worktrees.branchPrefix » doit être une chaîne')
+    const problem = branchPrefixProblem(v.branchPrefix)
+    if (problem) throw new SettingsError(problem)
+    out.branchPrefix = v.branchPrefix
+  }
+  if (v.notifyIntegrated !== undefined) {
+    if (typeof v.notifyIntegrated !== 'boolean') throw new SettingsError('« worktrees.notifyIntegrated » doit être un booléen')
+    out.notifyIntegrated = v.notifyIntegrated
+  }
+  if (v.projectLocations !== undefined) {
+    if (!isObj(v.projectLocations)) throw new SettingsError('« worktrees.projectLocations » doit être un objet')
+    const entries = Object.entries(v.projectLocations)
+    if (entries.length > MAX_PROJECT_PROFILES) throw new SettingsError('trop de projets')
+    const pl: Record<string, DefaultWorktreeLocation | null> = {}
+    for (const [k, l] of entries) {
+      if (!isProjectKey(k)) throw new SettingsError('projet : chemin absolu attendu')
+      if (l !== null && !isLocation(l)) throw new SettingsError(`emplacement invalide pour ${k}`)
+      pl[k] = l
+    }
+    out.projectLocations = pl
+  }
   return out
 }
 
 export function applyPatch(s: AppSettings, p: SettingsPatch): AppSettings {
   const next: AppSettings = { ...s }
-  if (p.theme) next.theme = p.theme
+  if (p.theme) next.theme = { ...s.theme, ...p.theme }
   if (p.notifications) next.notifications = { ...p.notifications }
   if (p.projectProfiles) {
     const pp = { ...s.projectProfiles }
@@ -297,13 +438,33 @@ export function applyPatch(s: AppSettings, p: SettingsPatch): AppSettings {
     }
     next.profileLabels = pl
   }
+  if (p.worktrees) {
+    const { projectLocations, ...rest } = p.worktrees
+    const w: WorktreeSettings = { ...s.worktrees, ...rest, projectLocations: { ...s.worktrees.projectLocations } }
+    if (projectLocations) {
+      for (const [k, v] of Object.entries(projectLocations)) {
+        if (v === null) delete w.projectLocations[k]
+        else w.projectLocations[k] = v
+      }
+      const keys = Object.keys(w.projectLocations)
+      for (const k of keys.slice(0, Math.max(0, keys.length - MAX_PROJECT_PROFILES))) delete w.projectLocations[k]
+    }
+    next.worktrees = w
+  }
   return next
 }
 
 /** Deux modifications successives en une seule (la seconde l'emporte). */
 export function mergePatches(a: SettingsPatch, b: SettingsPatch): SettingsPatch {
   const out: SettingsPatch = { ...a, ...b }
+  if (a.theme && b.theme) out.theme = { ...a.theme, ...b.theme }
   if (a.projectProfiles && b.projectProfiles) out.projectProfiles = { ...a.projectProfiles, ...b.projectProfiles }
   if (a.profileLabels && b.profileLabels) out.profileLabels = { ...a.profileLabels, ...b.profileLabels }
+  if (a.worktrees && b.worktrees) {
+    out.worktrees = { ...a.worktrees, ...b.worktrees }
+    if (a.worktrees.projectLocations && b.worktrees.projectLocations) {
+      out.worktrees.projectLocations = { ...a.worktrees.projectLocations, ...b.worktrees.projectLocations }
+    }
+  }
   return out
 }

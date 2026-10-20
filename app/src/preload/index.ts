@@ -45,6 +45,15 @@ const api: DevMaestroApi = {
     ipcRenderer.on(Ipc.selectSession, h)
     return () => void ipcRenderer.removeListener(Ipc.selectSession, h)
   },
+  worktreesDir: () => ipcRenderer.invoke(Ipc.worktreesDir) as Promise<string | null>,
+  onOpenCleanup(cb) {
+    const h = (_e: IpcRendererEvent, req: unknown) => {
+      const r = req as { root?: unknown; path?: unknown } | null
+      if (r && typeof r.root === 'string') cb({ root: r.root, path: typeof r.path === 'string' ? r.path : null })
+    }
+    ipcRenderer.on(Ipc.openCleanup, h)
+    return () => void ipcRenderer.removeListener(Ipc.openCleanup, h)
+  },
 }
 
 contextBridge.exposeInMainWorld('devmaestro', api)

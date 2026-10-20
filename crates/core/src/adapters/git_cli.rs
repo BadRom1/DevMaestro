@@ -1,42 +1,22 @@
 //! Git par la CLI `git` (architecture § 10).
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
+use super::git_exec::GitExec;
 use crate::ports::{RepoInfo, Vcs};
 
-/// [`Vcs`] qui appelle `git -C <dossier> rev-parse …`.
-#[derive(Debug, Clone)]
+/// [`Vcs`] qui appelle `git -C <dossier> rev-parse …`, par le lanceur durci
+/// du diff (configuration imposée, environnement, délai de 10 s).
+#[derive(Debug, Clone, Default)]
 pub struct GitCli {
-    program: PathBuf,
-}
-
-impl Default for GitCli {
-    fn default() -> Self {
-        Self {
-            program: PathBuf::from("git"),
-        }
-    }
+    git: GitExec,
 }
 
 impl GitCli {
     fn rev_parse(&self, dir: &Path, args: &[&str]) -> Option<String> {
-        let out = Command::new(&self.program)
-            .arg("-C")
-            .arg(dir)
-            .arg("rev-parse")
-            .args(args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let s = String::from_utf8(out.stdout).ok()?;
-        let s = s.trim_end_matches(['\n', '\r']);
-        (!s.is_empty()).then(|| s.to_owned())
+        let mut all = vec!["rev-parse"];
+        all.extend_from_slice(args);
+        self.git.line(dir, &all)
     }
 }
 
@@ -70,6 +50,7 @@ fn project_root(common_dir: &Path, worktree_root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
 
     fn git(dir: &Path, args: &[&str]) -> bool {
         Command::new("git")

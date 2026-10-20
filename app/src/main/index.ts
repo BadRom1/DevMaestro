@@ -24,16 +24,26 @@ import {
 
 import { Ipc, type CallResult, type PortDown, type RpcFailure } from '../shared/bridge'
 import { validHome } from '../shared/home'
-import { ErrorCode, RENDERER_METHODS, type Demand, type Effect, type MethodName, type Session } from '../shared/protocol'
+import {
+  ErrorCode,
+  RENDERER_METHODS,
+  type Demand,
+  type Effect,
+  type MethodName,
+  type Session,
+  type WorktreeInfo,
+  type WorktreesList,
+} from '../shared/protocol'
 import { SettingsError } from '../shared/settings'
-import { NotifyDecider, notificationContent } from './notifyLogic'
+import { managedWorktreesDir, rootFromCommonDir } from '../shared/worktrees'
+import { IntegratedNotifier, NotifyDecider, integratedContent, notificationContent } from './notifyLogic'
 import { SettingsStore } from './settingsStore'
 import { DaemonClient } from './daemon/client'
 import { defaultSocketPath } from './daemon/paths'
 import { TerminalRelay } from './daemon/relay'
 import { RpcError } from './daemon/rpc'
 import { resolveOrchdBin, spawnDaemon } from './daemon/spawn'
-import { ValidationError, validateExternalUrl, validateParams, validateView } from './validate'
+import { ValidationError, WORKTREE_TIMEOUT_MS, requestTimeoutMs, validateExternalUrl, validateParams, validateView } from './validate'
 
 const log = (msg: string): void => console.log(`[devmaestro] ${msg}`)
 
@@ -126,6 +136,96 @@ async function notifyWaiting(sessionId: string, requestId: number, demand: Deman
   n.show()
 }
 
+/* ---------- Notification « branche intégrée » (lot 6) ---------- */
+
+const integrated = new IntegratedNotifier()
+/** Notifications « intégrée » visibles, par worktree (gardées en référence). */
+const liveIntegrated = new Map<string, Notification>()
+/** `worktrees.list` inconnu du démon (trop ancien) : rien à surveiller. */
+let worktreesUnsupported = false
+
+async function listWorktrees(root: string): Promise<WorktreeInfo[] | null> {
+  if (worktreesUnsupported) return null
+  try {
+    const r = (await client.request('worktrees.list', { root }, WORKTREE_TIMEOUT_MS)) as WorktreesList
+    return Array.isArray(r?.worktrees) ? r.worktrees : null
+  } catch (err) {
+    if (err instanceof RpcError && err.code === ErrorCode.MethodNotFound) worktreesUnsupported = true
+    return null
+  }
+}
+
+function showIntegrated(root: string, w: WorktreeInfo): void {
+  const { title, body } = integratedContent(root, w)
+  liveIntegrated.get(w.path)?.close()
+  const n = new Notification({ title, body, silent: true, urgency: 'low' })
+  n.on('click', () => {
+    liveIntegrated.delete(w.path)
+    const win = mainWindow
+    if (!win) return
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+    toPage(Ipc.openCleanup, { root, path: w.path })
+  })
+  n.on('close', () => {
+    if (liveIntegrated.get(w.path) === n) liveIntegrated.delete(w.path)
+  })
+  liveIntegrated.set(w.path, n)
+  n.show()
+}
+
+/** Worktrees d'un dépôt changés : signaler ceux qui viennent d'être intégrés. */
+async function onWorktreesChanged(root: string): Promise<void> {
+  const list = await listWorktrees(root)
+  if (!list) return
+  const enabled = settings.settings.worktrees.notifyIntegrated && Notification.isSupported()
+  for (const w of integrated.changed(root, list, enabled)) showIntegrated(root, w)
+}
+
+/** Fin de session : le démon ne signale pas toujours le changement de `sessions_running`. */
+const endTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const END_DEBOUNCE_MS = 1500
+
+function onSessionEnded(s: Session): void {
+  const root = rootFromCommonDir(s.project_common_dir)
+  if (!root || worktreesUnsupported) return
+  clearTimeout(endTimers.get(root))
+  endTimers.set(
+    root,
+    setTimeout(() => {
+      endTimers.delete(root)
+      void onWorktreesChanged(root)
+    }, END_DEBOUNCE_MS),
+  )
+}
+
+/**
+ * À la connexion : référence des dépôts des sessions connues, pour ne pas
+ * signaler au démarrage des worktrees intégrés depuis longtemps.
+ */
+async function baselineWorktrees(): Promise<void> {
+  worktreesUnsupported = false
+  let sessions: Session[]
+  try {
+    sessions = ((await client.request('sessions.list', {})) as { sessions: Session[] }).sessions ?? []
+  } catch {
+    return
+  }
+  const roots = new Set<string>()
+  for (const s of sessions) {
+    // Racine du dépôt tirée de l'identité seulement (jamais le chemin d'un worktree lié).
+    const root = rootFromCommonDir(s.project_common_dir)
+    if (root) roots.add(root)
+  }
+  for (const root of roots) {
+    if (worktreesUnsupported) return
+    if (integrated.known(root)) continue
+    const list = await listWorktrees(root)
+    if (list && !integrated.known(root)) integrated.baseline(root, list)
+  }
+}
+
 function onEffect(id: string, effect: Effect): void {
   if (effect.type === 'notify_waiting') void notifyWaiting(id, effect.request_id, effect.pending)
   else if (effect.type === 'request_resolved' && decider.resolved(id, effect.request_id)) closeNotification(id)
@@ -140,7 +240,9 @@ client.on('notification', (n) => {
   if (n.method === 'session.updated') {
     const s = (n.params as { session?: Session }).session
     if (s?.id) {
+      const prev = sessionCache.get(s.id)
       sessionCache.set(s.id, s)
+      if (prev?.alive && !s.alive) onSessionEnded(s)
       if (decider.stale(s.id, s.pending.map((p) => p.request_id))) closeNotification(s.id)
     }
   } else if (n.method === 'session.effect') {
@@ -152,6 +254,9 @@ client.on('notification', (n) => {
       sessionCache.delete(id)
       if (decider.stale(id, null)) closeNotification(id)
     }
+  } else if (n.method === 'project.worktrees_changed') {
+    const root = (n.params as { root?: unknown }).root
+    if (typeof root === 'string' && root.startsWith('/')) void onWorktreesChanged(root)
   }
   if (
     n.method === 'session.updated' ||
@@ -159,12 +264,16 @@ client.on('notification', (n) => {
     n.method === 'session.removed' ||
     n.method === 'quotas.updated' ||
     n.method === 'session.diff_changed' ||
-    n.method === 'session.subagents_changed'
+    n.method === 'session.subagents_changed' ||
+    n.method === 'project.worktrees_changed'
   ) {
     toPage(Ipc.notification, { method: n.method, params: n.params })
   }
 })
-client.on('connected', () => relay.onConnected())
+client.on('connected', () => {
+  relay.onConnected()
+  void settingsLoaded.then(() => baselineWorktrees())
+})
 client.on('state', (s) => {
   if (s.state !== 'connected') relay.onDisconnected()
   toPage(Ipc.connectionChanged, s)
@@ -316,7 +425,7 @@ function registerIpc(): void {
     }
     try {
       const clean = validateParams(method as MethodName, params)
-      const result = await client.request(method, clean)
+      const result = await client.request(method, clean, requestTimeoutMs(method as MethodName, clean))
       if (method === 'sessions.resize') relay.noteSize(clean.id as string, clean.cols as number, clean.rows as number)
       return { ok: true, result } as CallResult<MethodName>
     } catch (err) {
@@ -334,6 +443,7 @@ function registerIpc(): void {
   })
   ipcMain.handle(Ipc.connection, (e) => (trusted(e) ? client.state : null))
   ipcMain.handle(Ipc.home, (e) => (trusted(e) ? validHome(homedir()) : null))
+  ipcMain.handle(Ipc.worktreesDir, (e) => (trusted(e) ? managedWorktreesDir(process.env.XDG_DATA_HOME, homedir()) : null))
   ipcMain.handle(Ipc.settingsGet, async (e) => {
     if (!trusted(e)) return null
     await settingsLoaded

@@ -26,71 +26,39 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
+use super::git_exec::{GitExec, Out, failed};
 use crate::domain::diff::{
     BaseKind, ChangeSet, ChangedFile, DiffBase, FileDiff, FileStatus, MAX_COUNTED_UNTRACKED,
     MAX_FILE_BYTES, count_lines, looks_binary, parse_unified, tracked_files, untracked_diff,
 };
 use crate::ports::{DiffError, DiffSource};
 
-/// Délai maximal d'une commande `git`.
-pub const GIT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Sortie maximale lue d'une commande `git` (au-delà : liste tronquée).
-pub const MAX_OUTPUT: usize = 32 * 1024 * 1024;
+pub use super::git_exec::{GIT_TIMEOUT, HARDENING, MAX_OUTPUT};
+
 /// Nombre maximal de fichiers non suivis listés.
 pub const MAX_UNTRACKED: usize = 2000;
 /// Entrées gardées au plus dans le cache des lignes des fichiers non suivis.
 const LINE_CACHE_MAX: usize = 20_000;
 
-/// Configuration imposée à chaque appel de `git`.
-pub const HARDENING: &[&str] = &[
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "diff.relative=false",
-    "-c",
-    "diff.submodule=short",
-    "-c",
-    "core.quotePath=false",
-    "-c",
-    "diff.external=",
-    "-c",
-    "core.pager=cat",
-];
-
 /// Lignes et binarité d'un fichier non suivi, pour une taille et une date.
 type LineCache = HashMap<PathBuf, (u64, i128, u64, bool)>;
 
-/// [`DiffSource`] par la CLI `git`.
+/// [`DiffSource`] par la CLI `git` (appels durcis de [`GitExec`]).
 #[derive(Debug)]
 pub struct GitDiff {
-    program: PathBuf,
+    git: GitExec,
     lines: Mutex<LineCache>,
 }
 
 impl Default for GitDiff {
     fn default() -> Self {
         Self {
-            program: PathBuf::from("git"),
+            git: GitExec::default(),
             lines: Mutex::new(HashMap::new()),
         }
     }
-}
-
-struct Out {
-    ok: bool,
-    stdout: Vec<u8>,
-    /// Sortie coupée à [`MAX_OUTPUT`].
-    truncated: bool,
-}
-
-fn failed(what: &str, detail: impl std::fmt::Display) -> DiffError {
-    DiffError::Failed(format!("git {what} : {detail}"))
 }
 
 /// Taille et date de modification (ns) d'un fichier, sans suivre de lien.
@@ -120,61 +88,12 @@ fn read_capped(p: &Path) -> Option<Vec<u8>> {
 }
 
 impl GitDiff {
-    /// Lance `git -C <dir> <durcissement> <args>` avec délai.
     fn run(&self, dir: &Path, args: &[&str]) -> Result<Out, DiffError> {
-        let what = args.first().copied().unwrap_or("");
-        let mut child = Command::new(&self.program)
-            .arg("-C")
-            .arg(dir)
-            .arg("--literal-pathspecs")
-            .arg("--no-pager")
-            .args(HARDENING)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("LC_ALL", "C")
-            .spawn()
-            .map_err(|e| failed(what, e))?;
-        let mut stdout = child.stdout.take().expect("piped");
-        let reader = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = (&mut stdout).take(MAX_OUTPUT as u64).read_to_end(&mut buf);
-            // Le reste est lu et jeté : `git` ne reste pas bloqué sur un tube plein.
-            let _ = std::io::copy(&mut stdout, &mut std::io::sink());
-            buf
-        });
-        let deadline = Instant::now() + GIT_TIMEOUT;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(s)) => break s,
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(failed(what, "délai dépassé"));
-                }
-                Err(e) => return Err(failed(what, e)),
-            }
-        };
-        let stdout = reader.join().unwrap_or_default();
-        Ok(Out {
-            ok: status.success(),
-            truncated: stdout.len() >= MAX_OUTPUT,
-            stdout,
-        })
+        self.git.run(dir, args)
     }
 
     fn line(&self, dir: &Path, args: &[&str]) -> Option<String> {
-        let out = self.run(dir, args).ok()?;
-        let s = String::from_utf8(out.stdout).ok()?;
-        let s = s.trim_end_matches(['\n', '\r']);
-        (out.ok && !s.is_empty()).then(|| s.to_owned())
+        self.git.line(dir, args)
     }
 
     fn toplevel(&self, cwd: &Path) -> Result<PathBuf, DiffError> {
@@ -183,22 +102,8 @@ impl GitDiff {
             .ok_or(DiffError::NotARepo)
     }
 
-    /// Branche par défaut, en référence complète et en nom court :
-    /// `origin/HEAD`, sinon `main`, sinon `master`.
     fn default_branch(&self, top: &Path) -> Option<(String, String)> {
-        if let Some(r) = self.line(top, &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"])
-            && let Some(short) = r.strip_prefix("refs/remotes/")
-        {
-            return Some((r.clone(), short.to_owned()));
-        }
-        ["main", "master"].into_iter().find_map(|b| {
-            let full = format!("refs/heads/{b}");
-            self.line(
-                top,
-                &["rev-parse", "--verify", "-q", &format!("{full}^{{commit}}")],
-            )
-            .map(|_| (full, b.to_owned()))
-        })
+        self.git.default_branch(top)
     }
 
     /// Base du diff et `HEAD`.
@@ -414,6 +319,8 @@ impl DiffSource for GitDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
 
     fn git(dir: &Path, args: &[&str]) -> bool {
         Command::new("git")

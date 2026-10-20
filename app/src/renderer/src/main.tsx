@@ -31,7 +31,7 @@ async function loadSettings(): Promise<AppSettings> {
     const legacy = r.fresh ? legacyThemeMode() : null
     if (legacy && legacy !== s.theme.mode) {
       s = { ...s, theme: { ...s.theme, mode: legacy } }
-      void api.updateSettings({ theme: s.theme })
+      void api.updateSettings({ theme: { mode: legacy } })
     }
     return s
   } catch {

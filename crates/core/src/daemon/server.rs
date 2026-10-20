@@ -340,8 +340,33 @@ impl Connection {
                 let _ = tokio::task::spawn_blocking(move || d2.refresh_resumable(Some(sid))).await;
                 d.get(&sid)?
             }
-            "sessions.launch" => d.launch(params)?,
-            "sessions.resume" => d.resume(params)?,
+            "sessions.launch" => {
+                // `git` (worktree, dépôt) : hors du runtime.
+                let (d2, params) = (d.clone(), params.clone());
+                tokio::task::spawn_blocking(move || d2.launch(&params))
+                    .await
+                    .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
+            }
+            "worktrees.list" | "worktrees.remove" => {
+                // `git` : hors du runtime.
+                let (d2, params, m) = (d.clone(), params.clone(), method.to_owned());
+                tokio::task::spawn_blocking(move || {
+                    if m == "worktrees.list" {
+                        d2.worktrees_list(&params)
+                    } else {
+                        d2.worktrees_remove(&params)
+                    }
+                })
+                .await
+                .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
+            }
+            "sessions.resume" => {
+                // `git` (dépôt du dossier) : hors du runtime.
+                let (d2, params) = (d.clone(), params.clone());
+                tokio::task::spawn_blocking(move || d2.resume(&params))
+                    .await
+                    .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
+            }
             "sessions.stop" => d.stop(&session_id_param(params)?)?,
             "sessions.resize" => {
                 let sid = session_id_param(params)?;
@@ -646,6 +671,13 @@ fn queue_event(daemon: &Daemon, queue: &mut VecDeque<Event>, ev: Event) {
     {
         return; // Regroupé : la liste est relue au moment d'envoyer.
     }
+    if let Event::WorktreesChanged(root) = &ev
+        && queue
+            .iter()
+            .any(|e| matches!(e, Event::WorktreesChanged(other) if other == root))
+    {
+        return;
+    }
     if let Event::Updated(id) = &ev
         && queue
             .iter()
@@ -677,6 +709,12 @@ fn resync_events(daemon: &Daemon, queue: &mut VecDeque<Event>) {
             .into_iter()
             .map(Event::SubagentsChanged),
     );
+    queue.extend(
+        daemon
+            .worktree_roots()
+            .into_iter()
+            .map(Event::WorktreesChanged),
+    );
     queue.push_back(Event::Quotas);
 }
 
@@ -694,6 +732,9 @@ fn event_frame(daemon: &Daemon, ev: Event) -> Option<Frame> {
         Event::DiffChanged(id) => notification("session.diff_changed", json!({"id": id})),
         Event::SubagentsChanged(id) => {
             notification("session.subagents_changed", daemon.subagents_json(&id)?)
+        }
+        Event::WorktreesChanged(root) => {
+            notification("project.worktrees_changed", json!({"root": root}))
         }
     };
     Some(Frame::rpc(&value))

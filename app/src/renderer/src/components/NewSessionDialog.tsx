@@ -1,12 +1,24 @@
 /**
  * Fenêtre « Nouvelle session » (maquette) : projet connu ou autre dossier,
  * profil (défaut du projet), modèle, mode, puis prompt libre ou reprise
- * d'une session du projet. Ctrl+Entrée lance.
+ * d'une session du projet. Option « Dans un nouveau worktree » (lot 6) pour
+ * un dépôt git. Ctrl+Entrée lance.
  */
 import { useEffect, useId, useMemo, useState } from 'react'
 
-import { SETTABLE_MODES, type ProjectInfo, type Profile, type Session } from '../../../shared/protocol'
-import { api, call, errorText } from '../api'
+import { MAX_TITLE, SETTABLE_MODES, type ProjectInfo, type Profile, type Session, type WorktreeRequest } from '../../../shared/protocol'
+import { projectWorktreeLocation } from '../../../shared/settings'
+import {
+  LOCATION_LABELS,
+  WORKTREE_LOCATIONS,
+  branchFromName,
+  branchNameProblem,
+  commonDirHash8,
+  worktreePath,
+  type WorktreeLocation,
+} from '../../../shared/worktrees'
+import { api, call, errorCode, errorText } from '../api'
+import { UNCERTAIN_TEXT, outcomeUncertain } from '../state/errors'
 import { modeLabel, pastDisplayName, sessionDisplayName, shortAgo, tildify } from '../state/format'
 import {
   MODEL_ALIASES,
@@ -21,6 +33,7 @@ import {
 } from '../state/newSession'
 import type { PastEntry } from '../state/projects'
 import { folderName } from '../state/projects'
+import type { WorktreeLists } from '../state/worktrees'
 import { useSettings } from '../settings'
 import { ProfileBadge } from './common'
 import { Modal } from './Modal'
@@ -28,6 +41,11 @@ import { Modal } from './Modal'
 const OTHER = '__autre__'
 
 type Tab = 'prompt' | 'resume'
+
+/** Premiers mots du prompt (source du nom de branche quand la session n'a pas de nom). */
+function firstWords(text: string, n = 6): string {
+  return text.trim().split('\n')[0]!.split(/\s+/).slice(0, n).join(' ')
+}
 
 export function NewSessionDialog({
   profiles,
@@ -37,7 +55,12 @@ export function NewSessionDialog({
   home,
   projectProfiles,
   initialCwd,
+  initialProjectKey,
   termSize,
+  worktreeLists,
+  worktreesSupported,
+  loadWorktrees,
+  managedDir,
   onClose,
   onLaunched,
 }: {
@@ -49,7 +72,16 @@ export function NewSessionDialog({
   projectProfiles: Record<string, string>
   /** Dossier de la session sélectionnée : son projet est présélectionné. */
   initialCwd: string | null
+  /** Projet de la session sélectionnée (identité enregistrée), prioritaire sur la déduction depuis `initialCwd`. */
+  initialProjectKey?: string | null
   termSize: { cols: number; rows: number } | null
+  /** Worktrees connus, par racine de dépôt. */
+  worktreeLists: WorktreeLists
+  /** Le démon connaît-il les worktrees (`worktrees.list`) ? `null` : pas encore su. */
+  worktreesSupported: boolean | null
+  loadWorktrees: (root: string) => void
+  /** Dossier des worktrees gérés par l'app. */
+  managedDir: string | null
   onClose: () => void
   onLaunched: (s: Session, warnings: string[]) => void
 }) {
@@ -58,7 +90,7 @@ export function NewSessionDialog({
   const [extras, setExtras] = useState<ProjectChoice[]>([])
   const choices = useMemo(() => mergeExtraChoices(known, extras), [extras, known])
   const [projectKey, setProjectKey] = useState<string>(() => {
-    const k = initialCwd ? projectKeyOf(initialCwd, projects[initialCwd]) : null
+    const k = initialProjectKey ?? (initialCwd ? projectKeyOf(initialCwd, projects[initialCwd]) : null)
     return (k && known.some((c) => c.key === k) ? k : known[0]?.key) ?? ''
   })
   const project = choices.find((c) => c.key === projectKey) ?? null
@@ -67,7 +99,7 @@ export function NewSessionDialog({
     const inProject = initialCwd && c?.dirs.some((d) => d.path === initialCwd)
     return inProject ? initialCwd! : (c?.dirs[0]?.path ?? '')
   })
-  const { label } = useSettings()
+  const { label, settings } = useSettings()
   const names = profiles.map((p) => p.name)
   const resolved = resolveDefaultProfile({
     projectRoot: project?.profileKey ?? null,
@@ -86,6 +118,76 @@ export function NewSessionDialog({
   const [picking, setPicking] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const tabsId = useId()
+  const [name, setName] = useState('')
+
+  /* ----- Worktree (lot 6) ----- */
+  const repoRoot = project?.isGit ? project.root : null
+  const wtList = repoRoot ? worktreeLists[repoRoot] : undefined
+  const [useWt, setUseWt] = useState(false)
+  const [branch, setBranch] = useState('')
+  const [branchTouched, setBranchTouched] = useState(false)
+  /** Base choisie (`null` : branche de référence du dépôt). */
+  const [base, setBase] = useState<string | null>(null)
+  /** Emplacement choisi ici (`null` : réglage du projet). */
+  const [location, setLocation] = useState<WorktreeLocation | null>(null)
+  const [customParent, setCustomParent] = useState<string | null>(null)
+  const wtOffered = tab === 'prompt' && !!repoRoot && worktreesSupported === true
+  const wtOn = wtOffered && useWt
+  const effBranch = branchTouched
+    ? branch
+    : branchFromName(name.trim() || firstWords(prompt), settings.worktrees.branchPrefix)
+  const effLocation: WorktreeLocation = location ?? projectWorktreeLocation(settings.worktrees, project?.profileKey ?? null)
+  // Base par défaut : la branche de référence retenue par le démon (« origin/main »), sinon la branche par défaut.
+  const defaultBase = wtList?.reference ?? wtList?.default_branch ?? null
+  const effBase = base ?? defaultBase ?? ''
+  // Identité du dépôt (clé `git:<dossier commun>`) : empreinte du dossier géré.
+  const commonDir = project?.key.startsWith('git:/') ? project.key.slice('git:'.length) : null
+  const wtPath = repoRoot
+    ? worktreePath({
+        location: effLocation,
+        root: repoRoot,
+        branch: effBranch,
+        managedDir,
+        commonDirHash: commonDir ? commonDirHash8(commonDir) : null,
+        customParent,
+      })
+    : null
+  const wtProblem: string | null = !wtOn
+    ? null
+    : branchNameProblem(effBranch.trim()) ??
+      (base !== null && base.trim() !== '' ? branchNameProblem(base.trim()) && `base : ${branchNameProblem(base.trim())}` : null) ??
+      (effLocation === 'custom' && !customParent ? 'choisis le dossier où créer le worktree' : null) ??
+      (wtPath && wtList?.worktrees.some((w) => w.path === wtPath) ? `le dossier existe déjà : ${tildify(wtPath, home)}` : null) ??
+      ((() => {
+        const other = wtList?.worktrees.find((w) => w.branch === effBranch.trim())
+        return other ? `la branche ${effBranch.trim()} est déjà extraite dans ${tildify(other.path, home)}` : null
+      })())
+
+  // Dépôt git choisi : ses worktrees (support du démon, branche de référence).
+  useEffect(() => {
+    if (repoRoot && !wtList && worktreesSupported !== false) loadWorktrees(repoRoot)
+  }, [repoRoot, wtList, worktreesSupported, loadWorktrees])
+
+  async function pickCustomParent(): Promise<void> {
+    setError(null)
+    try {
+      const path = await api.pickFolder()
+      if (path) {
+        setCustomParent(path)
+        setLocation('custom')
+      }
+    } catch (e) {
+      setError(`Choix du dossier impossible : ${errorText(e)}`)
+    }
+  }
+
+  function chooseLocation(v: WorktreeLocation): void {
+    if (v === 'custom' && !customParent) {
+      void pickCustomParent()
+      return
+    }
+    setLocation(v)
+  }
 
   const candidates: ResumeCandidate[] = useMemo(
     () =>
@@ -109,6 +211,9 @@ export function NewSessionDialog({
     setDir(c?.dirs[0]?.path ?? '')
     setProfile(null)
     setResumeKey(null)
+    setBase(null)
+    setLocation(null)
+    setCustomParent(null)
   }
 
   useEffect(() => {
@@ -146,6 +251,9 @@ export function NewSessionDialog({
       setDir(path)
       setProfile(null)
       setResumeKey(null)
+      setBase(null)
+      setLocation(null)
+      setCustomParent(null)
     } catch (e) {
       setError(`Choix du dossier impossible : ${errorText(e)}`)
     } finally {
@@ -153,7 +261,7 @@ export function NewSessionDialog({
     }
   }
 
-  const canGo = !busy && (tab === 'prompt' ? dir.startsWith('/') : !!chosen)
+  const canGo = !busy && (tab === 'prompt' ? dir.startsWith('/') && !wtProblem : !!chosen)
 
   async function go() {
     if (!canGo) return
@@ -167,8 +275,29 @@ export function NewSessionDialog({
     }
     try {
       if (tab === 'prompt') {
-        const r = await call('sessions.launch', { cwd: dir, profile: effectiveProfile, ...common })
-        onLaunched(r.session, r.warnings ?? [])
+        const worktree: WorktreeRequest | undefined = wtOn
+          ? {
+              branch: effBranch.trim(),
+              ...(base !== null && base.trim() !== '' && base.trim() !== defaultBase ? { base: base.trim() } : {}),
+              location: effLocation,
+              ...(effLocation === 'custom' && wtPath ? { path: wtPath } : {}),
+            }
+          : undefined
+        const r = await call('sessions.launch', { cwd: dir, profile: effectiveProfile, ...common, ...(worktree ? { worktree } : {}) })
+        const warnings = [...(r.warnings ?? [])]
+        // Démon trop ancien : il ignore la demande et lance dans le dossier choisi.
+        if (worktree && !r.worktree) {
+          warnings.push(`Le démon n’a pas créé de worktree (version trop ancienne ?) : la session tourne dans ${r.session.cwd}.`)
+        }
+        let session = r.session
+        if (name.trim()) {
+          try {
+            session = (await call('sessions.update', { id: session.id, title: name.trim() })).session
+          } catch (e) {
+            warnings.push(`Nom de la session non enregistré : ${errorText(e)}`)
+          }
+        }
+        onLaunched(session, warnings)
       } else if (chosen?.kind === 'session') {
         const r = await call('sessions.resume', { id: chosen.session.id, ...common })
         onLaunched(r.session, r.warnings ?? [])
@@ -182,7 +311,16 @@ export function NewSessionDialog({
         onLaunched(r.session, r.warnings ?? [])
       }
     } catch (e) {
-      setError(`${tab === 'prompt' ? 'Lancement' : 'Reprise'} impossible : ${errorText(e)}`)
+      const uncertain = outcomeUncertain(errorCode(e))
+      setError(
+        tab === 'prompt' && wtOn
+          ? uncertain
+            ? `Création du worktree sans réponse (${errorText(e)}) : ${UNCERTAIN_TEXT} des sessions et des worktrees avant de relancer.`
+            : `Worktree ou lancement impossible : ${errorText(e)}. Aucune session n’a été lancée.`
+          : `${tab === 'prompt' ? 'Lancement' : 'Reprise'} impossible : ${errorText(e)}`,
+      )
+      // La création a pu aboutir : listes redemandées.
+      if (uncertain && wtOn && repoRoot) loadWorktrees(repoRoot)
       setBusy(false)
     }
   }
@@ -342,6 +480,107 @@ export function NewSessionDialog({
                 ))}
               </fieldset>
             )}
+            {tab === 'prompt' && (
+              <label className="field">
+                <span className="lbl">Nom de la session (facultatif)</span>
+                <input
+                  value={name}
+                  maxLength={MAX_TITLE}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Ex. : Corriger l’export CSV"
+                />
+              </label>
+            )}
+            {wtOffered && (
+              <fieldset className="wt-new">
+                <legend className="sr-only">Worktree</legend>
+                <label className="optrow">
+                  <input type="checkbox" checked={useWt} onChange={(e) => setUseWt(e.target.checked)} />
+                  <span>
+                    Dans un nouveau worktree
+                    <span className="hint optaide">
+                      Une branche à part, dans son propre dossier : la session y est lancée une fois le worktree créé.
+                    </span>
+                  </span>
+                </label>
+                {useWt && (
+                  <>
+                    <div className="grid3">
+                      <label className="field">
+                        <span className="lbl">Branche</span>
+                        <input
+                          className="mono"
+                          value={effBranch}
+                          spellCheck={false}
+                          aria-invalid={wtProblem && branchNameProblem(effBranch.trim()) ? true : undefined}
+                          onChange={(e) => {
+                            setBranch(e.target.value)
+                            setBranchTouched(true)
+                          }}
+                          placeholder={`${settings.worktrees.branchPrefix}nom-de-la-branche`}
+                        />
+                        <span className="hint">
+                          {branchTouched ? (
+                            <button
+                              type="button"
+                              className="linkish"
+                              onClick={() => {
+                                setBranchTouched(false)
+                                setBranch('')
+                              }}
+                            >
+                              Reprendre le nom de la session
+                            </button>
+                          ) : (
+                            'tirée du nom de la session (ou du prompt)'
+                          )}
+                        </span>
+                      </label>
+                      <label className="field">
+                        <span className="lbl">Base</span>
+                        <input
+                          className="mono"
+                          value={effBase}
+                          spellCheck={false}
+                          onChange={(e) => setBase(e.target.value)}
+                          placeholder={defaultBase ?? 'branche de référence'}
+                        />
+                        <span className="hint">
+                          {defaultBase ? `branche de référence : ${defaultBase}` : 'vide : branche de référence du dépôt'}
+                        </span>
+                      </label>
+                      <label className="field">
+                        <span className="lbl">Emplacement</span>
+                        <select value={effLocation} onChange={(e) => chooseLocation(e.target.value as WorktreeLocation)}>
+                          {WORKTREE_LOCATIONS.map((l) => (
+                            <option key={l} value={l}>
+                              {LOCATION_LABELS[l]}
+                              {l === projectWorktreeLocation(settings.worktrees, project?.profileKey ?? null) ? ' (réglage du projet)' : ''}
+                            </option>
+                          ))}
+                        </select>
+                        {effLocation === 'custom' && (
+                          <span className="hint">
+                            <button type="button" className="linkish" onClick={() => void pickCustomParent()}>
+                              Changer de dossier…
+                            </button>
+                          </span>
+                        )}
+                      </label>
+                    </div>
+                    <p className="hint wt-path">
+                      Dossier du worktree :{' '}
+                      <span className="mono">{wtPath ? tildify(wtPath, home) : '—'}</span>
+                    </p>
+                    {wtProblem && (
+                      <p className="inline-err" role="alert">
+                        {wtProblem}
+                      </p>
+                    )}
+                  </>
+                )}
+              </fieldset>
+            )}
             <label className="field">
               <span className="lbl">{tab === 'prompt' ? 'Prompt initial' : 'Message à la reprise (facultatif)'}</span>
               <textarea
@@ -359,7 +598,7 @@ export function NewSessionDialog({
             </span>
           ) : (
             <span className="hint" style={{ marginRight: 'auto' }}>
-              <kbd>Ctrl</kbd>+<kbd>Entrée</kbd> pour {tab === 'prompt' ? 'lancer' : 'reprendre'}
+              <kbd>Ctrl</kbd>+<kbd>Entrée</kbd> pour {tab === 'prompt' ? (wtOn ? 'créer le worktree et lancer' : 'lancer') : 'reprendre'}
             </span>
           )}
           <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>

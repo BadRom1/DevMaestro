@@ -160,6 +160,84 @@ pub trait DiffSource: Send + Sync {
     ) -> Result<crate::domain::diff::FileDiff, DiffError>;
 }
 
+/// Point de départ d'un nouveau worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeStart<'a> {
+    /// Nouvelle branche créée sur ce commit (`git worktree add -b`).
+    NewBranch { base: &'a str },
+    /// Branche existante, extraite nulle part.
+    Existing,
+}
+
+/// Worktrees d'un dépôt par la CLI `git` (v0.2, lot 6). Bloquant : à
+/// appeler hors du runtime. Ne lance jamais `git fetch`. Les erreurs
+/// [`DiffError::Failed`] portent le message de `git`, nettoyé.
+pub trait WorktreeGit: Send + Sync {
+    /// `git worktree list --porcelain -z` depuis `root` (le principal d'abord).
+    fn list(&self, root: &Path) -> Result<Vec<crate::domain::worktree::WorktreeEntry>, DiffError>;
+    /// Branche de référence (même résolution que la base du diff, et celle
+    /// qui descend de l'autre entre `origin/<défaut>` et `<défaut>`).
+    fn reference(&self, root: &Path) -> Option<crate::domain::worktree::Reference>;
+    /// Fichiers modifiés ou non suivis non ignorés d'un worktree
+    /// (`git status --porcelain=v2 -z`).
+    fn status_paths(&self, dir: &Path) -> Result<Vec<String>, DiffError>;
+    /// Commits de `branch` absents de la référence (`reference` : référence complète).
+    fn ahead(&self, root: &Path, reference: &str, branch: &str) -> Option<u64>;
+    /// `git merge-tree --write-tree` est-il disponible (git ≥ 2.38) ? Détecté
+    /// une fois, puis gardé.
+    fn merge_tree_supported(&self) -> bool;
+    /// `branch` est-elle intégrée à la référence ? `None` : inconnu. Sans
+    /// `merge-tree --write-tree`, le squash n'est pas évalué.
+    fn integrated(
+        &self,
+        root: &Path,
+        reference: &str,
+        branch: &str,
+    ) -> Option<crate::domain::worktree::Integrated>;
+    /// Nom de branche accepté par `git check-ref-format --branch` (message en
+    /// français sinon).
+    fn check_branch_name(&self, root: &Path, name: &str) -> Result<(), String>;
+    /// `refs/heads/<name>` existe-t-elle ?
+    fn branch_exists(&self, root: &Path, name: &str) -> bool;
+    /// Commit désigné par une révision, s'il existe.
+    fn resolve_commit(&self, root: &Path, rev: &str) -> Option<String>;
+    /// `git worktree add` (sans hooks).
+    fn add(
+        &self,
+        root: &Path,
+        path: &Path,
+        branch: &str,
+        start: WorktreeStart<'_>,
+    ) -> Result<(), DiffError>;
+    /// `git worktree remove [--force [--force]] <path>` (double `--force`
+    /// pour un worktree verrouillé).
+    fn remove(&self, root: &Path, path: &Path, force: bool, locked: bool) -> Result<(), DiffError>;
+    /// `git branch -d` (ou `-D` avec `force`).
+    fn delete_branch(&self, root: &Path, branch: &str, force: bool) -> Result<(), DiffError>;
+    /// Ajoute `.worktrees/` à `<common_dir>/info/exclude` s'il n'est pas déjà
+    /// ignoré ; `true` si le fichier a été modifié.
+    fn exclude_in_repo_dir(&self, root: &Path, common_dir: &Path) -> Result<bool, DiffError>;
+}
+
+/// Worktree créé par le démon, enregistré en base (schéma v6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorktreeRecord {
+    pub path: PathBuf,
+    /// Dossier commun du dépôt (identité du projet).
+    pub common_dir: PathBuf,
+    /// Worktree principal du projet.
+    pub project_root: PathBuf,
+    pub branch: String,
+    /// Base demandée (ou référence par défaut) ; `None` pour une branche existante.
+    pub base: Option<String>,
+    /// La branche a été créée avec le worktree.
+    pub created_branch: bool,
+    /// Commit de départ du worktree (tête au moment de la création) : une
+    /// tête encore égale vaut `integrated: "empty"`.
+    pub start_sha: Option<String>,
+    pub created_at: OffsetDateTime,
+}
+
 /// Échec d'un accès au dossier d'une session (onglet Fichiers).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileError {
@@ -242,6 +320,9 @@ pub struct SessionRecord {
     pub first_prompt: Option<String>,
     /// Dernier `session_name` de la statusline (schéma v3).
     pub session_name: Option<String>,
+    /// Dossier commun git du projet (identité du projet), relevé au lancement
+    /// (schéma v6) ; `None` hors dépôt ou pas encore relevé.
+    pub project_common_dir: Option<PathBuf>,
 }
 
 /// Persistance des sessions.
@@ -273,4 +354,10 @@ pub trait SessionStore: Send {
     fn unhide_transcript(&self, profile: &str, claude_session_id: &str) -> io::Result<bool>;
     /// `claude_session_id` masqués d'un profil.
     fn hidden_transcripts(&self, profile: &str) -> io::Result<HashSet<String>>;
+    /// Enregistre (ou remplace) un worktree créé par le démon.
+    fn record_worktree(&self, w: &WorktreeRecord) -> io::Result<()>;
+    /// Oublie un worktree (supprimé, ou création annulée) ; absent : rien à faire.
+    fn delete_worktree(&self, path: &Path) -> io::Result<()>;
+    /// Worktrees créés par le démon.
+    fn load_worktrees(&self) -> io::Result<Vec<WorktreeRecord>>;
 }

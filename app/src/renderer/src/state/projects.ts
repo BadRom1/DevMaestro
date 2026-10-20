@@ -4,6 +4,7 @@
  * tous ses worktrees ; à défaut la racine, à défaut le dossier de la session.
  */
 import type { PastSession, ProjectInfo, Session } from '../../../shared/protocol'
+import { rootFromCommonDir } from '../../../shared/worktrees'
 import { basename, tildify } from './format'
 import { STATUS_ORDER, glyphFor } from './status'
 
@@ -110,16 +111,26 @@ export function groupByProject(
   const groups = new Map<string, ProjectGroup>()
   for (const s of sessions) {
     const info = projects[s.cwd]
-    const gone = missingGroupDir(s.cwd, projects)
-    const key = gone ?? projectKey(s, info)
+    // Identité enregistrée par le démon (lot 6) d'abord : une session d'un
+    // worktree supprimé reste sous son projet, quel que soit l'emplacement.
+    const identity = s.project_common_dir || null
+    const gone = identity ? null : missingGroupDir(s.cwd, projects)
+    const key = identity ?? gone ?? projectKey(s, info)
     let g = groups.get(key)
     if (!g) {
-      const root = gone ?? info?.root ?? s.project_root ?? s.cwd
-      const isGit = info?.is_git ?? false
+      const known = info?.is_git && info.root ? info.root : null
+      const root = identity
+        ? (known ?? rootFromCommonDir(identity) ?? s.project_root ?? s.cwd)
+        : (gone ?? info?.root ?? s.project_root ?? s.cwd)
+      const isGit = identity ? true : (info?.is_git ?? false)
       // Hors dépôt : groupe par dossier, nommé comme lui (« ~ » pour le dossier personnel).
       const name = isGit ? (info?.name ?? basename(root)) : folderName(root, home)
       g = { key, root, name, isGit, sessions: [], waiting: 0, missing: !!gone }
       groups.set(key, g)
+    } else if (identity && info?.is_git && info.root && g.root !== info.root) {
+      // Groupe ouvert par une session au dossier disparu : la racine résolue fait foi.
+      g.root = info.root
+      g.name = info.name ?? basename(info.root)
     }
     g.sessions.push(s)
     if (s.status.state === 'waiting') g.waiting++

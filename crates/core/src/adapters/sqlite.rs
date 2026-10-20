@@ -11,7 +11,7 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::domain::subagents::{MAX_SUBAGENTS, Subagent, SubagentStatus};
-use crate::ports::{SessionRecord, SessionStore};
+use crate::ports::{SessionRecord, SessionStore, WorktreeRecord};
 
 /// Migrations, de la version `i` à `i + 1` (`PRAGMA user_version`).
 const MIGRATIONS: &[&str] = &[
@@ -79,6 +79,22 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (session, agent_id)
     );
     CREATE INDEX subagents_session_seq ON subagents (session, seq);
+    ",
+    // v5 → v6 (v0.2, lot 6) : identité du projet de chaque session (dossier
+    // commun git, rempli au lancement, et au démarrage du démon pour les
+    // sessions dont le dossier existe encore) et worktrees créés par le démon.
+    "
+    ALTER TABLE sessions ADD COLUMN project_common_dir TEXT;
+    CREATE TABLE worktrees (
+        path              TEXT PRIMARY KEY,
+        common_dir        TEXT NOT NULL,
+        project_root      TEXT NOT NULL,
+        branch            TEXT NOT NULL,
+        base              TEXT,
+        created_branch    INTEGER NOT NULL DEFAULT 0,
+        start_sha         TEXT,
+        created_at        TEXT NOT NULL
+    );
     ",
 ];
 
@@ -263,6 +279,9 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
         color: row.get("color")?,
         first_prompt: row.get("first_prompt")?,
         session_name: row.get("session_name")?,
+        project_common_dir: row
+            .get::<_, Option<String>>("project_common_dir")?
+            .map(PathBuf::from),
     }))
 }
 
@@ -301,9 +320,10 @@ impl SessionStore for SqliteStore {
         conn.execute(
             "INSERT INTO sessions (id, claude_session_id, profile, cwd, project_root, branch,
                 model, mode, status, status_reason, created_at, updated_at, last_activity, pid,
-                pid_start, scope_unit, title, color, first_prompt, session_name)
+                pid_start, scope_unit, title, color, first_prompt, session_name,
+                project_common_dir)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20)
+                ?17, ?18, ?19, ?20, ?21)
              ON CONFLICT(id) DO UPDATE SET
                 claude_session_id = excluded.claude_session_id,
                 profile = excluded.profile, cwd = excluded.cwd,
@@ -313,7 +333,8 @@ impl SessionStore for SqliteStore {
                 last_activity = excluded.last_activity, pid = excluded.pid,
                 pid_start = excluded.pid_start, scope_unit = excluded.scope_unit,
                 title = excluded.title, color = excluded.color,
-                first_prompt = excluded.first_prompt, session_name = excluded.session_name",
+                first_prompt = excluded.first_prompt, session_name = excluded.session_name,
+                project_common_dir = excluded.project_common_dir",
             params![
                 r.id.to_string(),
                 r.claude_session_id,
@@ -335,10 +356,67 @@ impl SessionStore for SqliteStore {
                 r.color,
                 r.first_prompt,
                 r.session_name,
+                r.project_common_dir
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned()),
             ],
         )
         .map_err(other)?;
         Ok(())
+    }
+
+    fn record_worktree(&self, w: &WorktreeRecord) -> io::Result<()> {
+        let conn = self.conn.lock().map_err(other)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO worktrees (path, common_dir, project_root, branch, base,
+                created_branch, start_sha, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                w.path.to_string_lossy(),
+                w.common_dir.to_string_lossy(),
+                w.project_root.to_string_lossy(),
+                w.branch,
+                w.base,
+                w.created_branch as i64,
+                w.start_sha,
+                fmt_time(w.created_at),
+            ],
+        )
+        .map_err(other)?;
+        Ok(())
+    }
+
+    fn delete_worktree(&self, path: &Path) -> io::Result<()> {
+        let conn = self.conn.lock().map_err(other)?;
+        conn.execute(
+            "DELETE FROM worktrees WHERE path = ?1",
+            params![path.to_string_lossy()],
+        )
+        .map_err(other)?;
+        Ok(())
+    }
+
+    fn load_worktrees(&self) -> io::Result<Vec<WorktreeRecord>> {
+        let conn = self.conn.lock().map_err(other)?;
+        let mut stmt = conn
+            .prepare("SELECT * FROM worktrees ORDER BY created_at")
+            .map_err(other)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(WorktreeRecord {
+                    path: PathBuf::from(row.get::<_, String>("path")?),
+                    common_dir: PathBuf::from(row.get::<_, String>("common_dir")?),
+                    project_root: PathBuf::from(row.get::<_, String>("project_root")?),
+                    branch: row.get("branch")?,
+                    base: row.get("base")?,
+                    created_branch: row.get::<_, i64>("created_branch")? != 0,
+                    start_sha: row.get("start_sha")?,
+                    created_at: parse_time(row.get("created_at")?)
+                        .unwrap_or_else(OffsetDateTime::now_utc),
+                })
+            })
+            .map_err(other)?;
+        Ok(rows.flatten().collect())
     }
 
     fn delete(&self, id: &Uuid) -> io::Result<()> {
@@ -515,6 +593,7 @@ mod tests {
             color: Some("bleu".into()),
             first_prompt: Some("Corrige le test".into()),
             session_name: Some("Correction".into()),
+            project_common_dir: Some("/p/.git".into()),
         }
     }
 
@@ -765,6 +844,54 @@ mod tests {
         store.delete(&s1).unwrap();
         assert!(store.load_subagents(&s1).unwrap().is_empty());
         assert_eq!(store.load_subagents(&s2).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migrates_a_v5_database_keeping_its_rows_then_records_worktrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for m in &MIGRATIONS[..5] {
+                conn.execute_batch(m).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 5).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, claude_session_id, profile, cwd, project_root,
+                    status, created_at, updated_at)
+                 VALUES (?1, 'c', 'default', '/p', '/p', 'idle', ?2, ?2)",
+                params![
+                    Uuid::from_u128(9).to_string(),
+                    fmt_time(OffsetDateTime::UNIX_EPOCH)
+                ],
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let all = store.load_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].project_common_dir, None);
+        let mut r = all[0].clone();
+        r.project_common_dir = Some("/p/.git".into());
+        store.upsert(&r).unwrap();
+        assert_eq!(store.load_all().unwrap()[0], r);
+
+        let w = WorktreeRecord {
+            path: "/p-x".into(),
+            common_dir: "/p/.git".into(),
+            project_root: "/p".into(),
+            branch: "x".into(),
+            base: Some("main".into()),
+            created_branch: true,
+            start_sha: Some("abc".into()),
+            created_at: OffsetDateTime::from_unix_timestamp(5).unwrap(),
+        };
+        store.record_worktree(&w).unwrap();
+        store.record_worktree(&w).unwrap();
+        assert_eq!(store.load_worktrees().unwrap(), std::slice::from_ref(&w));
+        store.delete_worktree(Path::new("/autre")).unwrap();
+        store.delete_worktree(&w.path).unwrap();
+        assert!(store.load_worktrees().unwrap().is_empty());
     }
 
     #[test]

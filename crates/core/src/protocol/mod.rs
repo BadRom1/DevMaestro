@@ -61,6 +61,13 @@ pub mod error_code {
     pub const NOT_A_REPO: i64 = -32017;
     /// Sous-agent inconnu dans cette session (`sessions.subagent`).
     pub const UNKNOWN_SUBAGENT: i64 = -32018;
+    /// `worktrees.remove` refusé : une session vivante du démon tourne dans
+    /// ce worktree.
+    pub const WORKTREE_IN_USE: i64 = -32019;
+    /// `worktrees.remove` refusé sans `force` : le worktree a des
+    /// modifications non commitées ou des fichiers non suivis (liste dans
+    /// `data.files`).
+    pub const WORKTREE_DIRTY: i64 = -32020;
 }
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {

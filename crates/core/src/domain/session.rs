@@ -35,6 +35,10 @@ pub struct Session {
     pub project_root: PathBuf,
     /// Dossier de travail (le worktree).
     pub cwd: PathBuf,
+    /// Dossier commun git du projet (`git rev-parse --git-common-dir`) :
+    /// identité du projet, relevée au lancement ; reste valable quand le
+    /// worktree de la session a été supprimé. `None` hors dépôt ou inconnu.
+    pub project_common_dir: Option<PathBuf>,
     /// Branche git du worktree, si connue.
     pub branch: Option<String>,
     /// Nom du profil utilisé.
@@ -126,6 +130,7 @@ impl Session {
             claude_session_id: claude_session_id.into(),
             project_root: project_root.into(),
             cwd: cwd.into(),
+            project_common_dir: None,
             branch: None,
             profile: profile.into(),
             state: SessionState::default(),

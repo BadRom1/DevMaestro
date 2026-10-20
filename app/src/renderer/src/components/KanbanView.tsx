@@ -1,15 +1,28 @@
 /**
  * Vue par statut (kanban) : une colonne par statut, une carte par session.
  * Une permission se règle depuis la carte (Autoriser / Refuser) ; une
- * question ouvre la session. Cliquer sur le nom ouvre la session « par projet ».
+ * question ouvre la session. Cliquer sur une carte ouvre la session dans un
+ * volet à côté du kanban (on reste dans la vue par statut) ; filtre par projet
+ * retenu localement.
  */
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 
 import type { PendingRequest, ProjectInfo, Profile, Session, Subagent } from '../../../shared/protocol'
 import { call, errorCode, errorText } from '../api'
 import { ALREADY_CLOSED } from '../state/errors'
 import { basename, formatPct, formatUsd, relativeTime, sessionColor, sessionDisplayName } from '../state/format'
+import { browserStorage } from '../state/collapse'
 import { COLUMNS, demandSummary, firstPending, kanbanColumns, oneClickAllowed } from '../state/kanban'
+import {
+  cardSelected,
+  filterFor,
+  filterSessions,
+  loadProjectFilter,
+  projectOptions,
+  saveProjectFilter,
+  type ProjectFilter,
+} from '../state/kanbanFilter'
+import type { ProjectGroup } from '../state/projects'
 import { answerability } from '../state/requests'
 import { glyphFor } from '../state/status'
 import { runningCount, runningLabel } from '../state/subagents'
@@ -83,9 +96,12 @@ function Card({
   project,
   profiles,
   stale,
+  selected,
   onOpen,
 }: {
   session: Session
+  /** Carte de la session affichée dans le volet. */
+  selected: boolean
   /** Liste connue, ou `undefined` (le compteur de la session sert alors de repli). */
   agents: readonly Subagent[] | undefined
   project: ProjectInfo | undefined
@@ -99,12 +115,24 @@ function Card({
   const req = firstPending(session)
   const m = session.metrics
   const agentsRunning = runningLabel(runningCount(session, agents))
+  // Clic ailleurs que sur un bouton de la carte : ouvre la session (au clavier : le bouton du nom).
+  const onCardClick = (e: MouseEvent<HTMLLIElement>) => {
+    if ((e.target as Element).closest('button, a, input, select, textarea')) return
+    if (window.getSelection()?.isCollapsed === false) return
+    onOpen()
+  }
   return (
-    <li className={`kcard${glyph.kind === 'waiting' ? ' wait' : ''}`}>
+    <li className={`kcard${glyph.kind === 'waiting' ? ' wait' : ''}${selected ? ' sel' : ''}`} onClick={onCardClick}>
       <div className="khead">
         <StatusGlyph glyph={glyph} decorative={false} />
         <ColorBar color={sessionColor(session)} />
-        <button className="kname" onClick={onOpen} title={`Ouvrir « ${name} » (vue par projet)`}>
+        <button
+          id={cardId(session.id)}
+          className="kname"
+          onClick={onOpen}
+          aria-current={selected ? 'true' : undefined}
+          title={`Afficher « ${name} » à côté du kanban`}
+        >
           {name}
         </button>
         <ProfileBadge profile={session.profile} profiles={profiles} />
@@ -141,48 +169,154 @@ function Card({
   )
 }
 
+/** Identifiant du bouton de nom d'une carte (focus rendu à la fermeture du volet). */
+function cardId(sessionId: string): string {
+  return `kcard-${sessionId}`
+}
+
+/** Échap ferme le volet, sauf dans un champ, un dialogue ou le terminal (où Échap va à Claude). */
+function escapeCloses(e: KeyboardEvent): boolean {
+  if (e.key !== 'Escape' || e.defaultPrevented) return false
+  const t = e.target as Element | null
+  return !t?.closest?.('.xterm, input, textarea, select, [contenteditable="true"], [role="dialog"], dialog')
+}
+
 export function KanbanView({
   sessions,
+  groups,
   projects,
   profiles,
   stale,
   subagents,
+  selectedId,
+  paneOpen,
+  pane,
   onOpen,
+  onClose,
 }: {
   sessions: Session[]
+  /** Groupes de la barre latérale (`groupByProject`) : choix du filtre par projet. */
+  groups: readonly ProjectGroup[]
   /** Sous-agents connus, par session. */
   subagents: Record<string, Subagent[]>
   projects: Record<string, ProjectInfo>
   profiles: Profile[]
   /** Demandes signalées « peut-être obsolètes », par session. */
   stale: Record<string, number[]>
+  /** Session choisie (celle du volet). */
+  selectedId: string | null
+  /** Volet ouvert (choix de l'utilisateur, gardé d'une vue à l'autre). */
+  paneOpen: boolean
+  /** Volet de la session (`SessionPane`), `null` s'il n'est pas affiché. */
+  pane: ReactNode
   onOpen: (id: string) => void
+  onClose: () => void
 }) {
-  const cols = kanbanColumns(sessions)
+  const [stored, setStored] = useState<ProjectFilter | null>(() => loadProjectFilter(browserStorage()))
+  // Nom à jour quand le projet est là ; sinon le nom retenu (projet sans session).
+  const filter = useMemo(() => (stored ? (filterFor(groups, stored.key) ?? stored) : null), [stored, groups])
+  const options = useMemo(() => projectOptions(groups, filter), [groups, filter])
+  const visible = useMemo(() => filterSessions(sessions, groups, filter), [sessions, groups, filter])
+  const cols = kanbanColumns(visible)
+  const showPane = pane !== null && pane !== undefined && pane !== false
+
+  const choose = (key: string) => {
+    const next = key === '' ? null : (filterFor(groups, key) ?? (filter?.key === key ? filter : null))
+    setStored(next)
+    saveProjectFilter(browserStorage(), next)
+  }
+
+  // Focus : au volet à l'ouverture, à la carte (ou au filtre si elle est masquée) à la fermeture.
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const selectRef = useRef<HTMLSelectElement>(null)
+  const wasShown = useRef(showPane)
+  const lastId = useRef(selectedId)
+  useEffect(() => {
+    // Ouverture seulement : passer d'une carte à l'autre, volet ouvert, laisse le focus sur les cartes.
+    if (showPane && !wasShown.current) closeRef.current?.focus()
+    else if (!showPane && wasShown.current && lastId.current) {
+      const card = document.getElementById(cardId(lastId.current))
+      ;(card ?? selectRef.current)?.focus()
+    }
+    wasShown.current = showPane
+    lastId.current = selectedId
+  }, [showPane, selectedId])
+
+  const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
+    if (showPane && escapeCloses(e)) {
+      e.preventDefault()
+      onClose()
+    }
+  }
+
+  const empty = filter !== null && visible.length === 0
   return (
-    <main className="kanban" aria-label="Sessions par statut">
-      {COLUMNS.map((c) => (
-        <section key={c.key} className={`kcol k-${c.key}`} aria-labelledby={`kcol-${c.key}`}>
-          <h2 id={`kcol-${c.key}`} className="kctitle">
-            <span className="lbl">{c.title}</span>
-            <span className={`badge${c.key === 'waiting' && cols[c.key].length ? ' wait' : ''}`}>{cols[c.key].length}</span>
-          </h2>
-          <ul role="list" className="kcards">
-            {cols[c.key].length === 0 && <li className="hint pad">Aucune session.</li>}
-            {cols[c.key].map((s) => (
-              <Card
-                key={s.id}
-                session={s}
-                agents={subagents[s.id]}
-                project={projects[s.cwd]}
-                profiles={profiles}
-                stale={stale[s.id] ?? NO_STALE}
-                onOpen={() => onOpen(s.id)}
-              />
+    <main className={`kview${showPane ? ' open' : ''}`} onKeyDown={onKeyDown}>
+      <div className="kside">
+        <div className="khdr">
+          <label htmlFor="kanban-project">Projet :</label>
+          <select
+            id="kanban-project"
+            ref={selectRef}
+            value={filter?.key ?? ''}
+            onChange={(e) => choose(e.target.value)}
+          >
+            <option value="">Tous les projets ({sessions.length})</option>
+            {options.map((o) => (
+              <option key={o.key} value={o.key}>
+                {o.label} ({o.count})
+              </option>
             ))}
-          </ul>
-        </section>
-      ))}
+          </select>
+        </div>
+        {empty ? (
+          <div className="kempty panel" role="status">
+            <p>
+              Aucune session affichée pour le projet « {filter.name} ».
+            </p>
+            <button className="btn sm" onClick={() => choose('')}>
+              Afficher tous les projets
+            </button>
+          </div>
+        ) : (
+          <div className="kanban" role="region" aria-label="Sessions par statut">
+            {COLUMNS.map((c) => (
+              <section key={c.key} className={`kcol k-${c.key}`} aria-labelledby={`kcol-${c.key}`}>
+                <h2 id={`kcol-${c.key}`} className="kctitle">
+                  <span className="lbl">{c.title}</span>
+                  <span className={`badge${c.key === 'waiting' && cols[c.key].length ? ' wait' : ''}`}>{cols[c.key].length}</span>
+                </h2>
+                <ul role="list" className="kcards">
+                  {cols[c.key].length === 0 && <li className="hint pad">Aucune session.</li>}
+                  {cols[c.key].map((s) => (
+                    <Card
+                      key={s.id}
+                      session={s}
+                      selected={cardSelected(s.id, showPane, selectedId)}
+                      agents={subagents[s.id]}
+                      project={projects[s.cwd]}
+                      profiles={profiles}
+                      stale={stale[s.id] ?? NO_STALE}
+                      onOpen={() => onOpen(s.id)}
+                    />
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
+        )}
+      </div>
+      {showPane && (
+        <div className="kpane">
+          <div className="kpane-bar">
+            <span className="hint">Session ouverte depuis la vue par statut · Échap pour fermer</span>
+            <button ref={closeRef} className="btn sm ghost" onClick={onClose}>
+              Fermer
+            </button>
+          </div>
+          {pane}
+        </div>
+      )}
     </main>
   )
 }

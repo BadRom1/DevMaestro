@@ -16,6 +16,7 @@ import {
 } from '../state/format'
 import { RESOLVING_GROUP, pastFolderMissing, type PastEntry, type PastGroup, type ProjectGroup } from '../state/projects'
 import { glyphFor } from '../state/status'
+import { candidate, cleanupCount, worktreeOf, type WorktreeLists } from '../state/worktrees'
 import { PathLabel, ProfileBadge, StatusGlyph } from './common'
 import { useSettings } from '../settings'
 import { ForgetConfirm, HideConfirm } from './ForgetConfirm'
@@ -54,6 +55,7 @@ function Group({
   open,
   onToggle,
   extra,
+  action,
   children,
 }: {
   name: string
@@ -62,16 +64,28 @@ function Group({
   open: boolean
   onToggle: () => void
   extra?: ReactNode
+  /** Action du projet, à côté de l'en-tête (hors du bouton de repli). */
+  action?: ReactNode
   children: ReactNode
 }) {
   const listId = useId()
+  const header = (
+    <button className="proj-h" aria-expanded={open} aria-controls={listId} onClick={onToggle} title={title ?? name}>
+      <Chevron open={open} />
+      <b>{name}</b>
+      {extra}
+    </button>
+  )
   return (
     <div className="proj">
-      <button className="proj-h" aria-expanded={open} aria-controls={listId} onClick={onToggle} title={title ?? name}>
-        <Chevron open={open} />
-        <b>{name}</b>
-        {extra}
-      </button>
+      {action ? (
+        <div className="proj-hrow">
+          {header}
+          {action}
+        </div>
+      ) : (
+        header
+      )}
       {path && <PathLabel className="proj-path" path={path} title={title} />}
       <ul id={listId} role="list" className="rows" hidden={!open}>
         {children}
@@ -97,6 +111,14 @@ export function Sidebar(props: {
   subagents: Record<string, Subagent[]>
   /** Ouvre l'onglet « Agents » de la session (sur cet agent, ou sans choix). */
   onOpenAgent: (sessionId: string, agentId: string | null) => void
+  /** Worktrees connus, par racine de dépôt (lot 6). */
+  worktrees?: WorktreeLists
+  /** Worktrees vus avec du travail à eux (intégration crédible, voir `noteWork`). */
+  worktreesWorked?: ReadonlySet<string>
+  /** Le démon connaît les worktrees : badges et nettoyage proposés. */
+  worktreesEnabled?: boolean
+  /** Ouvre « Nettoyer les worktrees » d'un dépôt (`focus` : worktree visé). */
+  onCleanup?: (root: string, name: string, focus: string | null) => void
 }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -131,8 +153,11 @@ export function Sidebar(props: {
     }
   }
 
-  function sessionRow(s: Session, groupRoot: string) {
+  function sessionRow(s: Session, groupRoot: string, groupName: string, isGit: boolean) {
     const glyph = glyphFor(s.status)
+    // Worktree intégré sans session vivante (lot 6) : badge et « Nettoyer… ».
+    const wt = props.worktreesEnabled && isGit ? worktreeOf(s.cwd, props.worktrees?.[groupRoot]?.worktrees) : undefined
+    const integratedWt = wt && !s.alive && candidate(wt, props.worktreesWorked) ? wt : undefined
     const branch = s.branch ?? (s.cwd !== groupRoot ? basename(s.cwd) : 'sans branche')
     const name = sessionDisplayName(s)
     const color = sessionColor(s)
@@ -144,7 +169,7 @@ export function Sidebar(props: {
         <button
           className="srow"
           aria-current={s.id === props.selectedId}
-          aria-label={`${name}, ${branch}, ${glyph.label}, profil ${labelOf(s.profile).long}${color ? `, couleur ${COLOR_LABELS[color].toLowerCase()}` : ''}, ${missing ? ', dossier supprimé' : ''}, dernière activité ${relativeTime(s.last_activity)}`}
+          aria-label={`${name}, ${branch}, ${glyph.label}, profil ${labelOf(s.profile).long}${color ? `, couleur ${COLOR_LABELS[color].toLowerCase()}` : ''}${missing ? ', dossier supprimé' : ''}${integratedWt ? ', branche intégrée' : ''}, dernière activité ${relativeTime(s.last_activity)}`}
           title={`${name}\n${branch} · ${s.cwd}${missing ? ' (dossier supprimé)' : ''}`}
           onClick={() => props.onSelect(s.id)}
           onContextMenu={(e) => {
@@ -160,7 +185,7 @@ export function Sidebar(props: {
               <ColorBar color={color} />
               <span className="nm-t">{name}</span>
             </span>
-            {(branch !== name || missing) && (
+            {(branch !== name || missing || integratedWt) && (
               <span className="sub">
                 {branch !== name && <span className="br">{branch}</span>}
                 {missing && (
@@ -168,11 +193,26 @@ export function Sidebar(props: {
                     dossier supprimé
                   </span>
                 )}
+                {integratedWt && (
+                  <span className="integ" title={`Branche intégrée, aucune session ne tourne dans ${integratedWt.path}`}>
+                    <span aria-hidden="true">✓</span> intégrée
+                  </span>
+                )}
               </span>
             )}
           </span>
           <span className="ago">{shortAgo(s.last_activity ?? s.created_at)}</span>
         </button>
+        {integratedWt && props.onCleanup && (
+          <button
+            className="row-act wt-act"
+            aria-label={`Nettoyer le worktree de « ${name} »`}
+            title="Nettoyer le worktree (branche intégrée)…"
+            onClick={() => props.onCleanup!(groupRoot, groupName, integratedWt.path)}
+          >
+            Nettoyer…
+          </button>
+        )}
         {forgettable && (
           <button
             className="row-act"
@@ -285,6 +325,8 @@ export function Sidebar(props: {
       {props.groups.length === 0 && <p className="empty-note">Aucune session pour l’instant.</p>}
       {props.groups.map((g) => {
         const key = `proj:${g.key}`
+        const canClean = !!props.worktreesEnabled && g.isGit && !g.missing && !!props.onCleanup
+        const toClean = canClean ? cleanupCount(props.worktrees?.[g.root], props.worktreesWorked) : 0
         return (
           <Group
             key={g.key}
@@ -293,6 +335,23 @@ export function Sidebar(props: {
             title={g.root}
             open={!isCollapsed(key)}
             onToggle={() => toggle(key)}
+            action={
+              canClean ? (
+                <button
+                  className={`proj-act${toClean > 0 ? ' has' : ''}`}
+                  aria-label={`Nettoyer les worktrees de ${g.name}${toClean > 0 ? ` (${toClean} intégré${toClean > 1 ? 's' : ''})` : ''}…`}
+                  title="Nettoyer les worktrees…"
+                  onClick={() => props.onCleanup!(g.root, g.name, null)}
+                >
+                  <span aria-hidden="true">⑂</span>
+                  {toClean > 0 && (
+                    <span className="n" aria-hidden="true">
+                      {toClean} ✓
+                    </span>
+                  )}
+                </button>
+              ) : undefined
+            }
             extra={
               <>
                 {g.missing && (
@@ -308,7 +367,7 @@ export function Sidebar(props: {
               </>
             }
           >
-            {g.sessions.map((s) => sessionRow(s, g.root))}
+            {g.sessions.map((s) => sessionRow(s, g.root, g.name, g.isGit))}
           </Group>
         )
       })}

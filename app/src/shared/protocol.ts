@@ -5,6 +5,8 @@
  * Principe : tout champ peut être `null` quand la donnée est inconnue.
  */
 
+import type { WorktreeLocation } from './worktrees'
+
 export const PROTOCOL_VERSION = 1
 
 export type SessionState = 'starting' | 'running' | 'waiting' | 'idle' | 'error' | 'stopped'
@@ -135,6 +137,78 @@ export interface Session {
   subagents_running?: number | null
   /** Sous-agents connus de la session (au plus les 100 derniers gardés). */
   subagents_total?: number | null
+  /**
+   * Identité du projet (dossier commun git) enregistrée au lancement (v0.2,
+   * lot 6) : la session reste sous son projet même si son worktree a été
+   * supprimé. Absent avec un démon plus ancien, `null` hors dépôt.
+   */
+  project_common_dir?: string | null
+}
+
+/* ---------- Worktrees (v0.2, lot 6) ---------- */
+
+/** Demande de worktree à la création d'une session (`sessions.launch`). */
+export interface WorktreeRequest {
+  branch: string
+  /** Point de départ d'une branche nouvelle (défaut : branche de référence). */
+  base?: string
+  location: WorktreeLocation
+  /** Chemin explicite, seulement pour `location: "custom"`. */
+  path?: string
+}
+
+/** Worktree créé avec la session. */
+export interface CreatedWorktree {
+  path: string
+  branch: string
+  base: string | null
+}
+
+/**
+ * `merged` : tête ancêtre de la référence ; `squashed` : contenu déjà intégré ;
+ * `empty` : branche créée par l'app sans commit à elle (pas intégrée) ; `no` sinon.
+ */
+export type Integration = 'merged' | 'squashed' | 'empty' | 'no'
+
+export interface WorktreeInfo {
+  path: string
+  branch: string | null
+  head: string | null
+  /** Worktree principal (jamais supprimé). */
+  main: boolean
+  locked: boolean
+  prunable: boolean
+  exists: boolean
+  /** Modifications ou fichiers non suivis ; `null` si le dossier manque. */
+  dirty: boolean | null
+  /** Commits de la branche absents de la référence. */
+  ahead: number | null
+  /** `null` pour le principal ou sans branche. */
+  integrated: Integration | null
+  /** Sessions vivantes du démon dans ce worktree. */
+  sessions_running: number
+  /** `claude_desktop` : sous `<racine>/.claude/worktrees/` ; `devmaestro` : créé par le démon. */
+  managed_by?: 'claude_desktop' | 'devmaestro' | null
+}
+
+export interface WorktreesList {
+  /** Branche par défaut du dépôt. */
+  default_branch: string | null
+  /** Branche de référence retenue (« origin/main », « main »), base par défaut d'une nouvelle branche. */
+  reference?: string | null
+  root?: string
+  common_dir?: string | null
+  worktrees: WorktreeInfo[]
+}
+
+/** Réponse de `worktrees.remove`. */
+export interface WorktreeRemoved {
+  removed: boolean
+  path: string
+  branch: string | null
+  /** `null` : suppression de la branche pas demandée ; `false` : refusée (voir `branch_error`). */
+  branch_deleted: boolean | null
+  branch_error: string | null
 }
 
 export type ResumeBlocker = 'transcript_missing' | 'cwd_missing'
@@ -382,9 +456,11 @@ export interface Methods {
       prompt?: string
       cols?: number
       rows?: number
+      /** Créer un worktree puis lancer la session dedans (lot 6 ; ignoré par un démon plus ancien). */
+      worktree?: WorktreeRequest
     }
     /** `warnings` : messages du démon en français (mode dangereux remplacé…). */
-    result: { session: Session; warnings?: string[] }
+    result: { session: Session; warnings?: string[]; worktree?: CreatedWorktree | null }
   }
   'sessions.resume': {
     params:
@@ -435,6 +511,12 @@ export interface Methods {
   'quotas.get': { params: { refresh?: boolean }; result: QuotasReport }
   'transcripts.hide': { params: { profile: string; claude_session_id: string }; result: { hidden: boolean } }
   'transcripts.unhide': { params: { profile: string; claude_session_id: string }; result: { hidden: boolean } }
+  /** Worktrees d'un dépôt connu (`root` : racine donnée par `projects.resolve`). */
+  'worktrees.list': { params: { root: string }; result: WorktreesList }
+  'worktrees.remove': {
+    params: { root: string; path: string; delete_branch: boolean; force: boolean }
+    result: WorktreeRemoved
+  }
 }
 
 export type MethodName = keyof Methods
@@ -466,6 +548,8 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'sessions.input',
   'sessions.subagents',
   'sessions.subagent',
+  'worktrees.list',
+  'worktrees.remove',
 ]
 
 /** Codes d'erreur JSON-RPC du démon (protocole § 3). */
@@ -479,6 +563,10 @@ export const ErrorCode = {
   InvalidState: -32002,
   UnknownProfile: -32003,
   LaunchFailed: -32004,
+  /** `worktrees.remove` : une session tourne dans ce worktree. */
+  WorktreeBusy: -32019,
+  /** `worktrees.remove` sans `force` : modifications non commitées (`data` : liste courte des fichiers). */
+  WorktreeDirty: -32020,
   /** Côté client : délai dépassé, connexion perdue (hors protocole). */
   Timeout: -1,
   Disconnected: -2,
@@ -496,3 +584,5 @@ export type Notification =
   | { method: 'session.diff_changed'; params: { id: string } }
   /** Sous-agents de la session : liste complète, sans `report`. */
   | { method: 'session.subagents_changed'; params: { id: string; agents: Subagent[] } }
+  /** Les worktrees d'un dépôt ont changé (création, suppression, intégration, modifications). */
+  | { method: 'project.worktrees_changed'; params: { root: string } }

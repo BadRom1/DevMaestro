@@ -4,6 +4,7 @@ import type { ConnectionState } from '../../shared/bridge'
 import { validHome } from '../../shared/home'
 import { ErrorCode, type Session } from '../../shared/protocol'
 import { CallError, api, call } from './api'
+import { CleanupDialog } from './components/CleanupDialog'
 import { forgetDiffMemory } from './components/DiffView'
 import { forgetFilesMemory } from './components/FilesView'
 import { LinkDialog } from './components/LinkDialog'
@@ -15,9 +16,13 @@ import { ancestorToResolve, fallbackProject, groupByProject, groupPast, pastToOf
 import { daemonSaysFolderExists } from './state/format'
 import { initialState, needsResolve, reducer } from './state/store'
 import { KanbanView } from './components/KanbanView'
+import { browserStorage } from './state/collapse'
+import { loadPaneOpen, paneVisible, savePaneOpen } from './state/kanbanFilter'
 import { SettingsDialog } from './components/SettingsDialog'
 import { useSettings } from './settings'
-import { buildProjectChoices } from './state/newSession'
+import { buildProjectChoices, sessionProjectKey } from './state/newSession'
+import { noteWork, type WorktreeLists } from './state/worktrees'
+import { rootFromCommonDir } from '../../shared/worktrees'
 import { emptyDraft, reviewReducer, type ReviewAction, type ReviewDraft } from './state/review'
 import {
   initialLoad,
@@ -210,6 +215,79 @@ export function App() {
 
   const sessions = useMemo(() => Object.values(state.sessions), [state.sessions])
 
+  /* ---------- Worktrees (lot 6) ---------- */
+
+  /** Listes `worktrees.list` par racine de dépôt. */
+  const [worktreeLists, setWorktreeLists] = useState<WorktreeLists>({})
+  /** Le démon connaît-il `worktrees.list` ? `null` : pas encore su. */
+  const [worktreesSupported, setWorktreesSupported] = useState<boolean | null>(null)
+  const wtLoading = useRef(new Set<string>())
+  /** Dépôt redemandé pendant un chargement (notification arrivée entre-temps). */
+  const wtAgain = useRef(new Set<string>())
+  const [managedDir, setManagedDir] = useState<string | null>(null)
+  const [cleanup, setCleanup] = useState<{ root: string; name: string; focus: string | null } | null>(null)
+  /** Worktrees vus avec du travail à eux (badge « intégrée » crédible, voir `noteWork`). */
+  const wtWorked = useRef(new Set<string>())
+  const closeCleanup = useCallback(() => setCleanup(null), [])
+
+  const loadWorktrees = useCallback((root: string) => {
+    if (wtLoading.current.has(root)) {
+      wtAgain.current.add(root)
+      return
+    }
+    wtLoading.current.add(root)
+    call('worktrees.list', { root })
+      .then((r) => {
+        const worktrees = r.worktrees ?? []
+        noteWork(wtWorked.current, worktrees)
+        setWorktreesSupported(true)
+        setWorktreeLists((m) => ({ ...m, [root]: { ...r, default_branch: r.default_branch ?? null, worktrees } }))
+      })
+      .catch((e: unknown) => {
+        const code = e instanceof CallError ? e.failure.code : null
+        if (code === ErrorCode.MethodNotFound) {
+          setWorktreesSupported(false)
+          return
+        }
+        console.warn(`[devmaestro] worktrees.list (${root}) :`, e)
+        if (code === ErrorCode.Disconnected || code === ErrorCode.Timeout) return
+        // Refus du démon (dépôt inconnu…) : la méthode existe ; liste vide, sans boucle de nouveaux essais.
+        setWorktreesSupported(true)
+        setWorktreeLists((m) => (m[root] ? m : { ...m, [root]: { default_branch: null, worktrees: [] } }))
+      })
+      .finally(() => {
+        wtLoading.current.delete(root)
+        if (wtAgain.current.delete(root)) loadWorktrees(root)
+      })
+  }, [])
+
+  // Nouvelle connexion (démon peut-être mis à jour) : support et listes redemandés.
+  useEffect(() => {
+    if (state.connection.state !== 'connected') return
+    setWorktreesSupported(null)
+    setWorktreeLists({})
+  }, [state.connection])
+
+  // Worktrees changés (création, suppression, intégration) : liste redemandée.
+  useEffect(
+    () =>
+      api.onNotification((n) => {
+        if (n.method === 'project.worktrees_changed' && typeof n.params?.root === 'string') loadWorktrees(n.params.root)
+      }),
+    [loadWorktrees],
+  )
+
+  // Dossier des worktrees gérés (chemin affiché à la création) ; absent avec un preload plus ancien.
+  useEffect(() => {
+    let alive = true
+    void Promise.resolve(api.worktreesDir?.())
+      .then((d) => alive && setManagedDir(typeof d === 'string' ? d : null))
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [])
+
   /**
    * Sous-agents : `sessions.subagents` pour les sessions qui en ont, puis les
    * notifications `session.subagents_changed`. `clock` (30 s) relance les
@@ -281,10 +359,70 @@ export function App() {
     // `clock` : réévalue les nouveaux essais toutes les 30 s.
   }, [sessions, past, state, clock])
   const groups = useMemo(() => groupByProject(sessions, state.projects, home), [sessions, state.projects, home])
+
+  /**
+   * Fin d'une session : le démon ne signale pas forcément le changement de
+   * `sessions_running` ; la liste de son dépôt est redemandée (anti-rebond).
+   */
+  const wasAlive = useRef(new Map<string, boolean>())
+  const endTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
+  useEffect(() => {
+    for (const s of sessions) {
+      const before = wasAlive.current.get(s.id)
+      wasAlive.current.set(s.id, s.alive)
+      if (!before || s.alive || worktreesSupported === false) continue
+      const info = state.projects[s.cwd]
+      const root = rootFromCommonDir(s.project_common_dir) ?? (info?.is_git ? info.root : null)
+      if (!root) continue
+      clearTimeout(endTimers.current.get(root))
+      endTimers.current.set(
+        root,
+        setTimeout(() => {
+          endTimers.current.delete(root)
+          loadWorktrees(root)
+        }, 1500),
+      )
+    }
+  }, [sessions, state.projects, worktreesSupported, loadWorktrees])
+  useEffect(() => {
+    const timers = endTimers.current
+    return () => {
+      for (const t of timers.values()) clearTimeout(t)
+    }
+  }, [])
+
+  // Worktrees de chaque dépôt affiché (une fois par connexion, puis sur notification).
+  useEffect(() => {
+    if (state.connection.state !== 'connected' || worktreesSupported === false) return
+    for (const g of groups) {
+      if (!g.isGit || g.missing || worktreeLists[g.root]) continue
+      // Support encore inconnu : un seul dépôt sonde le démon.
+      if (worktreesSupported === null && wtLoading.current.size > 0) break
+      loadWorktrees(g.root)
+    }
+  }, [groups, state.connection, worktreesSupported, worktreeLists, loadWorktrees])
+
+  // Notification « branche intégrée » cliquée : nettoyage de ce dépôt.
+  useEffect(
+    () =>
+      api.onOpenCleanup?.(({ root, path }) => {
+        const g = groups.find((x) => x.root === root)
+        setCleanup({ root, name: g?.name ?? root.split('/').filter(Boolean).pop() ?? root, focus: path })
+        loadWorktrees(root)
+      }),
+    [groups, loadWorktrees],
+  )
   const ordered = useMemo(() => sidebarOrder(groups), [groups])
   const waiting = ordered.filter((s) => s.status.state === 'waiting')
   const pastGroups = useMemo(() => groupPast(past, state.projects, home), [past, state.projects, home])
   const selected = state.selectedId ? (state.sessions[state.selectedId] ?? null) : null
+
+  /**
+   * Sélection choisie par l'utilisateur (clic, notification, lancement) et non
+   * la sélection par défaut : le volet de la vue par statut ne s'ouvre que sur
+   * une session choisie ainsi.
+   */
+  const [explicitSel, setExplicitSel] = useState(false)
 
   // Sélection par défaut : la première qui attend, sinon la première de la liste.
   useEffect(() => {
@@ -293,7 +431,10 @@ export function App() {
   }, [selected, ordered, waiting])
 
 
-  const select = useCallback((id: string) => dispatch({ type: 'select', id }), [])
+  const select = useCallback((id: string) => {
+    dispatch({ type: 'select', id })
+    setExplicitSel(true)
+  }, [])
 
   const resumePast = useCallback(
     async (p: PastEntry) => {
@@ -304,20 +445,10 @@ export function App() {
         ...(termSize ?? {}),
       })
       dispatch({ type: 'session.updated', session: r.session })
-      dispatch({ type: 'select', id: r.session.id })
+      select(r.session.id)
     },
-    [termSize],
+    [termSize, select],
   )
-
-  const onLaunched = useCallback((s: Session, warnings: string[]) => {
-    dispatch({ type: 'session.updated', session: s })
-    dispatch({ type: 'select', id: s.id })
-    setNotices(warnings.filter((w) => typeof w === 'string' && w.trim() !== ''))
-    setDialog(false)
-  }, [])
-
-  // Clic sur une notification desktop : afficher la session.
-  useEffect(() => api.onSelectSession?.((id) => dispatch({ type: 'select', id })), [])
 
   const projectChoices = useMemo(
     () => buildProjectChoices({ sessions, past, projects: state.projects, home }),
@@ -368,10 +499,10 @@ export function App() {
     [selectedId],
   )
   const openAgent = useCallback((sessionId: string, agentId: string | null) => {
-    dispatch({ type: 'select', id: sessionId })
+    select(sessionId)
     if (agentId) setAgentSel((m) => ({ ...m, [sessionId]: agentId }))
     setOpenAgents((n) => n + 1)
-  }, [])
+  }, [select])
 
   const onSessionUpdated = useCallback((s: Session) => dispatch({ type: 'session.response', session: s }), [])
 
@@ -379,6 +510,65 @@ export function App() {
 
   const banner = connectionText(state.connection)
   const selectedProject = selected ? state.projects[selected.cwd] : undefined
+
+  /** Vue par statut : volet de session ouvert à côté du kanban (choix retenu). */
+  const [kanbanPane, setKanbanPaneState] = useState(() => loadPaneOpen(browserStorage()))
+  const setKanbanPane = useCallback((open: boolean) => {
+    setKanbanPaneState(open)
+    savePaneOpen(browserStorage(), open)
+  }, [])
+  const openInKanban = useCallback(
+    (id: string) => {
+      select(id)
+      setKanbanPane(true)
+    },
+    [setKanbanPane, select],
+  )
+  const closeKanbanPane = useCallback(() => setKanbanPane(false), [setKanbanPane])
+  /** Afficher une session : dans le volet en vue par statut, sinon la sélectionner. */
+  const kanbanView = settings.view === 'statut'
+  const show = useCallback((id: string) => (kanbanView ? openInKanban(id) : select(id)), [kanbanView, openInKanban, select])
+
+  const onLaunched = useCallback(
+    (s: Session, warnings: string[]) => {
+      dispatch({ type: 'session.updated', session: s })
+      show(s.id)
+      setNotices(warnings.filter((w) => typeof w === 'string' && w.trim() !== ''))
+      setDialog(false)
+    },
+    [show],
+  )
+
+  // Clic sur une notification desktop : afficher la session.
+  const showRef = useRef(show)
+  showRef.current = show
+  useEffect(() => api.onSelectSession?.((id) => showRef.current(id)), [])
+
+  const sessionPane = (
+    <SessionPane
+      session={selected}
+      project={selectedProject}
+      profiles={state.profiles}
+      stale={selected ? (state.stale[selected.id] ?? []) : []}
+      termTheme={termTheme}
+      termSize={termSize}
+      onTermSize={onTermSize}
+      onLink={setLink}
+      onSessionUpdated={onSessionUpdated}
+      onForget={forget}
+      diffSeq={selected ? (state.diffSeq[selected.id] ?? 0) : 0}
+      draft={(selected && reviews[selected.id]) || emptyDraft}
+      review={reviewSelected}
+      seen={(selected && seenFiles[selected.id]) || NO_SEEN}
+      onSeen={seeSelected}
+      agents={selected ? state.subagents[selected.id] : undefined}
+      agentsLoad={selected ? loadPhase(agentsLoad.current, selected.id) : null}
+      onRetryAgents={retryAgents}
+      agentId={(selected && agentSel[selected.id]) || null}
+      onSelectAgent={selectAgent}
+      openAgents={openAgents}
+    />
+  )
 
   return (
     <div className="app">
@@ -389,7 +579,7 @@ export function App() {
         quotasSeq={state.quotasSeq}
         onRefreshQuotas={quotasSupported === false ? null : () => loadQuotas(true)}
         waitingCount={waiting.length}
-        onNextWaiting={() => waiting[0] && select(waiting[0].id)}
+        onNextWaiting={() => waiting[0] && show(waiting[0].id)}
         themeMode={themeMode}
         onTheme={(m) => updateSettings({ theme: { ...settings.theme, mode: m } })}
         onNew={() => setDialog(true)}
@@ -417,10 +607,12 @@ export function App() {
           profiles={state.profiles}
           stale={state.stale}
           subagents={state.subagents}
-          onOpen={(id) => {
-            dispatch({ type: 'select', id })
-            updateSettings({ view: 'projet' })
-          }}
+          groups={groups}
+          selectedId={state.selectedId}
+          paneOpen={kanbanPane}
+          pane={paneVisible(kanbanPane, selected, explicitSel) ? sessionPane : null}
+          onOpen={openInKanban}
+          onClose={closeKanbanPane}
         />
       ) : (
       <main className="viewA">
@@ -438,30 +630,15 @@ export function App() {
           onResumePast={resumePast}
           subagents={state.subagents}
           onOpenAgent={openAgent}
+          worktrees={worktreeLists}
+          worktreesWorked={wtWorked.current}
+          worktreesEnabled={worktreesSupported === true}
+          onCleanup={(root, name, focus) => {
+            setCleanup({ root, name, focus })
+            loadWorktrees(root)
+          }}
         />
-        <SessionPane
-          session={selected}
-          project={selectedProject}
-          profiles={state.profiles}
-          stale={selected ? (state.stale[selected.id] ?? []) : []}
-          termTheme={termTheme}
-          termSize={termSize}
-          onTermSize={onTermSize}
-          onLink={setLink}
-          onSessionUpdated={onSessionUpdated}
-          onForget={forget}
-          diffSeq={selected ? (state.diffSeq[selected.id] ?? 0) : 0}
-          draft={(selected && reviews[selected.id]) || emptyDraft}
-          review={reviewSelected}
-          seen={(selected && seenFiles[selected.id]) || NO_SEEN}
-          onSeen={seeSelected}
-          agents={selected ? state.subagents[selected.id] : undefined}
-          agentsLoad={selected ? loadPhase(agentsLoad.current, selected.id) : null}
-          onRetryAgents={retryAgents}
-          agentId={(selected && agentSel[selected.id]) || null}
-          onSelectAgent={selectAgent}
-          openAgents={openAgents}
-        />
+        {sessionPane}
       </main>
       )}
       {dialog && (
@@ -473,9 +650,27 @@ export function App() {
           home={home}
           projectProfiles={settings.projectProfiles}
           initialCwd={selected?.cwd ?? null}
+          initialProjectKey={selected ? sessionProjectKey(selected, state.projects[selected.cwd]) : null}
           termSize={termSize}
+          worktreeLists={worktreeLists}
+          worktreesSupported={worktreesSupported}
+          loadWorktrees={loadWorktrees}
+          managedDir={managedDir}
           onClose={closeDialog}
           onLaunched={onLaunched}
+        />
+      )}
+      {cleanup && (
+        <CleanupDialog
+          key={cleanup.root}
+          seen={wtWorked.current}
+          root={cleanup.root}
+          name={cleanup.name}
+          home={home}
+          list={worktreeLists[cleanup.root]}
+          focus={cleanup.focus}
+          onRefresh={() => loadWorktrees(cleanup.root)}
+          onClose={closeCleanup}
         />
       )}
       {settingsOpen && (
