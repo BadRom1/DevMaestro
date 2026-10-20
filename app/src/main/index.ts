@@ -63,7 +63,7 @@ client.on('notification', (n) => {
     relay.onNotification(n)
     return
   }
-  if (n.method === 'session.updated' || n.method === 'session.effect' || n.method === 'session.removed') {
+  if (n.method === 'session.updated' || n.method === 'session.effect' || n.method === 'session.removed' || n.method === 'quotas.updated') {
     toPage(Ipc.notification, { method: n.method, params: n.params })
   }
 })

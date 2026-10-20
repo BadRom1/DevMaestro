@@ -66,6 +66,11 @@ pub struct Env {
     /// Scopes systemd autorisés (`DEVMAESTRO_SYSTEMD_SCOPE`, essayé par
     /// défaut ; sans bus utilisateur, le démon lance directement).
     pub systemd_scope: bool,
+    /// `DEVMAESTRO_USAGE_API_URL` du démon (binaire de test seulement) : par
+    /// défaut un port local fermé, jamais la vraie API.
+    pub usage_api_url: String,
+    /// Variables supplémentaires du démon (tests seulement).
+    pub extra_env: Vec<(String, String)>,
 }
 
 impl Env {
@@ -98,6 +103,8 @@ impl Env {
             config: r.join("config"),
             permission_timeout: None,
             systemd_scope: true,
+            usage_api_url: "http://127.0.0.1:1/api/oauth/usage".into(),
+            extra_env: Vec::new(),
             proj,
             _root: root,
             _run: run,
@@ -149,6 +156,10 @@ impl Env {
         }
         if let Some(t) = self.permission_timeout {
             c.env("DEVMAESTRO_PERMISSION_TIMEOUT_SECS", t.to_string());
+        }
+        c.env("DEVMAESTRO_USAGE_API_URL", &self.usage_api_url);
+        for (k, v) in &self.extra_env {
+            c.env(k, v);
         }
         c
     }

@@ -197,6 +197,9 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       optional(o, out, 'limit', (x, k) => int(x, k, 1, 1000))
       optional(o, out, 'include_hidden', (x, k) => bool(x, k))
       return out
+    case 'quotas.get':
+      optional(o, out, 'refresh', (x, k) => bool(x, k))
+      return out
     case 'transcripts.hide':
     case 'transcripts.unhide':
       out.profile = str(o, 'profile', MAX_SHORT, { nonEmpty: true })

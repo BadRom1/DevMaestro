@@ -5,6 +5,7 @@ pub mod hooks;
 pub mod metrics;
 pub mod profile;
 pub mod project;
+pub mod quota;
 pub mod session;
 pub mod state;
 pub mod statusline;
@@ -14,6 +15,10 @@ pub use hooks::{HookCommon, HookEvent, HookKind, HookParseError, ToolCall};
 pub use metrics::{Metrics, ModelInfo, RateLimitWindow, RateLimits};
 pub use profile::Profile;
 pub use project::Project;
+pub use quota::{
+    ProfileQuotas, QuotaOrigin, QuotaReading, QuotaWindow, WindowReading, parse_usage_response,
+    reading_from_rate_limits,
+};
 pub use session::{
     MAX_TITLE_CHARS, Pending, PermissionMode, PermissionPending, Question, QuestionOption,
     QuestionPending, SESSION_COLORS, SHIFT_TAB_CYCLE, Session, SessionStatus, TitleError, WaitKind,

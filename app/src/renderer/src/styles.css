@@ -64,6 +64,8 @@ button { cursor: pointer }
 .quota { display: grid; grid-template-columns: auto auto auto; align-items: center; gap: 2px 8px; font-size: 12px }
 .quota .who { font-family: var(--f-label); font-weight: 600; grid-row: span 2 }
 .quota .k { color: var(--muted) }
+.qrefresh { display: inline-flex; align-items: center; gap: 6px; align-self: center }
+.qrefresh .btn { min-width: 26px; display: inline-grid; place-items: center }
 .quota .v { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap }
 .meter { display: inline-block; width: 86px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; vertical-align: middle }
 .meter i { display: block; height: 100%; background: var(--accent) }
@@ -139,7 +141,9 @@ button { cursor: pointer }
 .srow .names { display: grid; min-width: 0; line-height: 1.3 }
 .srow .nm { display: flex; align-items: center; gap: 5px; min-width: 0 }
 .srow .nm-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.srow .names .br { font-size: 11px; color: var(--faint) }
+.srow .names .br { font-size: 11px; color: var(--faint); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.srow .sub { display: flex; gap: 6px; align-items: center; min-width: 0 }
+.srow .gone { flex: none; font-size: 10.5px; color: var(--err); border: 1px solid currentColor; border-radius: 99px; padding: 0 5px; line-height: 1.4 }
 .srow .ago { margin-left: auto; font-size: 11.5px; color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums }
 .old { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 8px }
 .old .srow[aria-busy="true"] { opacity: .6 }

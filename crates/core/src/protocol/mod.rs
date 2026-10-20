@@ -54,6 +54,9 @@ pub mod error_code {
     /// cette session (par exemple lancée avec un marqueur de session enfant
     /// hérité, qui coupe l'enregistrement).
     pub const NO_TRANSCRIPT: i64 = -32015;
+    /// `sessions.resume` impossible : le dossier de travail de la session
+    /// n'existe plus (worktree supprimé…).
+    pub const CWD_MISSING: i64 = -32016;
 }
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {

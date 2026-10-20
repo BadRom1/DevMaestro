@@ -4,7 +4,7 @@
  * la statusline). `null` = inconnu, y compris quand l'heure de remise à zéro
  * de la fenêtre est passée (la valeur ne dit plus rien de la fenêtre en cours).
  */
-import type { Profile, RateLimitWindow, Session } from '../../../shared/protocol'
+import type { DaemonProfileQuota, DaemonQuotaWindow, Profile, RateLimitWindow, Session } from '../../../shared/protocol'
 
 export interface ProfileQuota {
   profile: string
@@ -52,4 +52,100 @@ export function quotasByProfile(sessions: Iterable<Session>, profiles: Profile[]
 export function meterLevel(pct: number | null | undefined): '' | 'hot' | 'crit' {
   if (typeof pct !== 'number') return ''
   return pct >= 90 ? 'crit' : pct >= 75 ? 'hot' : ''
+}
+
+/** Origine et date d'une fenêtre affichée (pour l'infobulle). */
+export interface WindowMeta {
+  source: string | null
+  fetchedAt: string | null
+}
+
+export interface QuotaView {
+  profile: string
+  fiveHour: RateLimitWindow | null
+  sevenDay: RateLimitWindow | null
+  fiveHourMeta: WindowMeta | null
+  sevenDayMeta: WindowMeta | null
+  /** Origine des valeurs affichées. */
+  source: 'usage_api' | 'statusline' | null
+  /** Pourquoi une mesure manque (message du démon), pour l'infobulle. */
+  error: string | null
+  fetchedAt: string | null
+}
+
+function fromDaemon(w: DaemonQuotaWindow | null | undefined): RateLimitWindow | null {
+  if (!w || typeof w.used_percentage !== 'number' || !Number.isFinite(w.used_percentage)) return null
+  return { used_pct: w.used_percentage, resets_at: w.resets_at ?? null }
+}
+
+/**
+ * Quotas à afficher : ceux du démon (`quotas.get`, disponibles dès le
+ * démarrage, avant toute session) quand ils sont exploitables, sinon ceux de
+ * la statusline des sessions (démon plus ancien, ou mesure manquante).
+ * Profils : ceux de `profiles.list`, puis ceux que seul le démon ou une
+ * session connaît.
+ */
+export function quotaViews(
+  sessions: Iterable<Session>,
+  profiles: Profile[],
+  daemon: Record<string, DaemonProfileQuota> | null,
+  now = Date.now(),
+): QuotaView[] {
+  const fallback = quotasByProfile(sessions, profiles, now)
+  const names = fallback.map((q) => q.profile)
+  for (const name of Object.keys(daemon ?? {})) if (!names.includes(name)) names.push(name)
+  return names.map((profile) => {
+    const sl = fallback.find((q) => q.profile === profile)
+    const d = daemon?.[profile]
+    const five = fromDaemon(d?.five_hour)
+    const seven = fromDaemon(d?.seven_day)
+    const fiveD = usable(five, now)
+    const sevenD = usable(seven, now)
+    const fiveHour = fiveD ? five : (sl?.fiveHour ?? null)
+    const sevenDay = sevenD ? seven : (sl?.sevenDay ?? null)
+    // Origine par fenêtre si le démon la donne, sinon celle du profil.
+    const meta = (w: DaemonQuotaWindow | null | undefined, fromDaemon: boolean, shown: unknown): WindowMeta | null => {
+      if (!shown) return null
+      if (!fromDaemon) return { source: 'statusline', fetchedAt: null }
+      return { source: w?.source ?? d?.source ?? null, fetchedAt: w?.fetched_at ?? d?.fetched_at ?? null }
+    }
+    const fromD = (usable(five, now) || usable(seven, now)) && d?.source ? d.source : null
+    const fromSl = !fromD && (sl?.fiveHour || sl?.sevenDay) ? 'statusline' : null
+    return {
+      profile,
+      fiveHour,
+      sevenDay,
+      fiveHourMeta: meta(d?.five_hour, fiveD, fiveHour),
+      sevenDayMeta: meta(d?.seven_day, sevenD, sevenDay),
+      source: fromD ?? fromSl,
+      error: typeof d?.error === 'string' && d.error.trim() ? d.error.trim() : null,
+      fetchedAt: d?.fetched_at ?? null,
+    }
+  })
+}
+
+/** Délai maximal d'attente des valeurs fraîches après « Actualiser ». */
+export const QUOTA_REFRESH_MS = 15_000
+
+/**
+ * Actualisation terminée ? `quotas.get {refresh: true}` répond tout de suite
+ * avec l'instantané courant ; les valeurs fraîches arrivent ensuite par
+ * `quotas.updated`. Terminée quand chaque profil attendu a reçu au moins un
+ * `quotas.updated` depuis le clic (ou au bout de `QUOTA_REFRESH_MS`, côté composant).
+ */
+export function refreshSettled(
+  before: Record<string, number>,
+  now: Record<string, number>,
+  profiles: readonly string[],
+): boolean {
+  return profiles.every((p) => (now[p] ?? 0) > (before[p] ?? 0))
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  usage_api: 'API d’usage de Claude Code',
+  statusline: 'statusline d’une session',
+}
+
+export function sourceLabel(s: string | null | undefined): string | null {
+  return s ? (SOURCE_LABELS[s] ?? s) : null
 }

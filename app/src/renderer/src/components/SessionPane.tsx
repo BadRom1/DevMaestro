@@ -11,11 +11,14 @@ import {
 import { CallError, call, errorCode, errorText } from '../api'
 import {
   basename,
+  folderMissing,
+  formatCompact,
   formatNumber,
   formatPct,
   formatUsd,
   modeLabel,
   relativeTime,
+  resumeBlock,
   sessionColor,
   sessionDisplayName,
   supportsNaming,
@@ -97,7 +100,8 @@ function Header({
   const [renaming, setRenaming] = useState(false)
   const [forgetting, setForgetting] = useState(false)
   // `false` seulement si le démon l'affirme (absent : démon plus ancien, la reprise reste proposée).
-  const notResumable = session.resumable === false
+  const block = resumeBlock(session, project)
+  const missing = folderMissing(session, project)
   const { sw, request } = useModeSwitch(session)
   const glyph = glyphFor(session.status)
   const m = session.metrics
@@ -226,12 +230,8 @@ function Header({
             <>
               <button
                 className="btn sm"
-                disabled={busy !== null || notResumable}
-                title={
-                  notResumable
-                    ? 'Claude Code n’a pas de transcript pour cette session (aucun échange enregistré) : elle ne peut pas être reprise.'
-                    : 'Relancer Claude Code sur cette conversation'
-                }
+                disabled={busy !== null || block !== null}
+                title={block ? block.long : 'Relancer Claude Code sur cette conversation'}
                 onClick={() =>
                   void run(
                     'resume',
@@ -263,21 +263,33 @@ function Header({
       )}
       <div className="sh-2">
         <span>{glyph.label}</span>
-        <span title="Fenêtre de contexte">
+        <span
+          title={
+            m?.context_window_size ? `Fenêtre de contexte : ${formatNumber(m.context_window_size)} tokens` : 'Fenêtre de contexte'
+          }
+        >
           contexte <Meter pct={m?.context_used_pct} label="Contexte utilisé" /> <b>{formatPct(m?.context_used_pct)}</b>
-          {m?.context_window_size ? ` · ${formatNumber(m.context_window_size)}` : ''}
+          {m?.context_window_size ? ` · ${formatCompact(m.context_window_size)}` : ''}
         </span>
         <span>
-          coût <b>{formatUsd(m?.cost_usd)}</b> · {formatNumber(m?.total_tokens)} tokens
+          coût <b>{formatUsd(m?.cost_usd)}</b> · <span title={typeof m?.total_tokens === 'number' ? `${formatNumber(m.total_tokens)} tokens` : undefined}>
+            {formatCompact(m?.total_tokens)}
+          </span>{' '}
+          tokens
         </span>
         <span>
           {session.status.state === 'running' ? 'actif ' : 'dernière activité '}
           <b>{relativeTime(session.last_activity)}</b>
         </span>
         {session.possibly_stale && <span className="chip pend">peut-être obsolète</span>}
-        {!session.alive && notResumable && (
-          <span className="chip" title="Claude Code n’a enregistré aucun transcript pour cette session">
-            pas de transcript : reprise impossible
+        {block && (
+          <span className="chip" title={block.long}>
+            {block.short} : reprise impossible
+          </span>
+        )}
+        {missing && !block && (
+          <span className="chip bad" title={`Le dossier ${session.cwd} n’existe plus`}>
+            dossier supprimé
           </span>
         )}
         {sw.phase === 'idle' && sw.error && (

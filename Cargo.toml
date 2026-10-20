@@ -28,3 +28,7 @@ getrandom = "0.4.3"
 nix = { version = "0.31.3", features = ["signal", "fs", "process", "term", "ioctl", "poll", "user", "socket"] }
 # Lot 3, version vérifiée sur crates.io le 2026-10-19 (`cargo search` / `cargo info`).
 toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }
+# Quotas (API d'usage de Claude Code), version vérifiée sur crates.io le 2026-10-20
+# (`cargo search` / `cargo info`). Client bloquant (appelé dans `spawn_blocking`,
+# pas de second runtime), TLS par rustls, sans gzip.
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }

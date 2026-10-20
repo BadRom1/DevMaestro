@@ -33,7 +33,7 @@ use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::adapters::{
-    FsProfileSource, FsTranscriptSource, GitCli, NativePty, SqliteStore, SystemClock,
+    FsProfileSource, FsTranscriptSource, GitCli, NativePty, SqliteStore, SystemClock, UsageApi,
 };
 use crate::paths::{Paths, create_private_dir};
 use log::{error, info};
@@ -41,6 +41,7 @@ pub use supervisor::{Config, Daemon, Deps};
 
 /// Réglages par défaut, depuis l'environnement du processus.
 pub fn default_config(paths: Paths) -> Result<Config, String> {
+    let settings = settings::DaemonSettings::load(&paths.config_file());
     let orchd_exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map_err(|e| format!("chemin du binaire orchd introuvable : {e}"))?;
@@ -56,12 +57,27 @@ pub fn default_config(paths: Paths) -> Result<Config, String> {
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|n| (2..=3600).contains(n))
             .unwrap_or(claude_config::DEFAULT_PERMISSION_TIMEOUT_SECS),
-        allow_dangerous_modes: settings::DaemonSettings::load(&paths.config_file())
-            .allow_dangerous_modes,
+        allow_dangerous_modes: settings.allow_dangerous_modes,
+        usage_api: settings.usage_api,
+        quota_min_interval: quota_min_interval(),
         systemd_run: detect_systemd_scope(),
         systemd_runtime_dir: std::env::var_os("DEVMAESTRO_SYSTEMD_RUNTIME_DIR"),
         paths,
     })
+}
+
+/// Intervalle minimal entre deux appels à l'API d'usage par profil. Seul un
+/// binaire de test (`test-support`) le lit dans
+/// `DEVMAESTRO_QUOTA_MIN_INTERVAL_MS`.
+fn quota_min_interval() -> Duration {
+    #[cfg(feature = "test-support")]
+    if let Some(ms) = std::env::var("DEVMAESTRO_QUOTA_MIN_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    supervisor::QUOTA_MIN_INTERVAL
 }
 
 /// `systemd-run`, si `DEVMAESTRO_SYSTEMD_SCOPE` ne vaut pas `off` et qu'un
@@ -198,10 +214,15 @@ async fn run(paths: Paths, scrubbed: Vec<String>) -> Result<(), String> {
         transcripts: Box::new(FsTranscriptSource::default()),
         store: Box::new(store),
         clock: Box::new(SystemClock),
+        quotas: Box::new(UsageApi::from_env()),
     };
+    if !config.usage_api {
+        info!("[quotas] usage_api = false : quotas lus dans les statuslines seulement");
+    }
     let daemon = Daemon::new(config, deps);
     daemon.write_claude_config();
     daemon.restore();
+    daemon.start_quota_polling();
 
     let socket = paths.socket();
     let relay_socket = paths.relay_socket();

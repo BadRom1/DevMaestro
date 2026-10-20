@@ -95,6 +95,12 @@ describe('validation des paramètres de la page', () => {
     expect(() => validateParams('transcripts.list', { include_hidden: 'oui' })).toThrow(ValidationError)
   })
 
+  it('quotas.get : refresh booléen facultatif', () => {
+    expect(validateParams('quotas.get', {})).toEqual({})
+    expect(validateParams('quotas.get', { refresh: true, x: 1 })).toEqual({ refresh: true })
+    expect(() => validateParams('quotas.get', { refresh: 1 })).toThrow(ValidationError)
+  })
+
   it('view : UUID ou null, taille bornée', () => {
     expect(validateView({ id: null })).toEqual({ id: null })
     expect(validateView({ id: ID, cols: 80, rows: 24 })).toEqual({ id: ID, cols: 80, rows: 24 })
@@ -120,7 +126,12 @@ describe('messages d’erreur du démon', () => {
     expect(describeError(-32012, 'x')).toMatch(/réponds dans le terminal/)
     expect(describeError(-32011, 'x')).toMatch(/mauvais type/)
     expect(describeError(-32602, 'paramètres invalides')).toBe('paramètres invalides')
-    expect(describeError(-32015, 'pas de transcript')).toMatch(/^Claude Code n’a pas de transcript pour cette session/)
+    expect(describeError(-32015, '')).toMatch(/^Claude Code n’a pas de transcript pour cette session/)
+    expect(describeError(-32015, 'Claude Code n’a pas de transcript pour cette session.')).toBe('Claude Code n’a pas de transcript pour cette session.')
+    expect(describeError(-32016, 'Le dossier de la session n’existe plus (worktree supprimé ?) : /p/x')).toBe(
+      'Le dossier de la session n’existe plus (worktree supprimé ?) : /p/x',
+    )
+    expect(describeError(-32016, '')).toBe('le dossier de la session n’existe plus (worktree supprimé ?)')
     expect(describeError(-32601, 'méthode inconnue')).toMatch(/^méthode inconnue du démon \(démon trop ancien/)
   })
 })

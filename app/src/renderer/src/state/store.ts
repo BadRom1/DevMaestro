@@ -5,7 +5,7 @@
  * « peut-être obsolètes », retrait immédiat d'une demande résolue).
  */
 import type { ConnectionState } from '../../../shared/bridge'
-import type { Effect, PastSession, Profile, ProjectInfo, Session } from '../../../shared/protocol'
+import type { DaemonProfileQuota, Effect, PastSession, Profile, ProjectInfo, QuotasReport, Session } from '../../../shared/protocol'
 
 export interface AppState {
   connection: ConnectionState
@@ -20,6 +20,13 @@ export interface AppState {
    * `projects`) : heure du prochain essai. Remis à 0 à chaque connexion.
    */
   projectRetry: Record<string, number>
+  /**
+   * Quotas donnés par le démon (`quotas.get`, `quotas.updated`), par profil ;
+   * `null` tant qu'ils sont inconnus ou si le démon ne sait pas les donner.
+   */
+  quotas: Record<string, DaemonProfileQuota> | null
+  /** Nombre de `quotas.updated` reçus par profil (fin d'une actualisation). */
+  quotasSeq: Record<string, number>
   /** Demandes signalées « peut-être obsolètes » par effet, par session. */
   stale: Record<string, number[]>
   selectedId: string | null
@@ -32,6 +39,8 @@ export const initialState: AppState = {
   projects: {},
   past: {},
   projectRetry: {},
+  quotas: null,
+  quotasSeq: {},
   stale: {},
   selectedId: null,
 }
@@ -52,6 +61,8 @@ export type Action =
   | { type: 'project'; cwd: string; info: ProjectInfo }
   /** Échec de `projects.resolve` : repli provisoire, nouvel essai à `retryAt`. */
   | { type: 'project.failed'; cwd: string; fallback: ProjectInfo; retryAt: number }
+  /** Quotas du démon : remplacent ceux des profils présents dans le rapport. */
+  | { type: 'quotas'; report: QuotasReport; notified?: boolean }
   /** Ancienne session masquée (`transcripts.hide`) : retirée tout de suite. */
   | { type: 'past.hidden'; profile: string; claude_session_id: string }
   | { type: 'past'; profile: string; sessions: PastSession[] }
@@ -72,11 +83,13 @@ function pruneStale(stale: Record<string, number[]>, s: Session): Record<string,
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case 'connection': {
-      if (action.state.state !== 'connected' || Object.keys(state.projectRetry).length === 0) {
+      const anyMissing = Object.values(state.projects).some((p) => p.exists === false)
+      if (action.state.state !== 'connected' || (Object.keys(state.projectRetry).length === 0 && !anyMissing)) {
         return { ...state, connection: action.state }
       }
-      // Nouvelle connexion : les résolutions en échec sont retentées tout de suite.
+      // Nouvelle connexion : résolutions en échec et dossiers disparus redemandés tout de suite.
       const projectRetry = Object.fromEntries(Object.keys(state.projectRetry).map((k) => [k, 0]))
+      for (const [cwd, info] of Object.entries(state.projects)) if (info.exists === false) projectRetry[cwd] = 0
       return { ...state, connection: action.state, projectRetry }
     }
     case 'sessions': {
@@ -139,6 +152,16 @@ export function reducer(state: AppState, action: Action): AppState {
         projectRetry: { ...state.projectRetry, [action.cwd]: action.retryAt },
       }
     }
+    case 'quotas': {
+      const profiles = action.report?.profiles
+      if (!profiles || typeof profiles !== 'object') return state
+      let quotasSeq = state.quotasSeq
+      if (action.notified) {
+        quotasSeq = { ...quotasSeq }
+        for (const name of Object.keys(profiles)) quotasSeq[name] = (quotasSeq[name] ?? 0) + 1
+      }
+      return { ...state, quotas: { ...(state.quotas ?? {}), ...profiles }, quotasSeq }
+    }
     case 'past.hidden': {
       const list = state.past[action.profile]
       if (!list) return state
@@ -195,8 +218,17 @@ export function needsResolve(
   state: Pick<AppState, 'projects' | 'projectRetry'>,
   cwd: string,
   now: number,
+  opts: {
+    /** Le démon dit que le dossier existe (session, ancienne session). */
+    daemonSaysExists?: boolean
+    /** Déjà redemandé pour ce désaccord (évite une boucle si la résolution persiste). */
+    rechecked?: boolean
+  } = {},
 ): boolean {
-  if (!state.projects[cwd]) return true
+  const info = state.projects[cwd]
+  if (!info) return true
   const retry = state.projectRetry[cwd]
-  return retry !== undefined && now >= retry
+  if (retry !== undefined && now >= retry) return true
+  // Dossier « disparu » en cache, mais le démon le voit : il a été recréé.
+  return info.exists === false && opts.daemonSaysExists === true && !opts.rechecked
 }

@@ -456,7 +456,9 @@ fn resume_failures_leave_sessions_unchanged() {
     let cases = [
         (json!({"id": id, "mode": "nimporte"}), -32602),
         (json!({"id": id, "profile": "inconnu"}), -32003),
-        (json!({"id": id, "cwd": "/nulle/part"}), -32602),
+        // Dossier absent : -32016 (worktree supprimé ?), relatif : -32602.
+        (json!({"id": id, "cwd": "/nulle/part"}), -32016),
+        (json!({"id": id, "cwd": "relatif"}), -32602),
         (json!({"id": id, "cols": 0}), -32602),
         (
             json!({"claude_session_id": "ancienne", "profile": "inconnu", "cwd": env.proj}),
@@ -1072,4 +1074,148 @@ fn forget_during_exit_grace_and_resumable_on_get() {
         json!({"forgotten": true})
     );
     assert_eq!(c.call_err("sessions.get", json!({"id": crashed})), -32001);
+}
+
+#[test]
+fn missing_worktree_directory() {
+    let env = Env::new();
+    let _daemon = env.start_daemon();
+    let mut c = Client::connect(&env);
+    c.call("hello", json!({}));
+
+    // projects.resolve d'un dossier disparu : rien n'est créé.
+    let root = env.proj.parent().unwrap().to_path_buf();
+    let gone = root.join("nulle-part/sous");
+    let r = c.call("projects.resolve", json!({"path": gone}));
+    assert_eq!(r["exists"], false);
+    assert_eq!(r["inferred"], false);
+    assert_eq!(r["is_git"], false);
+    assert_eq!(r["root"], Value::Null);
+    assert!(!root.join("nulle-part").exists());
+    let r = c.call("projects.resolve", json!({"path": env.proj}));
+    assert_eq!(
+        (r["exists"].clone(), r["inferred"].clone()),
+        (json!(true), json!(false))
+    );
+    if git_available() {
+        let repo = root.join("depot");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repo = repo.canonicalize().unwrap();
+        for missing in [
+            root.join("depot--fonction-x/src"),
+            root.join("depot.wt"),
+            repo.join(".worktrees/x"),
+            repo.join(".claude/worktrees/y/z"),
+        ] {
+            let r = c.call("projects.resolve", json!({"path": missing}));
+            assert_eq!(r["exists"], false, "{missing:?} {r}");
+            assert_eq!(r["inferred"], true, "{missing:?} {r}");
+            assert_eq!(r["is_git"], true, "{missing:?} {r}");
+            assert_eq!(r["root"], json!(repo), "{missing:?} {r}");
+            assert_eq!(r["name"], "depot");
+            assert!(!missing.exists());
+        }
+    }
+
+    // Session dont le dossier a disparu (worktree supprimé).
+    let wt = env.proj.join("worktree");
+    std::fs::create_dir_all(&wt).unwrap();
+    let r = c.call("sessions.launch", json!({"cwd": wt}));
+    let id: Uuid = r["session"]["id"].as_str().unwrap().parse().unwrap();
+    let claude_id = r["session"]["claude_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(r["session"]["resume_blocker"], Value::Null);
+    wait_idle(&mut c, id);
+    c.call("sessions.stop", json!({"id": id}));
+    c.wait_until("reprenable", |c| {
+        c.last_session(id)
+            .is_some_and(|s| s["resumable"] == true && s["resume_blocker"].is_null())
+    });
+    std::fs::remove_dir_all(&wt).unwrap();
+    let s = c.call("sessions.get", json!({"id": id}))["session"].clone();
+    assert_eq!(s["resumable"], false);
+    assert_eq!(s["resume_blocker"], "cwd_missing");
+    let before = s;
+    let launches = env.fake_launches().len();
+    let r = c.call_raw("sessions.resume", json!({"id": id}));
+    assert_eq!(r["error"]["code"], -32016, "{r}");
+    assert_eq!(
+        r["error"]["message"],
+        format!(
+            "Le dossier de la session n'existe plus (worktree supprimé ?) : {}",
+            wt.display()
+        )
+    );
+    assert_eq!(c.call("sessions.get", json!({"id": id}))["session"], before);
+    assert_eq!(env.fake_launches().len(), launches);
+    assert_eq!(
+        c.call_err(
+            "sessions.resume",
+            json!({"claude_session_id": claude_id, "cwd": wt})
+        ),
+        -32016
+    );
+    // transcripts.list : `cwd_exists`.
+    let list = c.call("transcripts.list", json!({"exclude_known": false}));
+    let e = list["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["claude_session_id"] == json!(claude_id))
+        .unwrap()
+        .clone();
+    assert_eq!(e["cwd"], json!(wt));
+    assert_eq!(e["cwd_exists"], false);
+    // Transcript absent en plus : c'est lui qui bloque (définitif).
+    for f in transcript_files(&env, &claude_id) {
+        std::fs::remove_file(f).unwrap();
+    }
+    let s = c.call("sessions.get", json!({"id": id}))["session"].clone();
+    assert_eq!(s["resume_blocker"], "transcript_missing");
+    // Même ordre pour la reprise : transcript (-32015) avant dossier (-32016).
+    assert_eq!(c.call_err("sessions.resume", json!({"id": id})), -32015);
+    // Ancienne session connue seulement par son transcript.
+    let only = "44444444-4444-4444-8444-444444444444";
+    let dir = env.home.join(".claude/projects/-ailleurs");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{only}.jsonl")), "{}\n").unwrap();
+    assert_eq!(
+        c.call_err(
+            "sessions.resume",
+            json!({"claude_session_id": only, "cwd": wt})
+        ),
+        -32016
+    );
+    assert_eq!(
+        c.call_err(
+            "sessions.resume",
+            json!({"claude_session_id": "55555555-5555-4555-8555-555555555555", "cwd": wt})
+        ),
+        -32015
+    );
+    assert!(!wt.exists(), "rien n'est créé");
+    // Session vivante : pas de blocage.
+    let alive = launch_idle(&mut c, &env, json!({}));
+    assert_eq!(
+        c.last_session(alive).unwrap()["resume_blocker"],
+        Value::Null
+    );
+    let list = c.call("transcripts.list", json!({"exclude_known": false}));
+    assert!(
+        list["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["cwd_exists"] == true)
+    );
 }

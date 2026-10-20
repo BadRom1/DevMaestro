@@ -14,14 +14,19 @@ const FRIENDLY: Record<number, string> = {
   [-32013]: '« Toujours » impossible : Claude Code ne propose aucune règle pour cette demande',
   [-32014]: 'changement de mode impossible : mode courant inconnu ou hors du cycle Shift+Tab',
   [-32015]: 'Claude Code n’a pas de transcript pour cette session : impossible de la reprendre (retire-la de la liste)',
+  [-32016]: 'le dossier de la session n’existe plus (worktree supprimé ?)',
   [ErrorCode.Timeout]: 'le démon n’a pas répondu à temps',
   [ErrorCode.Disconnected]: 'démon non connecté',
 }
 
 export const ALREADY_CLOSED = -32010
 
+/** Codes dont le message du démon est déjà une phrase française complète (avec le dossier…). */
+const DAEMON_WORDING = new Set([-32015, -32016])
+
 /** Texte d'une erreur du démon : explication, puis détail du démon s'il apporte quelque chose. */
 export function describeError(code: number, message: string): string {
+  if (DAEMON_WORDING.has(code) && message.trim()) return message.trim()
   const f = FRIENDLY[code]
   if (!f) return message
   if (!message || message === f || code === ErrorCode.Disconnected) return f

@@ -10,6 +10,7 @@ import { SessionPane } from './components/SessionPane'
 import { Sidebar } from './components/Sidebar'
 import { TopBar } from './components/TopBar'
 import { fallbackProject, groupByProject, groupPast, pastToOffer, sidebarOrder, type PastEntry } from './state/projects'
+import { daemonSaysFolderExists } from './state/format'
 import { initialState, needsResolve, reducer } from './state/store'
 import { applyThemeMode, effectiveScheme, loadThemeMode, type ThemeMode } from './theme'
 
@@ -62,6 +63,8 @@ export function App() {
   const closeLink = useCallback(() => setLink(null), [])
   const [termSize, setTermSize] = useState<{ cols: number; rows: number } | null>(null)
   const resolving = useRef(new Set<string>())
+  /** Dossiers « disparus » déjà redemandés parce que le démon les voit de nouveau. */
+  const rechecked = useRef(new Set<string>())
   const [clock, tick] = useState(0)
   const [home, setHome] = useState<string | null>(null)
 
@@ -91,6 +94,7 @@ export function App() {
       if (n.method === 'session.updated') dispatch({ type: 'session.updated', session: n.params.session })
       else if (n.method === 'session.effect') dispatch({ type: 'session.effect', id: n.params.id, effect: n.params.effect })
       else if (n.method === 'session.removed') dispatch({ type: 'session.removed', id: n.params.id })
+      else if (n.method === 'quotas.updated') dispatch({ type: 'quotas', report: n.params, notified: true })
     })
     return () => {
       alive = false
@@ -99,7 +103,24 @@ export function App() {
     }
   }, [])
 
-  // À chaque connexion : profils, sessions, anciennes sessions.
+  /**
+   * Quotas du démon (dès la connexion, avant toute session). Démon plus
+   * ancien (-32601) : la barre du haut garde ceux de la statusline.
+   */
+  const [quotasSupported, setQuotasSupported] = useState<boolean | null>(null)
+  const loadQuotas = useCallback(async (refresh: boolean) => {
+    try {
+      const r = await call('quotas.get', refresh ? { refresh: true } : {})
+      setQuotasSupported(true)
+      dispatch({ type: 'quotas', report: r })
+    } catch (e) {
+      if (e instanceof CallError && e.failure.code === ErrorCode.MethodNotFound) setQuotasSupported(false)
+      else if (refresh) throw e
+      else console.warn('[devmaestro] quotas.get :', e)
+    }
+  }, [])
+
+  // À chaque connexion : profils, sessions, anciennes sessions, quotas.
   const loadPast = useCallback(async (profiles: string[]) => {
     for (const profile of profiles) {
       try {
@@ -121,6 +142,7 @@ export function App() {
         dispatch({ type: 'profiles', profiles: p.profiles })
         dispatch({ type: 'sessions', sessions: s.sessions })
         void loadPast(p.profiles.map((x) => x.name))
+        void loadQuotas(false)
       } catch (e) {
         console.warn('[devmaestro] chargement initial :', e)
       }
@@ -128,25 +150,38 @@ export function App() {
     return () => {
       alive = false
     }
-  }, [state.connection, loadPast])
+  }, [state.connection, loadPast, loadQuotas])
 
   const sessions = useMemo(() => Object.values(state.sessions), [state.sessions])
 
 
   const past = useMemo(() => pastToOffer(state.past, sessions, PAST_LIMIT), [state.past, sessions])
 
+  // Nouvelle connexion : les désaccords pourront être redemandés.
+  useEffect(() => {
+    if (state.connection.state === 'connected') rechecked.current.clear()
+  }, [state.connection])
+
   // Projets : `projects.resolve` une fois par dossier (sessions courantes et anciennes).
   useEffect(() => {
     if (state.connection.state !== 'connected') return
-    const dirs: { cwd: string; project_root: string | null }[] = [
-      ...sessions,
-      ...past.flatMap((p) => (p.cwd ? [{ cwd: p.cwd, project_root: null }] : [])),
+    const dirs: { cwd: string; project_root: string | null; exists: boolean | undefined }[] = [
+      ...sessions.map((s) => ({ cwd: s.cwd, project_root: s.project_root, exists: daemonSaysFolderExists(s) })),
+      ...past.flatMap((p) =>
+        p.cwd ? [{ cwd: p.cwd, project_root: null, exists: typeof p.cwd_exists === 'boolean' ? p.cwd_exists : undefined }] : [],
+      ),
     ]
     for (const s of dirs) {
-      if (resolving.current.has(s.cwd) || !needsResolve(state, s.cwd, Date.now())) continue
+      const opts = { daemonSaysExists: s.exists, rechecked: rechecked.current.has(s.cwd) }
+      if (resolving.current.has(s.cwd) || !needsResolve(state, s.cwd, Date.now(), opts)) continue
+      // Désaccord avec le démon (dossier recréé) : une seule nouvelle demande jusqu'au changement suivant.
+      if (state.projects[s.cwd]?.exists === false && s.exists === true) rechecked.current.add(s.cwd)
       resolving.current.add(s.cwd)
       call('projects.resolve', { path: s.cwd })
-        .then((info) => dispatch({ type: 'project', cwd: s.cwd, info }))
+        .then((info) => {
+          if (info.exists !== false) rechecked.current.delete(s.cwd)
+          dispatch({ type: 'project', cwd: s.cwd, info })
+        })
         .catch((e: unknown) => {
           // Connexion perdue ou délai : on réessaiera à la reconnexion. Autre
           // erreur (dossier disparu…) : repli provisoire, nouvel essai plus tard.
@@ -217,6 +252,9 @@ export function App() {
       <TopBar
         sessions={sessions}
         profiles={state.profiles}
+        daemonQuotas={state.quotas}
+        quotasSeq={state.quotasSeq}
+        onRefreshQuotas={quotasSupported === false ? null : () => loadQuotas(true)}
         waitingCount={waiting.length}
         onNextWaiting={() => waiting[0] && select(waiting[0].id)}
         themeMode={themeMode}
@@ -239,6 +277,7 @@ export function App() {
           onHidePast={hidePast}
           profiles={state.profiles}
           home={home}
+          projects={state.projects}
           selectedId={state.selectedId}
           onSelect={select}
           onResumePast={resumePast}

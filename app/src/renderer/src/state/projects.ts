@@ -86,6 +86,13 @@ export function pastTime(p: Pick<PastSession, 'last_activity' | 'last_timestamp'
   return time(p.last_activity ?? p.last_timestamp)
 }
 
+/** Le dossier d'une ancienne session a-t-il disparu (worktree supprimé…) ? */
+export function pastFolderMissing(p: Pick<PastSession, 'cwd' | 'cwd_exists'>, projects: Record<string, ProjectInfo>): boolean {
+  // `cwd_exists` du démon fait foi quand il est donné ; sinon, la résolution mise en cache.
+  if (typeof p.cwd_exists === 'boolean') return !p.cwd_exists
+  return !!p.cwd && projects[p.cwd]?.exists === false
+}
+
 /** Groupe d'attente des anciennes sessions dont le dossier n'est pas encore résolu. */
 export const RESOLVING_GROUP = 'resolving'
 
@@ -124,14 +131,17 @@ export function groupPast(entries: PastEntry[], projects: Record<string, Project
       name = 'Résolution…'
       root = null
     } else if (info?.is_git) {
-      key = `git:${info.common_dir ?? info.root}`
-      root = info.root
-      name = info.name ?? basename(info.root)
+      const top = info.root ?? info.worktree_root ?? p.cwd
+      key = `git:${info.common_dir ?? top}`
+      root = top
+      name = info.name ?? basename(top)
       isGit = true
     } else {
-      key = `dossier:${p.cwd}`
-      root = p.cwd
-      name = folderName(p.cwd, home)
+      // Hors dépôt : le dossier, ou pour un dossier disparu l'ancêtre retenu par le démon.
+      const dir = info.root || p.cwd
+      key = `dossier:${dir}`
+      root = dir
+      name = folderName(dir, home)
     }
     let g = groups.get(key)
     if (!g) {

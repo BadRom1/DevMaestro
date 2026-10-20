@@ -311,7 +311,11 @@ impl Connection {
             "projects.resolve" => {
                 let path = opt_str(params, "path")?
                     .ok_or_else(|| RpcError::params("« path » manquant"))?;
-                d.resolve_project(std::path::Path::new(&path))?
+                // `git` et système de fichiers : hors du runtime.
+                let d2 = d.clone();
+                tokio::task::spawn_blocking(move || d2.resolve_project(std::path::Path::new(&path)))
+                    .await
+                    .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
             }
             "sessions.list" => {
                 // `resumable` relu (système de fichiers) hors du runtime.
@@ -388,6 +392,17 @@ impl Connection {
                 tokio::task::spawn_blocking(move || d2.forget(&sid))
                     .await
                     .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
+            }
+            "quotas.get" => {
+                let refresh = match params.get("refresh") {
+                    None | Some(Value::Null) => false,
+                    Some(Value::Bool(b)) => *b,
+                    Some(_) => return Err(RpcError::params("« refresh » doit être un booléen")),
+                };
+                let d2 = d.clone();
+                tokio::task::spawn_blocking(move || d2.quotas_get(refresh))
+                    .await
+                    .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))?
             }
             "transcripts.hide" => d.set_transcript_hidden(params, true)?,
             "transcripts.unhide" => d.set_transcript_hidden(params, false)?,
@@ -526,6 +541,9 @@ async fn forward_output(
 const MAX_PENDING_EVENTS: usize = 4096;
 
 fn queue_event(daemon: &Daemon, queue: &mut VecDeque<Event>, ev: Event) {
+    if matches!(ev, Event::Quotas) && queue.iter().any(|e| matches!(e, Event::Quotas)) {
+        return; // Regroupé : relu au moment d'envoyer.
+    }
     if let Event::Updated(id) = &ev
         && queue
             .iter()
@@ -548,6 +566,7 @@ fn resync_events(daemon: &Daemon, queue: &mut VecDeque<Event>) {
     // sessions ont disparu (un `session.removed` inconnu est sans effet).
     queue.extend(daemon.removed_ids().into_iter().map(Event::Removed));
     queue.extend(daemon.session_ids().into_iter().map(Event::Updated));
+    queue.push_back(Event::Quotas);
 }
 
 fn event_frame(daemon: &Daemon, ev: Event) -> Option<Frame> {
@@ -560,6 +579,7 @@ fn event_frame(daemon: &Daemon, ev: Event) -> Option<Frame> {
             notification("session.effect", json!({"id": id, "effect": *effect}))
         }
         Event::Removed(id) => notification("session.removed", json!({"id": id})),
+        Event::Quotas => notification("quotas.updated", daemon.quotas_json()),
     };
     Some(Frame::rpc(&value))
 }

@@ -89,6 +89,15 @@ impl RpcError {
     fn launch(message: impl Into<String>) -> Self {
         Self::new(error_code::LAUNCH_FAILED, message)
     }
+    fn cwd_missing(cwd: &Path) -> Self {
+        Self::new(
+            error_code::CWD_MISSING,
+            format!(
+                "Le dossier de la session n'existe plus (worktree supprimé ?) : {}",
+                cwd.display()
+            ),
+        )
+    }
     fn unknown_request(id: RequestId) -> Self {
         Self::new(
             error_code::UNKNOWN_REQUEST,
@@ -187,6 +196,12 @@ pub struct Config {
     /// `allow_dangerous_modes` de `config.toml`, lu **au démarrage** du démon
     /// (un changement demande de redémarrer le démon).
     pub allow_dangerous_modes: bool,
+    /// `[quotas] usage_api` de `config.toml` (vrai par défaut) : interroger
+    /// l'API d'usage de Claude Code.
+    pub usage_api: bool,
+    /// Intervalle minimal entre deux appels à l'API d'usage pour un profil
+    /// ([`QUOTA_MIN_INTERVAL`] ; plus court dans les tests).
+    pub quota_min_interval: Duration,
     /// `systemd-run`, si un gestionnaire systemd utilisateur répond au
     /// démarrage : chaque session est alors lancée dans son propre scope.
     pub systemd_run: Option<PathBuf>,
@@ -203,6 +218,7 @@ pub struct Deps {
     pub transcripts: Box<dyn TranscriptSource + Send + Sync>,
     pub store: Box<dyn SessionStore + Sync>,
     pub clock: Box<dyn Clock + Send + Sync>,
+    pub quotas: Box<dyn crate::ports::QuotaSource>,
 }
 
 /// Événement diffusé aux connexions. Léger : une connexion lente regroupe
@@ -215,7 +231,16 @@ pub enum Event {
     Effect { id: Uuid, effect: Arc<Value> },
     /// La session a été retirée (`session.removed`, `sessions.forget`).
     Removed(Uuid),
+    /// Les quotas ont changé (`quotas.updated`, relu au moment d'envoyer).
+    Quotas,
 }
+
+/// Intervalle entre deux lectures de l'API d'usage.
+pub const QUOTA_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Intervalle minimal entre deux appels à l'API d'usage pour un même profil.
+pub const QUOTA_MIN_INTERVAL: Duration = Duration::from_secs(10);
+/// Durée maximale d'une tournée de lecture des quotas (tous profils).
+pub const QUOTA_REFRESH_BUDGET: Duration = Duration::from_secs(15);
 
 /// Sessions retirées gardées en mémoire pour les clients qui ont pris du
 /// retard (leur file est reconstruite, voir [`Daemon::removed_ids`]).
@@ -276,6 +301,9 @@ struct Entry {
     /// relu à la fin du processus, à la relecture de la base et sur
     /// `sessions.list`.
     has_transcript: bool,
+    /// Le dossier de travail existe (faux : worktree supprimé…) ; relu en même
+    /// temps que `has_transcript`.
+    cwd_exists: bool,
 }
 
 /// Délai au bout duquel un `sessions.setMode` non confirmé n'empêche plus
@@ -340,6 +368,15 @@ pub struct Daemon {
     me: std::sync::Weak<Daemon>,
     /// Dernières sessions retirées (au plus [`REMOVED_KEPT`]).
     removed: Mutex<std::collections::VecDeque<Uuid>>,
+    /// Quotas par profil, et dernier JSON diffusé (`quotas.updated`).
+    quotas: Mutex<(
+        std::collections::BTreeMap<String, crate::domain::ProfileQuotas>,
+        Option<Value>,
+    )>,
+    /// Dernier appel à l'API d'usage par profil ([`QUOTA_MIN_INTERVAL`]).
+    quota_calls: Mutex<HashMap<String, Instant>>,
+    /// Une tournée de lecture des quotas est en cours.
+    quota_refreshing: AtomicBool,
 }
 
 /// Instantané, historique éventuel, flux de sortie et terminal d'une session.
@@ -422,6 +459,7 @@ impl Entry {
             mode_change: None,
             screen_mode: None,
             has_transcript: false,
+            cwd_exists: true,
         }
     }
 
@@ -494,6 +532,20 @@ impl Entry {
         }
     }
 
+    /// Pourquoi la session ne peut pas être reprise : `transcript_missing`
+    /// (prioritaire : définitif), `cwd_missing`, ou `None` (vivante ou reprenable).
+    fn resume_blocker(&self) -> Option<&'static str> {
+        if self.run.is_some() {
+            None
+        } else if !self.has_transcript {
+            Some("transcript_missing")
+        } else if !self.cwd_exists {
+            Some("cwd_missing")
+        } else {
+            None
+        }
+    }
+
     fn json(&self) -> Value {
         let s = &self.session;
         let size = self.terminal.size();
@@ -520,7 +572,8 @@ impl Entry {
             "created_at": time_json(Some(self.created_at)),
             "updated_at": time_json(Some(self.updated_at)),
             "alive": self.run.is_some(),
-            "resumable": self.run.is_none() && self.has_transcript,
+            "resumable": self.run.is_none() && self.has_transcript && self.cwd_exists,
+            "resume_blocker": self.resume_blocker(),
             "pid": self.run.as_ref().and_then(|r| r.pid),
             "scope": self.run.as_ref().and_then(|r| r.proc.scope.clone()),
             "last_exit": match &self.last_exit {
@@ -618,6 +671,9 @@ impl Daemon {
             supervised: Mutex::new(Supervised::new()),
             me: me.clone(),
             removed: Mutex::new(std::collections::VecDeque::new()),
+            quotas: Mutex::new((std::collections::BTreeMap::new(), None)),
+            quota_calls: Mutex::new(HashMap::new()),
+            quota_refreshing: AtomicBool::new(false),
         })
     }
 
@@ -918,12 +974,50 @@ impl Daemon {
 
     /// `projects.resolve`.
     pub fn resolve_project(&self, path: &Path) -> Result<Value, RpcError> {
+        if !path.exists() {
+            if !path.is_absolute() {
+                return Err(RpcError::params(format!(
+                    "dossier introuvable : {}",
+                    path.display()
+                )));
+            }
+            // Dossier disparu (worktree supprimé…) : projet deviné, rien n'est créé.
+            let vcs = |p: &Path| self.deps.vcs.resolve(p);
+            return Ok(
+                match infer_missing_project(path, &|p: &Path| p.is_dir(), &vcs) {
+                    Some(repo) => json!({
+                        "path": path,
+                        "exists": false,
+                        "inferred": true,
+                        "is_git": true,
+                        "root": repo.project_root,
+                        "worktree_root": Value::Null,
+                        "common_dir": repo.common_dir,
+                        "branch": Value::Null,
+                        "name": display_name(&repo.project_root),
+                    }),
+                    None => json!({
+                        "path": path,
+                        "exists": false,
+                        "inferred": false,
+                        "is_git": false,
+                        "root": Value::Null,
+                        "worktree_root": Value::Null,
+                        "common_dir": Value::Null,
+                        "branch": Value::Null,
+                        "name": display_name(path),
+                    }),
+                },
+            );
+        }
         let path = path.canonicalize().map_err(|e| {
             RpcError::params(format!("dossier introuvable : {} ({e})", path.display()))
         })?;
         Ok(match self.deps.vcs.resolve(&path) {
             Some(repo) => json!({
                 "path": path,
+                "exists": true,
+                "inferred": false,
                 "is_git": true,
                 "root": repo.project_root,
                 "worktree_root": repo.worktree_root,
@@ -933,6 +1027,8 @@ impl Daemon {
             }),
             None => json!({
                 "path": path,
+                "exists": true,
+                "inferred": false,
                 "is_git": false,
                 "root": path,
                 "worktree_root": Value::Null,
@@ -1036,6 +1132,11 @@ impl Daemon {
                     v["display_name"] = json!(t);
                 }
                 v["hidden"] = json!(hidden.contains(&p.session_id));
+                v["cwd_exists"] = json!(
+                    p.cwd
+                        .as_ref()
+                        .is_some_and(|c| c.is_absolute() && c.is_dir())
+                );
                 v
             })
             .collect();
@@ -1079,7 +1180,7 @@ impl Daemon {
     /// Fait du travail sur le système de fichiers : depuis un contexte
     /// asynchrone, l'appeler dans `spawn_blocking`.
     pub fn refresh_resumable(&self, only: Option<Uuid>) {
-        let todo: Vec<(Uuid, String, String)> = self
+        let todo: Vec<(Uuid, String, String, PathBuf)> = self
             .lock()
             .sessions
             .values()
@@ -1089,22 +1190,32 @@ impl Daemon {
                     e.session.id,
                     e.session.profile.clone(),
                     e.session.claude_session_id.clone(),
+                    e.session.cwd.clone(),
                 )
             })
             .collect();
         if todo.is_empty() {
             return;
         }
-        let sets = self.transcript_sets(todo.iter().map(|(_, p, _)| p.clone()));
+        let sets = self.transcript_sets(todo.iter().map(|(_, p, _, _)| p.clone()));
+        let found: Vec<(Uuid, String, PathBuf, bool, bool)> = todo
+            .into_iter()
+            .map(|(id, profile, cid, cwd)| {
+                let ok = sets.get(&profile).is_some_and(|ids| ids.contains(&cid));
+                let exists = cwd.is_dir();
+                (id, cid, cwd, ok, exists)
+            })
+            .collect();
         let mut reg = self.lock();
-        for (id, profile, cid) in todo {
-            let ok = sets.get(&profile).is_some_and(|ids| ids.contains(&cid));
+        for (id, cid, cwd, ok, exists) in found {
             if let Some(e) = reg.sessions.get_mut(&id)
                 && e.run.is_none()
                 && e.session.claude_session_id == cid
-                && e.has_transcript != ok
+                && e.session.cwd == cwd
+                && (e.has_transcript, e.cwd_exists) != (ok, exists)
             {
                 e.has_transcript = ok;
+                e.cwd_exists = exists;
                 let _ = self.events.send(Event::Updated(id));
             }
         }
@@ -1184,6 +1295,170 @@ impl Daemon {
         info!("session {id} oubliée (retirée du registre et de la base, transcript masqué)");
         let _ = self.events.send(Event::Removed(*id));
         Ok(json!({"forgotten": true}))
+    }
+
+    // ----------------------------------------------------------------- quotas
+
+    /// Modifie les quotas, puis diffuse `quotas.updated` si leur JSON a changé.
+    fn update_quotas(
+        &self,
+        f: impl FnOnce(&mut std::collections::BTreeMap<String, crate::domain::ProfileQuotas>),
+    ) {
+        let now = self.now();
+        let mut guard = self.quotas.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard.0);
+        let json = self.quotas_json_of(&guard.0, now);
+        if guard.1.as_ref() != Some(&json) {
+            guard.1 = Some(json);
+            let _ = self.events.send(Event::Quotas);
+        }
+    }
+
+    fn quotas_json_of(
+        &self,
+        map: &std::collections::BTreeMap<String, crate::domain::ProfileQuotas>,
+        now: OffsetDateTime,
+    ) -> Value {
+        use crate::domain::ProfileQuotas;
+        let window =
+            |slot: &Option<crate::domain::WindowReading>| match ProfileQuotas::visible(slot, now) {
+                Some(r) => json!({
+                    "used_percentage": r.window.used_percentage,
+                    "resets_at": time_json(r.window.resets_at),
+                    "source": r.origin.as_str(),
+                    "fetched_at": time_json(Some(r.at)),
+                }),
+                None => Value::Null,
+            };
+        let profiles: serde_json::Map<String, Value> = map
+            .iter()
+            .map(|(name, q)| {
+                let latest = q.latest(now);
+                let v = json!({
+                    "five_hour": window(&q.five_hour),
+                    "seven_day": window(&q.seven_day),
+                    "source": latest.map(|r| r.origin.as_str()),
+                    "fetched_at": time_json(latest.map(|r| r.at)),
+                    "error": if self.config.usage_api { q.api_error.clone() } else { None },
+                });
+                (name.clone(), v)
+            })
+            .collect();
+        json!({"profiles": profiles})
+    }
+
+    /// `{"profiles": {…}}` de `quotas.get` et `quotas.updated`.
+    pub fn quotas_json(&self) -> Value {
+        let guard = self.quotas.lock().unwrap_or_else(|e| e.into_inner());
+        self.quotas_json_of(&guard.0, self.now())
+    }
+
+    /// Lit l'API d'usage pour un profil, si le dernier essai pour ce profil
+    /// date d'au moins [`Config::quota_min_interval`] ; bloquant (réseau).
+    /// Échec : les lectures précédentes sont gardées, avec l'erreur.
+    fn refresh_profile_quotas(&self, profile: &Profile) {
+        {
+            let mut calls = self.quota_calls.lock().unwrap_or_else(|e| e.into_inner());
+            if calls
+                .get(&profile.name)
+                .is_some_and(|at| at.elapsed() < self.config.quota_min_interval)
+            {
+                return;
+            }
+            calls.insert(profile.name.clone(), Instant::now());
+        }
+        let reading = self.deps.quotas.fetch(profile, self.now());
+        let now = self.now();
+        let mut changed_error = None;
+        self.update_quotas(|q| {
+            let e = q.entry(profile.name.clone()).or_default();
+            match reading {
+                Ok(r) => {
+                    e.merge(r, crate::domain::QuotaOrigin::UsageApi, now);
+                    e.api_error = None;
+                }
+                Err(err) => {
+                    if e.api_error.as_ref() != Some(&err) {
+                        changed_error = Some(err.clone());
+                    }
+                    e.api_error = Some(err);
+                }
+            }
+        });
+        // Journalisé une fois par erreur nouvelle (jamais le jeton).
+        if let Some(err) = changed_error {
+            warning!("quotas du profil {} : {err}", profile.name);
+        }
+    }
+
+    /// Profils connus présents dans la liste des quotas (sans lecture).
+    fn ensure_quota_profiles(&self, profiles: &[Profile]) {
+        self.update_quotas(|q| {
+            for p in profiles {
+                q.entry(p.name.clone()).or_default();
+            }
+        });
+    }
+
+    /// Relit l'API d'usage de tous les profils, en parallèle, dans une tâche
+    /// détachée (résultats par `quotas.updated`). Une seule tournée à la fois
+    /// (une demande pendant une tournée est sans effet) ; la tournée rend la
+    /// main au plus tard après [`QUOTA_REFRESH_BUDGET`] (un appel plus lent
+    /// finit en arrière-plan, borné par son propre délai). Ne fait rien si
+    /// `[quotas] usage_api = false`.
+    pub fn spawn_quota_refresh(self: &Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
+        if !self.config.usage_api || self.quota_refreshing.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+        let daemon = Arc::clone(self);
+        Some(self.runtime.spawn(async move {
+            let d = daemon.clone();
+            let profiles = tokio::task::spawn_blocking(move || d.known_profiles())
+                .await
+                .unwrap_or_default();
+            let deadline = tokio::time::Instant::now() + QUOTA_REFRESH_BUDGET;
+            let tasks: Vec<_> = profiles
+                .into_iter()
+                .map(|p| {
+                    let d = daemon.clone();
+                    tokio::task::spawn_blocking(move || d.refresh_profile_quotas(&p))
+                })
+                .collect();
+            for t in tasks {
+                let _ = tokio::time::timeout_at(deadline, t).await;
+            }
+            daemon.quota_refreshing.store(false, Ordering::SeqCst);
+        }))
+    }
+
+    /// `quotas.get {refresh?}` : répond tout de suite avec les quotas connus
+    /// (tous les profils présents) ; `refresh` lance en plus une tournée
+    /// ([`Daemon::spawn_quota_refresh`]). Lit les profils (système de
+    /// fichiers) : à appeler hors du runtime.
+    pub fn quotas_get(self: &Arc<Self>, refresh: bool) -> Value {
+        self.ensure_quota_profiles(&self.known_profiles());
+        if refresh {
+            let _ = self.spawn_quota_refresh();
+        }
+        self.quotas_json()
+    }
+
+    /// Lecture des quotas au démarrage puis toutes les [`QUOTA_POLL_INTERVAL`].
+    pub fn start_quota_polling(self: &Arc<Self>) {
+        let daemon = Arc::clone(self);
+        self.runtime.spawn(async move {
+            loop {
+                let d = daemon.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    d.ensure_quota_profiles(&d.known_profiles())
+                })
+                .await;
+                if let Some(t) = daemon.spawn_quota_refresh() {
+                    let _ = t.await;
+                }
+                tokio::time::sleep(QUOTA_POLL_INTERVAL).await;
+            }
+        });
     }
 
     /// `transcripts.hide` / `transcripts.unhide {profile?, claude_session_id}`.
@@ -1328,7 +1603,15 @@ impl Daemon {
         }
         // Paramètres indépendants de la session.
         let cwd_param = opt_str(params, "cwd")?
-            .map(|c| canonical_cwd(&c))
+            .map(|c| {
+                // Absolu mais absent : gardé tel quel, refusé plus bas (-32016)
+                // après la vérification du transcript (-32015, définitive).
+                if Path::new(&c).is_absolute() && !Path::new(&c).exists() {
+                    Ok(PathBuf::from(&c))
+                } else {
+                    canonical_cwd(&c)
+                }
+            })
             .transpose()?;
         let profile_param = opt_str(params, "profile")?;
         let mode_param = mode_param(params)?;
@@ -1349,8 +1632,18 @@ impl Daemon {
             _ => None,
         };
         // Transcripts des profils en jeu, listés hors du verrou du registre.
-        let candidate_profiles: Vec<String> = {
+        // Dossiers des sessions en jeu, vérifiés aussi hors du verrou.
+        let (candidate_profiles, candidate_cwds): (Vec<String>, Vec<PathBuf>) = {
             let reg = self.lock();
+            let cwds: Vec<PathBuf> = reg
+                .sessions
+                .values()
+                .filter(|e| {
+                    by_id == Some(e.session.id)
+                        || claude_id.as_deref() == Some(e.session.claude_session_id.as_str())
+                })
+                .map(|e| e.session.cwd.clone())
+                .collect();
             let mut names = vec![
                 profile_param
                     .clone()
@@ -1370,9 +1663,18 @@ impl Daemon {
             }
             names.sort();
             names.dedup();
-            names
+            (names, cwds)
         };
         let transcript_sets = self.transcript_sets(candidate_profiles);
+        let cwd_known: HashMap<PathBuf, bool> = candidate_cwds
+            .into_iter()
+            .chain(cwd_param.clone())
+            .map(|c| {
+                let ok = c.is_dir();
+                (c, ok)
+            })
+            .collect();
+        let cwd_exists = |p: &Path| cwd_known.get(p).copied().unwrap_or_else(|| p.is_dir());
 
         let mut reg = self.lock();
         let existing = match (&by_id, &claude_id) {
@@ -1430,8 +1732,12 @@ impl Daemon {
                 },
             };
             self.check_mode_allowed(plan.mode.as_ref(), mode_inherited)?;
+            // Même ordre que `resume_blocker` : transcript (définitif), puis dossier.
             if let LaunchKind::Resume { claude_session_id } = &plan.kind {
                 self.require_transcript(&transcript_sets, &plan.profile, claude_session_id)?;
+            }
+            if !cwd_exists(&plan.cwd) {
+                return Err(RpcError::cwd_missing(&plan.cwd));
             }
             let mut warnings = Vec::new();
             if plan.mode.is_none() {
@@ -1476,6 +1782,9 @@ impl Daemon {
         };
         self.check_mode_allowed(plan.mode.as_ref(), false)?;
         self.require_transcript(&transcript_sets, &plan.profile, &cid)?;
+        if !cwd_exists(&plan.cwd) {
+            return Err(RpcError::cwd_missing(&plan.cwd));
+        }
         let mut warnings = Vec::new();
         if plan.mode.is_none() {
             plan.mode = self.effective_mode(&plan.cwd, &plan.profile, &mut warnings);
@@ -2220,6 +2529,19 @@ impl Daemon {
                 if entry.session.metrics != before {
                     self.commit(entry);
                 }
+                if let Some(reading) =
+                    crate::domain::reading_from_rate_limits(&s.metrics.rate_limits)
+                {
+                    let profile = entry.session.profile.clone();
+                    let now = self.now();
+                    self.update_quotas(|q| {
+                        q.entry(profile).or_default().merge(
+                            reading,
+                            crate::domain::QuotaOrigin::Statusline,
+                            now,
+                        );
+                    });
+                }
             }
             Err(e) => warning!("session {id} : statusline illisible : {e}"),
         }
@@ -2402,6 +2724,57 @@ fn install_run(reg: &mut Registry, entry: &mut Entry, run: Run, token: String, p
     }
 }
 
+/// Projet probable d'un dossier qui n'existe plus (worktree supprimé), sans
+/// rien créer. Soit `missing` le premier composant manquant du chemin, et
+/// `ancestor` son parent (le plus proche ancêtre existant) :
+/// 1. un voisin : si `missing` s'appelle `<nom>--<suffixe>` ou
+///    `<nom>.<suffixe>`, le dossier `<ancestor>/<nom>` s'il est la racine d'un
+///    dépôt git (préfixe le plus long d'abord) ;
+/// 2. sinon le dépôt qui contient `ancestor`, seulement si le chemin est
+///    rangé comme un worktree : sous `<racine>/.worktrees/`,
+///    `<racine>/.claude/worktrees/`, ou directement sous `<racine>` (un dépôt
+///    lointain, comme un dépôt de fichiers de configuration dans `~`, n'est
+///    pas retenu pour `~/a/b/c`).
+fn infer_missing_project(
+    path: &Path,
+    is_dir: &dyn Fn(&Path) -> bool,
+    resolve: &dyn Fn(&Path) -> Option<crate::ports::RepoInfo>,
+) -> Option<crate::ports::RepoInfo> {
+    let mut missing = path;
+    let ancestor = loop {
+        let parent = missing.parent()?;
+        if is_dir(parent) {
+            break parent;
+        }
+        missing = parent;
+    };
+    let name = missing.file_name()?.to_str()?;
+    let mut cuts: Vec<usize> = name
+        .match_indices("--")
+        .map(|(i, _)| i)
+        .chain(name.match_indices('.').map(|(i, _)| i))
+        .filter(|i| *i > 0)
+        .collect();
+    cuts.sort_unstable_by(|a, b| b.cmp(a));
+    cuts.dedup();
+    let sibling = cuts.into_iter().find_map(|i| {
+        let candidate = ancestor.join(&name[..i]);
+        if !is_dir(&candidate) {
+            return None;
+        }
+        resolve(&candidate).filter(|r| r.worktree_root == candidate)
+    });
+    if sibling.is_some() {
+        return sibling;
+    }
+    let repo = resolve(ancestor)?;
+    let root = &repo.worktree_root;
+    let worktree_like = ancestor == root.as_path()
+        || path.starts_with(root.join(".worktrees"))
+        || path.starts_with(root.join(".claude/worktrees"));
+    worktree_like.then_some(repo)
+}
+
 fn display_name(root: &Path) -> String {
     crate::domain::Project::from_root(root).display_name
 }
@@ -2415,6 +2788,59 @@ fn spawn_thread(name: &str, f: impl FnOnce() + Send + 'static) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_project_is_inferred_without_creating_anything() {
+        use crate::ports::RepoInfo;
+        let repo = |root: &str| RepoInfo {
+            worktree_root: root.into(),
+            common_dir: format!("{root}/.git").into(),
+            project_root: root.into(),
+            branch: None,
+        };
+        let dirs = [
+            "/",
+            "/home",
+            "/home/u",
+            "/home/u/proj",
+            "/home/u/proj/src",
+            "/home/u/proj/.worktrees",
+            "/home/u/proj/.claude",
+            "/home/u/proj/.claude/worktrees",
+            "/home/u/autre",
+        ];
+        let is_dir = |p: &Path| dirs.iter().any(|d| Path::new(d) == p);
+        // `~` est un dépôt de fichiers de configuration ; `proj` un dépôt.
+        let resolve = |p: &Path| {
+            if p.starts_with("/home/u/proj") {
+                Some(repo("/home/u/proj"))
+            } else if p.starts_with("/home/u") {
+                Some(repo("/home/u"))
+            } else {
+                None
+            }
+        };
+        let infer = |p: &str| {
+            infer_missing_project(Path::new(p), &is_dir, &resolve).map(|r| r.project_root)
+        };
+        let proj = Some(PathBuf::from("/home/u/proj"));
+        // Rangés comme des worktrees du dépôt.
+        assert_eq!(infer("/home/u/proj/.worktrees/feat/src"), proj);
+        assert_eq!(infer("/home/u/proj/.claude/worktrees/x"), proj);
+        assert_eq!(infer("/home/u/proj/wt-ancien"), proj);
+        // Voisins `<nom>--<suffixe>` et `<nom>.<suffixe>`, avant le dépôt de `~`.
+        assert_eq!(infer("/home/u/proj--feature-x/src"), proj);
+        assert_eq!(infer("/home/u/proj.wt"), proj);
+        assert_eq!(infer("/home/u/proj--a--b"), proj);
+        // Dossier profond du dépôt : pas rangé comme un worktree.
+        assert_eq!(infer("/home/u/proj/src/vieux/x"), None);
+        // Pas de voisin (`~/autre` n'est pas une racine de dépôt) ; chemin
+        // directement sous `~` (dépôt de configuration) : retenu.
+        assert_eq!(infer("/home/u/autre--x"), Some(PathBuf::from("/home/u")));
+        // Profond sous `~` : le dépôt de configuration n'est pas retenu.
+        assert_eq!(infer("/home/u/autre/a/b"), None);
+        assert_eq!(infer("/nulle/part"), None);
+    }
 
     #[test]
     fn status_record_roundtrip() {

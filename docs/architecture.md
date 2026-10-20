@@ -16,7 +16,7 @@ Hors périmètre v1 : sessions SSH (prévues, voir § 4.4), GitLab, suivi mobile
 
 1. **Ne jamais casser la configuration de l'utilisateur.** Les hooks, la statusline et les réglages existants (peon-ping par exemple) continuent de fonctionner dans les sessions lancées par l'app.
 2. **Le vrai Claude Code, pas une imitation.** Le terminal affiche la TUI d'origine ; slash commands, plan mode et raccourcis restent disponibles.
-3. **Local d'abord.** Aucun port réseau ouvert, aucun compte, aucune télémétrie. L'audio de la dictée ne quitte pas la machine.
+3. **Local d'abord.** Aucun port réseau ouvert, aucun compte, aucune télémétrie. L'audio de la dictée ne quitte pas la machine. Seule exception : le démon interroge l'endpoint d'usage d'Anthropic avec le jeton OAuth de chaque profil pour afficher les quotas (§ 11), désactivable.
 4. **Se dégrader proprement.** Une source de données absente (quotas, transcript) donne un état « inconnu », jamais une erreur bloquante.
 5. **Petit périmètre, un seul domaine.** Des modules dans un bounded context, pas une multiplication de crates.
 
@@ -148,7 +148,7 @@ Voir [ADR 0003](adr/0003-permissions-depuis-l-app.md). En résumé :
 Interface `QuotaSource`, résultat par profil, chaque fenêtre (5 h, 7 jours) pouvant être inconnue :
 
 - adaptateur **statusline** (officiel) : `rate_limits.five_hour` / `seven_day`, présent seulement pour les abonnements Pro/Max et après la première réponse de l'API ;
-- adaptateur **endpoint d'usage** (non documenté, celui qu'utilise déjà `/usage`) : optionnel, marqué fragile, désactivable.
+- adaptateur **endpoint d'usage** (non documenté, celui qu'utilise déjà `/usage`) : `GET https://api.anthropic.com/api/oauth/usage` au démarrage du démon, toutes les 5 minutes et à la demande ; jeton lu dans `<profil>/.credentials.json`, jamais renouvelé, écrit ni journalisé ; activé par défaut, désactivable par `[quotas] usage_api = false`. Fusion fenêtre par fenêtre (5 h, 7 jours) : chacune garde sa lecture la plus récente, statusline ou endpoint ; une fenêtre dont la remise à zéro est passée redevient inconnue.
 
 ## 12. Dictée vocale
 

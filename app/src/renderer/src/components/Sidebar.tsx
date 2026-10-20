@@ -1,11 +1,12 @@
 import { useCallback, useId, useState, type ReactNode } from 'react'
 
-import type { Profile, Session } from '../../../shared/protocol'
+import type { Profile, ProjectInfo, Session } from '../../../shared/protocol'
 import { errorText } from '../api'
 import { PAST_SECTION, browserStorage, loadCollapsed, saveCollapsed, toggleCollapsed } from '../state/collapse'
 import {
   COLOR_LABELS,
   basename,
+  folderMissing,
   pastDisplayName,
   relativeTime,
   sessionColor,
@@ -13,7 +14,7 @@ import {
   shortAgo,
   tildify,
 } from '../state/format'
-import { RESOLVING_GROUP, type PastEntry, type PastGroup, type ProjectGroup } from '../state/projects'
+import { RESOLVING_GROUP, pastFolderMissing, type PastEntry, type PastGroup, type ProjectGroup } from '../state/projects'
 import { glyphFor } from '../state/status'
 import { PathLabel, StatusGlyph, profileClass } from './common'
 import { ForgetConfirm, HideConfirm } from './ForgetConfirm'
@@ -80,6 +81,8 @@ export function Sidebar(props: {
   pastGroups: PastGroup[]
   profiles: Profile[]
   home: string | null
+  /** Projets résolus, par dossier (pour signaler les dossiers disparus). */
+  projects: Record<string, ProjectInfo>
   selectedId: string | null
   onSelect: (id: string) => void
   onResumePast: (p: PastEntry) => Promise<void>
@@ -114,13 +117,14 @@ export function Sidebar(props: {
     const name = sessionDisplayName(s)
     const color = sessionColor(s)
     const forgettable = !s.alive
+    const missing = folderMissing(s, props.projects[s.cwd])
     return (
       <li key={s.id} className="srow-wrap">
         <button
           className="srow"
           aria-current={s.id === props.selectedId}
-          aria-label={`${name}, ${branch}, ${glyph.label}, ${s.profile}${color ? `, couleur ${COLOR_LABELS[color].toLowerCase()}` : ''}, dernière activité ${relativeTime(s.last_activity)}`}
-          title={`${name}\n${branch} · ${s.cwd}`}
+          aria-label={`${name}, ${branch}, ${glyph.label}, ${s.profile}${color ? `, couleur ${COLOR_LABELS[color].toLowerCase()}` : ''}, ${missing ? ', dossier supprimé' : ''}, dernière activité ${relativeTime(s.last_activity)}`}
+          title={`${name}\n${branch} · ${s.cwd}${missing ? ' (dossier supprimé)' : ''}`}
           onClick={() => props.onSelect(s.id)}
           onContextMenu={(e) => {
             if (!forgettable) return
@@ -134,7 +138,12 @@ export function Sidebar(props: {
               <ColorBar color={color} />
               <span className="nm-t">{name}</span>
             </span>
-            {branch !== name && <span className="br">{branch}</span>}
+            {(branch !== name || missing) && (
+              <span className="sub">
+                {branch !== name && <span className="br">{branch}</span>}
+                {missing && <span className="gone">dossier supprimé</span>}
+              </span>
+            )}
           </span>
           <span className="ago">{shortAgo(s.last_activity ?? s.created_at)}</span>
         </button>
@@ -166,6 +175,7 @@ export function Sidebar(props: {
     const label = pastDisplayName(p)
     const last = p.last_activity ?? p.last_timestamp
     const key = `${p.profile}:${p.claude_session_id}`
+    const missing = pastFolderMissing(p, props.projects)
     return (
       <li key={key} className="srow-wrap">
         <button
@@ -175,15 +185,24 @@ export function Sidebar(props: {
           }}
           className="srow"
           aria-busy={busy === p.claude_session_id}
-          disabled={busy !== null || !p.cwd}
-          title={`${p.cwd ?? 'dossier inconnu'} · profil ${p.profile}${p.first_prompt ? `\n${p.first_prompt}` : ''}`}
-          aria-label={`Reprendre ${label}${p.git_branch ? `, branche ${p.git_branch}` : ''}, profil ${p.profile}, ${relativeTime(last)}`}
+          disabled={busy !== null || !p.cwd || missing}
+          title={
+            missing
+              ? `Le dossier ${p.cwd} n’existe plus (worktree supprimé ?) : reprise impossible`
+              : `${p.cwd ?? 'dossier inconnu'} · profil ${p.profile}${p.first_prompt ? `\n${p.first_prompt}` : ''}`
+          }
+          aria-label={`${missing ? '' : 'Reprendre '}${label}${p.git_branch ? `, branche ${p.git_branch}` : ''}${missing ? ', dossier supprimé, reprise impossible' : ''}, profil ${p.profile}, ${relativeTime(last)}`}
           onClick={() => void resume(p)}
         >
           <span className="st past" aria-hidden="true" />
           <span className="names">
             <span className="nm-t">{label}</span>
-            {p.git_branch && <span className="br">{p.git_branch}</span>}
+            {(p.git_branch || missing) && (
+              <span className="sub">
+                {p.git_branch && <span className="br">{p.git_branch}</span>}
+                {missing && <span className="gone">dossier supprimé</span>}
+              </span>
+            )}
           </span>
           <span className="ago">{busy === p.claude_session_id ? 'reprise…' : shortAgo(last)}</span>
         </button>

@@ -1,5 +1,5 @@
 /** Mise en forme pour l'interface (français). */
-import { SESSION_COLORS, type PastSession, type Session, type SessionColor } from '../../../shared/protocol'
+import { SESSION_COLORS, type PastSession, type ProjectInfo, type Session, type SessionColor } from '../../../shared/protocol'
 
 const nf = new Intl.NumberFormat('fr-FR')
 const money2 = new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -9,6 +9,25 @@ export function formatNumber(n: number | null | undefined): string {
 }
 
 /** Coût tel que fourni par Claude Code (en dollars). */
+const compact1 = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 1 })
+
+/**
+ * Nombre compact (tailles de contexte, tokens) : « 840 », « 1,2k », « 122k »,
+ * « 1M », « 1,1M », « 25M ». Une décimale (virgule) sous 10, aucune au-delà.
+ */
+export function formatCompact(n: number | null | undefined): string {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return 'inconnu'
+  const a = Math.abs(n)
+  // Signe seulement si la valeur arrondie n'est pas nulle (jamais « -0 »).
+  const sign = n < 0 && a >= 0.5 ? '-' : ''
+  if (a < 999.5) return sign + nf.format(Math.round(a))
+  const scaled = (v: number) => (v < 10 ? Math.round(v * 10) / 10 : Math.round(v))
+  const k = scaled(a / 1000)
+  if (k < 1000) return `${sign}${compact1.format(k)}k`
+  const m = scaled(a / 1_000_000)
+  return `${sign}${compact1.format(m)}M`
+}
+
 export function formatUsd(n: number | null | undefined): string {
   return typeof n === 'number' && Number.isFinite(n) ? `${money2.format(n)} $` : 'inconnu'
 }
@@ -146,4 +165,51 @@ export const COLOR_LABELS: Record<SessionColor, string> = {
 export function sessionColor(s: Pick<Session, 'color'>): SessionColor | null {
   const c = s.color
   return typeof c === 'string' && (SESSION_COLORS as readonly string[]).includes(c) ? c : null
+}
+
+/** Le dossier de la session a-t-il disparu (worktree supprimé…) ? */
+export function folderMissing(
+  s: Pick<Session, 'resume_blocker'>,
+  project: Pick<ProjectInfo, 'exists'> | undefined,
+): boolean {
+  // Le démon fait foi quand il donne le champ (un worktree recréé n'est plus « supprimé ») ;
+  // sinon, la résolution mise en cache.
+  if (s.resume_blocker !== undefined) return s.resume_blocker === 'cwd_missing'
+  return project?.exists === false
+}
+
+/** Le démon dit-il que le dossier de la session existe ? (`undefined` : il ne le dit pas.) */
+export function daemonSaysFolderExists(s: Pick<Session, 'resume_blocker'>): boolean | undefined {
+  return s.resume_blocker === undefined ? undefined : s.resume_blocker !== 'cwd_missing'
+}
+
+export interface ResumeBlock {
+  /** Pour une pastille : « pas de transcript », « dossier supprimé (worktree ?) ». */
+  short: string
+  /** Pour une infobulle. */
+  long: string
+}
+
+/**
+ * Pourquoi une session arrêtée ne peut pas être reprise, ou `null` (reprise
+ * possible, ou inconnu avec un démon plus ancien : la reprise reste proposée).
+ */
+export function resumeBlock(
+  s: Pick<Session, 'alive' | 'resumable' | 'resume_blocker' | 'cwd'>,
+  project?: Pick<ProjectInfo, 'exists'>,
+): ResumeBlock | null {
+  if (s.alive) return null
+  if (folderMissing(s, project)) {
+    return {
+      short: 'dossier supprimé (worktree ?)',
+      long: `Le dossier de la session n’existe plus (worktree supprimé ?) : ${s.cwd}. Elle ne peut pas être reprise.`,
+    }
+  }
+  if (s.resume_blocker === 'transcript_missing' || s.resumable === false) {
+    return {
+      short: 'pas de transcript',
+      long: 'Claude Code n’a pas de transcript pour cette session (aucun échange enregistré) : elle ne peut pas être reprise.',
+    }
+  }
+  return null
 }

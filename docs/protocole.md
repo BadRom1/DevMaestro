@@ -82,6 +82,7 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `-32013` | « Toujours » impossible : aucune règle proposée par Claude Code (`always_rules` vide) |
 | `-32014` | `sessions.setMode` impossible : mode courant inconnu ou hors du cycle de Shift+Tab, ou mode visé hors du cycle |
 | `-32015` | `sessions.resume` impossible : Claude Code n'a pas de transcript pour cette session (message : « Claude Code n'a pas de transcript pour cette session : impossible de la reprendre ») |
+| `-32016` | `sessions.resume` impossible : le dossier de travail n'existe plus (message : « Le dossier de la session n'existe plus (worktree supprimé ?) : <cwd> ») |
 
 ## 4. Méthodes
 
@@ -89,7 +90,7 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 |---|---|---|
 | `hello` | `{client?}` | `{server: "orchd", version, protocol: 1, pid}` |
 | `profiles.list` | — | `{profiles: [Profil]}` |
-| `projects.resolve` | `{path}` | `{path, is_git, root, worktree_root, common_dir, branch, name}` (voir ci-dessous) |
+| `projects.resolve` | `{path}` | `{path, exists, inferred, is_git, root, worktree_root, common_dir, branch, name}` (voir ci-dessous) |
 | `sessions.list` | — | `{sessions: [Session]}`, de la plus récente à la plus ancienne |
 | `sessions.get` | `{id}` | `{session: Session}` |
 | `sessions.launch` | `{cwd, profile?, model?, mode?, prompt?, cols?, rows?}` | `{session: Session, warnings: [texte]}` |
@@ -107,11 +108,19 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `transcripts.list` | `{profile?, limit?, include_hidden?, exclude_known?}` | `{profile, sessions: [AncienneSession]}` (voir ci-dessous) |
 | `transcripts.hide` | `{profile?, claude_session_id}` | `{hidden: true}` |
 | `transcripts.unhide` | `{profile?, claude_session_id}` | `{hidden: false}` |
+| `quotas.get` | `{refresh?: bool}` | `{profiles: {"<profil>": Quotas}}` (voir ci-dessous) |
 
 Détails :
 
 - **`cwd`** : chemin absolu d'un dossier existant (résolu, liens suivis). **`profile`** : nom d'un profil de `profiles.list` (`default` par défaut). **`mode`** : `default` (ou `manual`), `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` ; absent = le mode par défaut de Claude Code pour ce profil (aucun `--permission-mode` passé). **`cols`/`rows`** : 1 à 1000 (80×24 par défaut au lancement, taille courante à la reprise).
-- **`projects.resolve`** passe par la CLI `git` : `root` est le worktree principal (parent du dossier commun quand il s'appelle `.git`), `worktree_root` la racine du worktree contenant `path`, `common_dir` le dossier commun (identifiant du projet), `branch` absente en HEAD détachée ou avant le premier commit. Hors dépôt (ou sans `git`) : `is_git: false`, `root` = `path`, le reste `null`.
+- **`projects.resolve`** passe par la CLI `git` : `root` est le worktree principal (parent du dossier commun quand il s'appelle `.git`), `worktree_root` la racine du worktree contenant `path`, `common_dir` le dossier commun (identifiant du projet), `branch` absente en HEAD détachée ou avant le premier commit. Hors dépôt (ou sans `git`) : `is_git: false`, `root` = `path`, le reste `null`. Dossier existant : `exists: true, inferred: false`.
+  - **Dossier disparu** (worktree supprimé ; `path` absolu, sinon `-32602`) : `exists: false`, rien n'est créé, et le projet est deviné :
+    1. un voisin : si le premier composant manquant s'appelle `<nom>--<suffixe>` ou `<nom>.<suffixe>`, le dossier `<parent>/<nom>` s'il est la racine d'un dépôt git (préfixe le plus long d'abord) ;
+    2. sinon le dépôt qui contient le plus proche ancêtre existant, **seulement** si le chemin est rangé comme un worktree de ce dépôt : sous `<racine>/.worktrees/`, sous `<racine>/.claude/worktrees/`, ou directement sous `<racine>` (premier composant manquant enfant de la racine). Un dépôt lointain (par exemple un dépôt de fichiers de configuration dans `~` pour `~/a/b/c`) n'est pas retenu.
+
+    Lu par `git` et sur le disque, hors du runtime du démon.
+
+    Trouvé : `{"path": "<path>", "exists": false, "inferred": true, "is_git": true, "root": "<racine du dépôt>", "worktree_root": null, "common_dir": "…", "branch": null, "name": "<nom du dépôt>"}`. Sinon : `{"path": "<path>", "exists": false, "inferred": false, "is_git": false, "root": null, "worktree_root": null, "common_dir": null, "branch": null, "name": "<dernier composant>"}`.
 - **`sessions.launch`** choisit un UUID qui sert à la fois d'identifiant interne (`id`) et de `--session-id` pour Claude Code (`claude_session_id`). Le second change ensuite sur `/clear` ; seul `id` est stable.
 - **`sessions.resume`** :
   - tous les paramètres (profil, mode, taille, dossier, binaire `claude`) sont vérifiés avant de toucher à la session ; si la reprise échoue (y compris au lancement du processus), `sessions.list` est inchangé et l'écran n'est pas effacé ;
@@ -119,7 +128,7 @@ Détails :
   - avec `claude_session_id` seul : si une session arrêtée du démon porte ce `claude_session_id`, c'est elle qui est reprise ; sinon (ancienne session trouvée par `transcripts.list`) une nouvelle entrée est créée, `cwd` est alors obligatoire. Elle reprend le nom de la conversation : `first_prompt` et titre de Claude Code (`aiTitle`/`summary`, dans `metrics.session_name`) lus dans le transcript du profil, et `title`/`color` d'une autre entrée du démon pour le même `claude_session_id` s'il y en a ;
   - les paramètres absents reprennent ceux de la session (profil, mode, modèle, taille).
 - **Transcript requis pour reprendre** : `sessions.resume` (par `id` ou par `claude_session_id`) vérifie, avant de toucher à quoi que ce soit, que Claude Code a un transcript pour la conversation à reprendre (`<dossier du profil retenu>/projects/<un dossier>/<claude_session_id>.jsonl`, recherche par nom de fichier). Sinon `-32015` : `--resume` échouerait (cas des sessions lancées avec un marqueur `CLAUDE_CODE_CHILD_SESSION` hérité, § 8, dont Claude Code n'a rien enregistré). La session reste telle quelle ; elle peut être oubliée (`sessions.forget`).
-- **`Session.resumable`** : `true` si la session ne tourne pas **et** qu'un transcript existe pour son `claude_session_id` dans le dossier de son profil (même recherche) ; `false` sinon, toujours `false` pour une session vivante. Recalculé à la fin du processus, à la relecture de la base au démarrage, à chaque `sessions.list` et à chaque `sessions.get` (un transcript supprimé ou apparu depuis est alors pris en compte ; `session.updated` si la valeur change). La recherche se fait sur la liste des transcripts du profil (noms des fichiers `projects/*/*.jsonl`), gardée en cache tant que ni `projects/` ni aucun de ses sous-dossiers n'a changé de date de modification, et 2 s au plus ; jamais sous le verrou du registre.
+- **`Session.resumable`** : `true` si la session ne tourne pas, qu'un transcript existe pour son `claude_session_id` dans le dossier de son profil (même recherche) **et** que son `cwd` existe ; `false` sinon, toujours `false` pour une session vivante. **`Session.resume_blocker`** dit pourquoi : `null` (vivante ou reprenable), `"transcript_missing"` (prioritaire : définitif) ou `"cwd_missing"` (dossier disparu, worktree supprimé ; plus tard l'app proposera de le recréer). `sessions.resume` vérifie, avant tout et dans le même ordre, le transcript (`-32015`) puis le dossier (`-32016`, y compris pour un `cwd` absolu passé en paramètre qui n'existe pas, et pour une ancienne session reprise par `claude_session_id` + `cwd`). Recalculé à la fin du processus, à la relecture de la base au démarrage, à chaque `sessions.list` et à chaque `sessions.get` (un transcript supprimé ou apparu depuis est alors pris en compte ; `session.updated` si la valeur change). La recherche se fait sur la liste des transcripts du profil (noms des fichiers `projects/*/*.jsonl`), gardée en cache tant que ni `projects/` ni aucun de ses sous-dossiers n'a changé de date de modification, et 2 s au plus ; jamais sous le verrou du registre.
 - **`sessions.forget {id}`** (« Retirer de la liste ») : retire une session qui ne tourne pas (arrêtée ou en erreur) du démon et de la base, **et masque** son transcript (`profile`, `claude_session_id` courant) de `transcripts.list`, durablement (voir `transcripts.hide`). Un processus qui vient de se terminer mais dont le démon n'a pas encore constaté la fin (délai de grâce de 0,5 s) est d'abord constaté terminé, puis la session est oubliée. `-32002` si elle tourne (l'arrêter d'abord), `-32001` si elle est inconnue (dont déjà oubliée), `-32602` sans `id`. Diffuse `session.removed {id}` à tous les clients (§ 5). Si l'écriture en base échoue, l'erreur est journalisée et la réponse reste `{forgotten: true}` (la session reviendrait au prochain démarrage). Les transcripts de Claude Code ne sont **jamais** supprimés (`transcripts.unhide` les fait réapparaître). Un processus d'avant un plantage du démon encore vivant reste refusé au socket de contrôle (§ 10) jusqu'à sa fin.
 - **`transcripts.list {profile?, limit?, include_hidden?, exclude_known?}`** :
   - `profile` : `default` par défaut (`-32003` s'il est inconnu) ; `limit` : entier positif, 50 par défaut ;
@@ -192,6 +201,7 @@ La TUI affiche sa propre demande pendant que le relais `PermissionRequest` atten
 | `session.updated` | `{session: Session}` | à chaque changement : lancement, hook, statusline (si les mesures changent), mode lu dans le pied de la TUI, `sessions.update`, fin du processus, reprise |
 | `session.effect` | `{id, effect: Effet}` | effets de la machine à états, juste **avant** le `session.updated` correspondant |
 | `session.resync` | `{id, snapshot: Écran}` | un abonné a pris trop de retard (§ 6) |
+| `quotas.updated` | `{profiles: {"<profil>": Quotas}}` | les quotas d'un profil ont changé (même forme que `quotas.get`) |
 | `session.removed` | `{id}` | la session a été oubliée (`sessions.forget`) : elle n'existe plus ; aucun `session.updated` ne suit pour elle |
 
 Pour un client lent, les `session.updated` en attente d'une même session sont **regroupés** : il reçoit l'état le plus récent au moment de l'envoi, pas chaque étape. Les `session.effect` ne sont pas regroupés ; si plus de 4 096 événements attendent (ou si le client a pris trop de retard sur le démon), la file est remplacée par un `session.removed` pour chacune des dernières sessions oubliées (jusqu'à 1 024, éventuellement déjà connues du client : à ignorer si l'`id` est inconnu) puis un `session.updated` par session, et les effets en trop sont perdus. Le dernier `session.updated` reçu fait toujours foi.
@@ -265,7 +275,8 @@ Règles :
   "last_activity": "RFC 3339",          // dernier hook reçu
   "created_at": "RFC 3339", "updated_at": "RFC 3339",
   "alive": true, "pid": 1234,           // processus claude en cours
-  "resumable": false,                   // ne tourne pas et a un transcript (§ 4)
+  "resumable": false,                   // ne tourne pas, a un transcript et son dossier (§ 4)
+  "resume_blocker": null | "transcript_missing" | "cwd_missing",
   "scope": "devmaestro-session-1a2b3c4d-5e6f7a8b.scope" | null,   // scope systemd (§ 9)
   "last_exit": {"code": 0} | {"signal": "Hangup"} | null,
   "size": {"cols": 100, "rows": 30}
@@ -325,6 +336,7 @@ Entrée de `transcripts.list` (ancienne session) :
 | `last_activity` | RFC 3339 \| `null` | dernière activité : `last_timestamp`, sinon date de modification du fichier |
 | `message_count` | entier \| `null` | lignes `user` et `assistant` (hors sous-agents) ; `null` pour un gros fichier lu par le début et la fin |
 | `hidden` | booléen | masquée (`sessions.forget` ou `transcripts.hide`) ; `true` seulement avec `include_hidden` |
+| `cwd_exists` | booléen | `cwd` connu, absolu, et le dossier existe (sinon une reprise renverra `-32016`) |
 
 Liste triée par date de modification du fichier, de la plus récente à la plus ancienne.
 
@@ -387,7 +399,39 @@ Fichiers générés (au démarrage du démon et avant chaque lancement) :
 - Droits : dossiers `$XDG_RUNTIME_DIR/devmaestro`, `$XDG_DATA_HOME/devmaestro` et `$XDG_STATE_HOME/devmaestro` en 0700 (refusés s'ils sont un lien symbolique ou appartiennent à un autre utilisateur), base, journal, plugin et réglages en 0600.
 - **Arrêter le démon termine les sessions** : `SIGTERM`, `SIGINT` ou `SIGHUP` → `SIGHUP` à chaque session (le socket reste ouvert pour recevoir les `SessionEnd`), `SIGKILL` au bout de 3 s, puis fin. Un second signal pendant cet arrêt envoie `SIGKILL` à toutes les sessions et sort aussitôt. Les sessions restent reprenables. Après un plantage du démon, les sessions qui étaient en démarrage, en cours, à répondre ou inactives sont relues arrêtées (`daemon_restart`) ; celles déjà arrêtées ou en erreur sont relues telles quelles (statut et date inchangés).
 - Journal : sortie d'erreur et `$XDG_STATE_HOME/devmaestro/orchd.log`.
-- Réglages du démon (facultatifs, jamais écrits par lui) : `$XDG_CONFIG_HOME/devmaestro/config.toml` (repli `~/.config/devmaestro/config.toml`), lu **une fois au démarrage** : un changement demande de redémarrer le démon (l'app le fera après avoir changé le réglage). Seule clé : `allow_dangerous_modes = true | false` (faux par défaut) : autorise `bypassPermissions` et `dontAsk` au lancement, à la reprise et par `sessions.setMode`. Fichier absent, illisible ou invalide : valeurs par défaut (avertissement au journal). L'app l'exposera plus tard comme un réglage explicite.
+- Réglages du démon (facultatifs, jamais écrits par lui) : `$XDG_CONFIG_HOME/devmaestro/config.toml` (repli `~/.config/devmaestro/config.toml`), lu **une fois au démarrage** : un changement demande de redémarrer le démon (l'app le fera après avoir changé le réglage). Clés : `allow_dangerous_modes = true | false` (faux par défaut) : autorise `bypassPermissions` et `dontAsk` au lancement, à la reprise et par `sessions.setMode` ; et `[quotas]` `usage_api = true | false` (vrai par défaut) : interroger l'API d'usage de Claude Code (non documentée, voir « Quotas » ci-dessous), `false` pour ne lire les quotas que dans les statuslines. Fichier absent, illisible ou invalide : valeurs par défaut (avertissement au journal). L'app l'exposera plus tard comme un réglage explicite.
+
+### Quotas (`quotas.get`, `quotas.updated`)
+
+Par profil, deux sources ; **chaque fenêtre** (`five_hour`, `seven_day`) garde sa lecture non nulle la plus récente, quelle qu'en soit la source :
+
+- les `rate_limits` des statuslines des sessions de ce profil (souvent absents des versions récentes de Claude Code) ;
+- l'**API d'usage** de Claude Code, `GET https://api.anthropic.com/api/oauth/usage` (non documentée ; en-têtes `Authorization: Bearer <jeton OAuth>` et `anthropic-beta: oauth-2025-04-20`, aucune redirection suivie, **aucun mandataire** : `HTTP(S)_PROXY` sont ignorés pour cet appel, le jeton va directement à l'hôte de l'API ; 10 s au plus), interrogée au démarrage du démon, toutes les 5 min et sur `quotas.get {refresh: true}`. Une **tournée** interroge tous les profils en parallèle, dans une tâche détachée, en 15 s au plus (un appel plus lent finit en arrière-plan) ; une seule tournée à la fois (une demande pendant une tournée est sans effet) ; pour un même profil, au moins **10 s** entre deux essais (une demande plus tôt ne rappelle pas l'API). Le jeton est lu à chaque appel, en lecture seule, dans `<dossier du profil>/.credentials.json` (`claudeAiOauth.accessToken`). Expiré (`expiresAt` passé) : aucun appel, erreur « jeton expiré : Claude Code le renouvellera à sa prochaine requête » ; DevMaestro ne le renouvelle jamais. Un appel qui échoue garde la lecture précédente et pose `error`.
+
+`quotas.get {refresh?: bool}` répond **tout de suite** avec les quotas connus ; `refresh` vrai lance en plus une tournée, dont les résultats arrivent par `quotas.updated` (autre type que booléen : `-32602`). Même forme pour `quotas.updated` :
+
+```json
+{"profiles": {
+  "default": {
+    "five_hour": {"used_percentage": 12.0, "resets_at": "2026-10-20T13:00:00.123456Z",
+                  "source": "usage_api", "fetched_at": "RFC 3339"} | null,
+    "seven_day": {"used_percentage": 35.5, "resets_at": "2026-10-24T08:00:00Z",
+                  "source": "statusline", "fetched_at": "RFC 3339"} | null,
+    "source": "usage_api" | "statusline" | null,
+    "fetched_at": "RFC 3339" | null,
+    "error": "jeton expiré : …" | null
+  },
+  "work": {"five_hour": null, "seven_day": null, "source": null, "fetched_at": null,
+           "error": "aucun jeton OAuth : Claude Code n'est pas connecté avec ce profil"}
+}}
+```
+
+- Par fenêtre : `used_percentage`, `resets_at` (`null` si inconnue), et la `source` et la date (`fetched_at`) de **sa** lecture. Une fenêtre dont la remise à zéro est passée devient `null` ; une lecture de statusline sans `resets_at` est montrée 6 h au plus.
+- `source`, `fetched_at` au premier niveau : ceux de la lecture la plus récente toutes fenêtres confondues (compatibilité). `error` : celle du dernier appel à l'API (toujours `null` avec `usage_api = false`), même si une lecture plus ancienne est affichée.
+- `resets_at` lu dans la réponse de l'API : texte RFC 3339, ou nombre de secondes (de millisecondes au-delà de 10¹¹) depuis 1970.
+- Tous les profils de `profiles.list` sont présents. `quotas.updated` n'est envoyé que si ce JSON change (regroupé pour un client lent).
+- Erreurs possibles (texte en français, jamais le jeton) : aucun jeton OAuth, identifiants illisibles, jeton expiré, jeton refusé (HTTP 401/403), réponse inattendue (HTTP n), API injoignable, réponse illisible. Une erreur nouvelle est journalisée une fois.
+- Tests seulement : un binaire construit avec la fonctionnalité `test-support` lit `DEVMAESTRO_USAGE_API_URL` (serveur local) et `DEVMAESTRO_QUOTA_MIN_INTERVAL_MS` (intervalle minimal) ; le binaire distribué les ignore.
 
 ## 10. Modèle de menace
 
@@ -409,6 +453,8 @@ Fichiers générés (au démarrage du démon et avant chaque lancement) :
 - **Environnement de `claude`** : les variables `ORCH_*` et `DEVMAESTRO_*` héritées sont retirées, ainsi que les marqueurs de session Claude Code (§ 8), dont le jeton de messagerie d'une session parente (`CLAUDE_CODE_MESSAGING_TOKEN`).
 - **Modes qui suppriment les demandes** (`bypassPermissions`, `dontAsk`) : réglage explicite du démon (§ 9), y compris quand ils viennent d'un `defaultMode` du projet ou du profil ; `bypassPermissions` verrouillé dans les réglages passés à `claude` ; passage détecté et signalé (`dangerous_mode_detected`).
 - **Le relais n'autorise jamais rien par défaut** (délai, démon absent : sortie sans décision).
+
+- **Identifiants Claude Code et réseau** : le démon lit (jamais n'écrit) le jeton OAuth de chaque profil (`.credentials.json`) pour l'API d'usage ; il ne l'envoie qu'à `https://api.anthropic.com/api/oauth/usage` en HTTPS (TLS rustls, sans suivre de redirection ni passer par un mandataire), ne le journalise pas et ne le renvoie à aucun client. C'est la seule connexion sortante du démon ; elle se coupe par `[quotas] usage_api = false` (§ 9). Aucun port n'est ouvert.
 
 ### Ce qui n'est pas protégé (atténuation, pas un bac à sable)
 

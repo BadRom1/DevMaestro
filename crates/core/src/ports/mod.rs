@@ -14,7 +14,7 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::domain::{PastSession, Profile};
+use crate::domain::{PastSession, Profile, QuotaReading};
 
 /// Source de l'heure courante (remplaçable dans les tests).
 pub trait Clock {
@@ -49,6 +49,13 @@ pub trait TranscriptSource {
 
     /// Résumé du transcript de ce `session_id`, s'il existe.
     fn past_session(&self, profile: &Profile, session_id: &str) -> Option<PastSession>;
+}
+
+/// Lecture des quotas d'un profil (API d'usage de Claude Code). Bloquant :
+/// à appeler hors du runtime asynchrone.
+pub trait QuotaSource: Send + Sync {
+    /// Erreur : un texte en français, qui ne contient jamais le jeton.
+    fn fetch(&self, profile: &Profile, now: OffsetDateTime) -> Result<QuotaReading, String>;
 }
 
 /// Commande à lancer dans un PTY.

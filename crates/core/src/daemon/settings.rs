@@ -19,10 +19,22 @@ use std::path::Path;
 use super::log::warning;
 
 /// Réglages lus.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DaemonSettings {
     /// `allow_dangerous_modes` : faux par défaut.
     pub allow_dangerous_modes: bool,
+    /// `[quotas] usage_api` : interroger l'API d'usage (non documentée) de
+    /// Claude Code pour les quotas ; vrai par défaut.
+    pub usage_api: bool,
+}
+
+impl Default for DaemonSettings {
+    fn default() -> Self {
+        Self {
+            allow_dangerous_modes: false,
+            usage_api: true,
+        }
+    }
 }
 
 impl DaemonSettings {
@@ -53,8 +65,18 @@ impl DaemonSettings {
             Some(toml::Value::Boolean(b)) => *b,
             Some(_) => return Err("« allow_dangerous_modes » doit valoir true ou false".into()),
         };
+        let usage_api = match table.get("quotas") {
+            None => true,
+            Some(toml::Value::Table(t)) => match t.get("usage_api") {
+                None => true,
+                Some(toml::Value::Boolean(b)) => *b,
+                Some(_) => return Err("« quotas.usage_api » doit valoir true ou false".into()),
+            },
+            Some(_) => return Err("« quotas » doit être une table ([quotas])".into()),
+        };
         Ok(Self {
             allow_dangerous_modes: allow,
+            usage_api,
         })
     }
 }
@@ -75,6 +97,15 @@ mod tests {
                 .allow_dangerous_modes
         );
         assert!(DaemonSettings::parse("allow_dangerous_modes = \"oui\"").is_err());
+        assert!(DaemonSettings::default().usage_api);
+        assert!(
+            !DaemonSettings::parse("[quotas]\nusage_api = false\n")
+                .unwrap()
+                .usage_api
+        );
+        assert!(DaemonSettings::parse("[quotas]\n").unwrap().usage_api);
+        assert!(DaemonSettings::parse("[quotas]\nusage_api = 0\n").is_err());
+        assert!(DaemonSettings::parse("quotas = 1\n").is_err());
         assert!(DaemonSettings::parse("pas du toml =").is_err());
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(

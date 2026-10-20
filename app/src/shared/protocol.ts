@@ -129,7 +129,11 @@ export interface Session {
    * avec un démon plus ancien (inconnu : la reprise reste proposée).
    */
   resumable?: boolean
+  /** Raison pour laquelle la reprise est impossible (absent : démon plus ancien). */
+  resume_blocker?: ResumeBlocker | null
 }
+
+export type ResumeBlocker = 'transcript_missing' | 'cwd_missing'
 
 export type Effect =
   | { type: 'notify_waiting'; request_id: number; pending: Demand }
@@ -158,11 +162,19 @@ export interface Profile {
 export interface ProjectInfo {
   path: string
   is_git: boolean
-  root: string
+  /** Racine (dépôt ou dossier) ; `null` possible pour un dossier disparu sans ancêtre retenu. */
+  root: string | null
   worktree_root: string | null
   common_dir: string | null
   branch: string | null
   name: string | null
+  /** Le dossier existe (absent : démon plus ancien, supposé existant). */
+  exists?: boolean
+  /**
+   * Dépôt déduit pour un dossier disparu (ancêtre existant le plus proche, ou
+   * dépôt voisin `<dépôt>--<suffixe>` d'un worktree supprimé).
+   */
+  inferred?: boolean
 }
 
 export interface PastSession {
@@ -177,10 +189,37 @@ export interface PastSession {
   message_count: number | null
   /** Nom à afficher, calculé par le démon (absent avec un démon plus ancien). */
   display_name?: string | null
+  /** Le dossier de la session existe encore (absent : inconnu). */
+  cwd_exists?: boolean | null
   /** Masquée par l'utilisateur (seulement avec `include_hidden`). */
   hidden?: boolean | null
   /** Dernière activité, si le démon la donne sous ce nom (sinon `last_timestamp`). */
   last_activity?: string | null
+}
+
+/** Fenêtre de quota telle que le démon la donne (`quotas.get`). */
+export type QuotaSource = 'usage_api' | 'statusline'
+
+export interface DaemonQuotaWindow {
+  used_percentage: number | null
+  resets_at: string | null
+  /** Origine et date de cette fenêtre (le démon fusionne fenêtre par fenêtre). */
+  source?: QuotaSource | null
+  fetched_at?: string | null
+}
+
+export interface DaemonProfileQuota {
+  five_hour: DaemonQuotaWindow | null
+  seven_day: DaemonQuotaWindow | null
+  /** Origine : API d'usage de Claude Code, ou dernière statusline reçue. */
+  source: QuotaSource | null
+  fetched_at: string | null
+  /** Pourquoi la mesure manque (message du démon). */
+  error: string | null
+}
+
+export interface QuotasReport {
+  profiles: Record<string, DaemonProfileQuota>
 }
 
 export type PermissionDecision = 'allow' | 'allow_always' | 'deny'
@@ -250,6 +289,7 @@ export interface Methods {
     params: { profile?: string; limit?: number; include_hidden?: boolean }
     result: { profile: string; sessions: PastSession[] }
   }
+  'quotas.get': { params: { refresh?: boolean }; result: QuotasReport }
   'transcripts.hide': { params: { profile: string; claude_session_id: string }; result: { hidden: boolean } }
   'transcripts.unhide': { params: { profile: string; claude_session_id: string }; result: { hidden: boolean } }
 }
@@ -274,6 +314,7 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'transcripts.list',
   'transcripts.hide',
   'transcripts.unhide',
+  'quotas.get',
 ]
 
 /** Codes d'erreur JSON-RPC du démon (protocole § 3). */
@@ -298,3 +339,5 @@ export type Notification =
   | { method: 'session.resync'; params: { id: string; snapshot: Snapshot } }
   /** Session retirée de la liste du démon (`sessions.forget`). */
   | { method: 'session.removed'; params: { id: string } }
+  /** Quotas mis à jour par le démon (même forme que `quotas.get`). */
+  | { method: 'quotas.updated'; params: QuotasReport }
