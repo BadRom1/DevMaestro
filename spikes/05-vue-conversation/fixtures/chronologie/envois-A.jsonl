@@ -1,0 +1,32 @@
+{"ts": 1792510731.8123477, "event": "start", "argv": ["claude", "--settings", "<retiré : 126 caractères>", "--session-id", "f413d189-39c7-41ff-aeb1-4df75e059737", "--permission-mode", "acceptEdits", "--allowedTools", "Read Edit Write Glob Grep Agent AskUserQuestion"], "removed_env": ["AI_AGENT", "CLAUDECODE", "CLAUDE_AGENT_SDK_MCP_NO_PREFIX", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_ACCOUNT_UUID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_DESKTOP_APP_VERSION", "CLAUDE_CODE_DISABLE_CRON", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "CLAUDE_CODE_EAGER_FLUSH", "CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES", "CLAUDE_CODE_ENABLE_ASK_USER_QUESTION_TOOL", "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "CLAUDE_CODE_HOST_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_OAUTH_SCOPES", "CLAUDE_CODE_ORGANIZATION_UUID", "CLAUDE_CODE_REPORT_FINDINGS", "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_STARTUP_FAILURE_RESULTS", "CLAUDE_CODE_TERMINAL_MCP_TOOLS", "CLAUDE_CODE_USER_EMAIL", "CLAUDE_EFFORT", "CLAUDE_PID", "CLAUDE_PREVIEW_CLASSIFIER_FLOOR"], "cwd": "/tmp/scratchpad/p5test"}
+{"ts": 1792510762.7063122, "event": "send", "cmd": {"keys": "down"}, "bytes": 3}
+{"ts": 1792510764.0598414, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792510778.248467, "event": "send", "cmd": {"text": 352}, "bytes": 356}
+{"ts": 1792510779.2486062, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792510902.659572, "event": "send", "cmd": {"text": 211}, "bytes": 214}
+{"ts": 1792510903.6598608, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792510937.4561543, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792510959.3638325, "event": "send", "cmd": {"text": 145}, "bytes": 151}
+{"ts": 1792510960.364027, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792510991.5819778, "event": "send", "cmd": {"keys": "down"}, "bytes": 3}
+{"ts": 1792510991.8821924, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792511012.2118685, "event": "send", "cmd": {"text": 68}, "bytes": 70}
+{"ts": 1792511012.7334073, "event": "send", "cmd": {"paste": 17}, "bytes": 29}
+{"ts": 1792511013.800628, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792511026.1260817, "event": "send", "cmd": {"text": 41}, "bytes": 43}
+{"ts": 1792511026.652608, "event": "send", "cmd": {"paste": 470}, "bytes": 497}
+{"ts": 1792511027.7195323, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792511049.609827, "event": "send", "cmd": {"text": 156}, "bytes": 156}
+{"ts": 1792511050.6101298, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792511114.9008338, "event": "send", "cmd": {"text": 8}, "bytes": 8}
+{"ts": 1792511116.106358, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792511161.8365815, "event": "send", "cmd": {"text": 1}, "bytes": 1}
+{"ts": 1792511162.9035296, "event": "send", "cmd": {"text": 58}, "bytes": 60}
+{"ts": 1792511163.9050624, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792511178.9562438, "event": "send", "cmd": {"text": 6}, "bytes": 6}
+{"ts": 1792511179.978371, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792511184.2996638, "event": "send", "cmd": {"text": 23}, "bytes": 23}
+{"ts": 1792511185.2997656, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792511204.997921, "event": "send", "cmd": {"text": 5}, "bytes": 5}
+{"ts": 1792511206.034021, "event": "send", "cmd": {"keys": "enter"}, "bytes": 1}
+{"ts": 1792511206.5966709, "event": "exit", "status": 0}
