@@ -38,11 +38,12 @@ Tout le travail est sur la branche locale `v0.1` (non poussée). `main` (publié
 | **8. Finitions d'interface** | Sélecteurs alignés (Nouvelle session : profil / modèle / mode, branche / base / emplacement) ; carte de question qui ne masque plus le contenu (zone réservée en bas, repliable) ; import d'un thème JSON ; réglages avec en-tête fixe (titre + croix toujours visibles) et coins arrondis préservés par la barre de défilement ; zoom de l'interface (Ctrl + / Ctrl − / Ctrl 0, réglage, terminal compris) | Retours de l'essai du 2026-10-20 ; accessibilité (taille de texte) | ✅ validé |
 | **9. Historique des commits** | Onglet « Commits » d'une session : commits de la branche depuis la base (auteur, date, message), diff de chaque commit avec le même lecteur que l'onglet Diff, commentaire d'une ligne de commit envoyé à Claude | Suivre ce que les sessions ont commité (mode « derniers commits » pour le trunk-based) | ✅ validé |
 | **7. Édition de fichiers** | Modifier un fichier depuis l'onglet Fichiers, enregistrement refusé si Claude l'a modifié entre-temps | Souhaitée, non obligatoire | ⏳ |
-| **Prototype n° 5. Vue conversation** | Afficher une session comme une conversation (transcript suivi en direct), le terminal restant disponible | Confort de lecture, cœur prévu après les finitions | ⏳ plan prêt ([spike 05](spikes/05-vue-conversation.md)) |
-| **10. GitHub** | Issues pour lancer des sessions (une par sous-issue d'un epic), suivi des PR et de la CI, **revue des PR GitHub dans l'app** | Livraison et CI ; demande « pas urgente » | ⏳ demande un ADR : aujourd'hui seule la connexion aux quotas est permise (passer par la CLI `gh` de l'utilisateur ?) |
-| **11. Lancer et livrer** | Runners (dev, test) avec aperçu web, livraison (PR par l'agent ou merge sur main), suivi de CI | Fin du cycle d'une tâche | ⏳ |
-| **12. Dictée** | Push-to-talk et enregistrement avec Parakeet en local, notes vocales en Opus | Prototypes n° 3 et 4 faits, branches non fusionnées | ⏳ |
-| **13. Plugins** | Graphify, CodeGraph, API NLP de l'équipe | Architecture § 19 | ⏳ |
+| **Prototype n° 5. Vue conversation** | Mesures sur le transcript, voie A retenue ([ADR 0005](adr/0005-vue-conversation.md)) | Décider avant de coder | ✅ fait ([spike 05](spikes/05-vue-conversation.md)) |
+| **10 à 12. Vue conversation** | Suivi du transcript par le démon, onglet « Conversation » (fil, outils, sous-agents, indicateur d'activité), saisie depuis la vue | Lire et piloter une session comme dans Claude Desktop | 🔜 en cours |
+| **13. GitHub** | Issues pour lancer des sessions (une par sous-issue d'un epic), suivi des PR et de la CI, **revue des PR GitHub dans l'app** | Livraison et CI ; demande « pas urgente » | ⏳ demande un ADR : aujourd'hui seule la connexion aux quotas est permise (passer par la CLI `gh` de l'utilisateur ?) |
+| **14. Lancer et livrer** | Runners (dev, test) avec aperçu web, livraison (PR par l'agent ou merge sur main), suivi de CI | Fin du cycle d'une tâche | ⏳ |
+| **15. Dictée** | Push-to-talk et enregistrement avec Parakeet en local, notes vocales en Opus | Prototypes n° 3 et 4 faits, branches non fusionnées | ⏳ |
+| **16. Plugins** | Graphify, CodeGraph, API NLP de l'équipe | Architecture § 19 | ⏳ |
 | **Paquet** | Paquet `.deb` avec profil AppArmor, lancement depuis le menu (le script `scripts/installer-lanceur-dev.sh` couvre le développement) | Utilisation sans session Claude Code, collègues | ⏳ |
 
 ## Questions ouvertes
@@ -50,7 +51,7 @@ Tout le travail est sur la branche locale `v0.1` (non poussée). `main` (publié
 - **Licence** : FSL ou AGPL + CLA (open source sans revente par un tiers).
 - **Publication** : quand pousser `v0.1` sur GitHub (après anonymisation, comme `main`).
 - **Prototypes n° 3 et 4** (raccourcis, Parakeet) : branches `refs/heads/claude/spike-03-raccourcis-fcc039` et `refs/heads/claude/spike-04-parakeet-eb8631`, à fusionner quand la dictée commence.
-- **GitHub** : accès réseau à décider (ADR) avant le lot 10.
+- **GitHub** : accès réseau à décider (ADR) avant le lot 13.
 - Questions de comportement du vrai CLI encore à vérifier : voir la fin de [v0.1.md](v0.1.md).
 
 ## Retours d'essai traités
@@ -61,4 +62,4 @@ Tout le travail est sur la branche locale `v0.1` (non poussée). `main` (publié
 | 2026-10-20 | Coloration, sélection envoyée à Claude, cases des réglages | v0.2 lot 3 bis |
 | 2026-10-20 | Numéros de ligne décalés, filtre et volet du kanban, palette par mode | v0.2 lot 6 |
 | 2026-10-20 | Alignements, carte de question, import de thème, réglages, zoom | lot 8 |
-| 2026-10-20 | Historique des commits, revue des PR GitHub | lots 9 et 10 |
+| 2026-10-20 | Historique des commits, revue des PR GitHub | lots 9 et 13 |

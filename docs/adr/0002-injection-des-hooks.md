@@ -23,6 +23,10 @@ Claude Code accepte au lancement `--settings <fichier ou JSON>` et `--plugin-dir
 - **Événements déclarés** : le plugin déclare 13 événements : ceux du point 1, plus `PostToolUseFailure`, `PermissionDenied` (clôture des demandes refusées ou en échec), `SubagentStart` et `SubagentStop` (suivi des sous-agents).
 - **Mode de permission** : `--permission-mode` n'est passé que si l'utilisateur choisit un mode au lancement ; sinon Claude Code applique le `defaultMode` du profil. Le mode « par défaut » s'écrit `manual` en ligne de commande et revient `default` dans les hooks.
 
+### Amendement du 2026-10-20 (ADR 0005)
+
+- Le plugin déclare aussi **`PreCompact`** : c'est le seul signal d'une compaction en cours (environ 26 s sans transcript ni `UserPromptSubmit`, prototype n° 5, Q4). Il alimente l'indicateur d'activité de la vue conversation ; il ne change pas le statut de la session.
+
 ## Ce que le prototype n° 1 doit confirmer
 
 - Les hooks du plugin s'exécutent **en plus** de ceux de l'utilisateur (peon-ping sonne toujours). La documentation des hooks l'indique (les hooks des différents niveaux de réglages et des plugins s'additionnent) ; reste à le constater.
