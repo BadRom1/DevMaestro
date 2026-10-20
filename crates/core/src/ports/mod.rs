@@ -49,6 +49,87 @@ pub trait TranscriptSource {
 
     /// Résumé du transcript de ce `session_id`, s'il existe.
     fn past_session(&self, profile: &Profile, session_id: &str) -> Option<PastSession>;
+
+    /// Chemin du transcript de ce `session_id`, s'il existe (recherche par
+    /// nom de fichier, sans rien lire).
+    fn transcript_path(&self, profile: &Profile, session_id: &str) -> Option<PathBuf>;
+}
+
+/// Position de lecture d'un fichier suivi (lecture incrémentale par
+/// décalage, jamais par date de modification).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TailPos {
+    /// Octets déjà lus.
+    pub offset: u64,
+    /// Début de la ligne en cours (pas encore terminée par un saut de ligne).
+    pub partial: Vec<u8>,
+    /// Ligne en cours trop longue : ignorée jusqu'au prochain saut de ligne.
+    pub skipping: bool,
+    /// Identité du fichier lu (`dev`, `ino`) : un fichier remplacé (même
+    /// plus long) est relu depuis le début.
+    pub file_id: Option<(u64, u64)>,
+}
+
+/// Une ligne complète lue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailLine {
+    /// Décalage de son début dans le fichier.
+    pub offset: u64,
+    /// Longueur en octets **sur le disque** (sans le saut de ligne).
+    pub len: u64,
+    /// Texte (octets non UTF-8 remplacés).
+    pub text: String,
+}
+
+/// Lignes complètes lues depuis la dernière position.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TailRead {
+    /// Lignes complètes, dans l'ordre.
+    pub lines: Vec<TailLine>,
+    /// Lignes de plus de [`crate::domain::conversation::MAX_LINE_BYTES`]
+    /// ignorées.
+    pub oversized: u64,
+    /// Lecture arrêtée après [`TAIL_BATCH_BYTES`] : la suite au prochain appel.
+    pub more: bool,
+}
+
+/// Octets lus au plus par appel à [`TranscriptFollower::read_new`] (la
+/// lecture initiale d'un gros transcript se fait par lots).
+pub const TAIL_BATCH_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Suivi en direct des transcripts (vue conversation, ADR 0005), distinct
+/// de la découverte des anciennes sessions. Bloquant : à appeler hors du
+/// runtime. Les chemins sont validés par l'appelant
+/// ([`TranscriptFollower::confine`]) avant toute lecture.
+pub trait TranscriptFollower: Send + Sync {
+    /// Lignes complètes ajoutées depuis `pos` (avancée en conséquence), au
+    /// plus [`TAIL_BATCH_BYTES`] lus (`more` : il en reste). Un fichier
+    /// absent donne une lecture vide ; un fichier dont la taille et
+    /// l'identité n'ont pas changé n'est pas ouvert (`stat` seul).
+    fn read_new(&self, path: &Path, pos: &mut TailPos) -> io::Result<TailRead>;
+    /// Relit des lignes entières d'un même fichier (une seule ouverture) :
+    /// `(décalage, longueur)`, chacune au plus
+    /// [`crate::domain::conversation::MAX_LINE_BYTES`].
+    fn read_lines(&self, path: &Path, lines: &[(u64, u64)]) -> io::Result<Vec<String>>;
+    /// Petit fichier (`.meta.json` d'un sous-agent), au plus `max` octets.
+    fn read_small(&self, path: &Path, max: u64) -> Option<String>;
+    /// Noms des fichiers d'un dossier (vide s'il n'existe pas).
+    fn list_dir(&self, dir: &Path) -> Vec<String>;
+    /// `path` une fois résolu (liens suivis, `~/` développé), s'il reste
+    /// sous `root` (lui aussi résolu) ; un fichier qui n'existe pas encore
+    /// est jugé sur son dossier existant le plus proche (de même pour
+    /// `root`, qui peut ne pas exister encore).
+    fn confine(&self, path: &Path, root: &Path) -> Option<PathBuf>;
+    /// `path` résolu (liens suivis, `~/` développé) jusqu'à son ancêtre
+    /// existant le plus proche, le reste ajouté tel quel.
+    fn resolve(&self, path: &Path) -> Option<PathBuf>;
+    /// Surveille un dossier (sans récursion) ; sans effet s'il l'est déjà ou
+    /// s'il n'existe pas (à redemander plus tard).
+    fn watch(&self, dir: &Path);
+    /// Ne surveille plus ce dossier.
+    fn unwatch(&self, dir: &Path);
+    /// Fonction appelée à chaque changement dans un dossier surveillé.
+    fn set_waker(&self, waker: Box<dyn Fn() + Send + Sync>);
 }
 
 /// Lecture des quotas d'un profil (API d'usage de Claude Code). Bloquant :

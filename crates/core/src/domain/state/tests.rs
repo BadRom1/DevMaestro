@@ -511,7 +511,7 @@ fn unknown_events_change_nothing_but_activity() {
     let fx = apply(
         &mut s,
         &ev(HookKind::Other {
-            name: "PreCompact".into(),
+            name: "Elicitation".into(),
         }),
         t(5),
     );
@@ -687,4 +687,138 @@ fn a_second_frame_never_replaces_the_first_suggestions() {
         panic!("permission attendue");
     };
     assert_eq!(p.suggestions, [json!({"type": "addRules", "n": 1})]);
+}
+
+#[test]
+fn activity_follows_the_hooks() {
+    use crate::domain::activity::ActivityKind as K;
+    let kind = |s: &SessionState| (s.activity().kind, s.activity().tool);
+    let mut s = SessionState::default();
+    assert_eq!(kind(&s), (K::Idle, None));
+    apply(
+        &mut s,
+        &ev(HookKind::SessionStart {
+            source: Some("startup".into()),
+            model: None,
+        }),
+        t(0),
+    );
+    assert_eq!(kind(&s), (K::Idle, None));
+    apply(
+        &mut s,
+        &ev(HookKind::UserPromptSubmit { prompt: None }),
+        t(1),
+    );
+    assert_eq!(kind(&s), (K::Prompt, None));
+    assert_eq!(s.activity().since, Some(t(1)));
+    apply(&mut s, &pre("Bash", bash("ls"), "t1"), t(2));
+    assert_eq!(kind(&s), (K::Tool, Some("Bash".into())));
+    // Demande en attente : `waiting`, depuis son arrivée.
+    apply(&mut s, &perm("Bash", bash("ls")), t(3));
+    assert_eq!(kind(&s), (K::Waiting, Some("Bash".into())));
+    assert_eq!(s.activity().since, Some(t(3)));
+    apply(&mut s, &post("Bash", bash("ls"), Some("t1")), t(4));
+    assert_eq!(kind(&s), (K::Prompt, None));
+    assert_eq!(s.activity().since, Some(t(4)));
+    // Un outil d'un sous-agent ne change pas l'activité principale.
+    let mut sub = pre("Read", json!({}), "t2");
+    sub.common.agent_id = Some("a1".into());
+    apply(&mut s, &sub, t(5));
+    assert_eq!(kind(&s), (K::Prompt, None));
+    assert_eq!(s.activity().since, Some(t(4)));
+    apply(&mut s, &stop(), t(6));
+    assert_eq!(kind(&s), (K::Idle, None));
+    // Compaction : `compacting`, puis retour à l'activité d'avant.
+    apply(
+        &mut s,
+        &ev(HookKind::PreCompact {
+            trigger: Some("manual".into()),
+        }),
+        t(7),
+    );
+    assert_eq!(kind(&s), (K::Compacting, None));
+    // Un hook d'outil n'en sort pas.
+    apply(&mut s, &notif("autre_chose"), t(8));
+    assert_eq!(kind(&s), (K::Compacting, None));
+    apply(
+        &mut s,
+        &ev(HookKind::SessionStart {
+            source: Some("compact".into()),
+            model: None,
+        }),
+        t(9),
+    );
+    assert_eq!(kind(&s), (K::Idle, None));
+    // Compaction automatique en plein tour : Claude reprend ensuite.
+    apply(
+        &mut s,
+        &ev(HookKind::UserPromptSubmit { prompt: None }),
+        t(10),
+    );
+    apply(&mut s, &ev(HookKind::PreCompact { trigger: None }), t(11));
+    apply(
+        &mut s,
+        &ev(HookKind::SessionStart {
+            source: Some("compact".into()),
+            model: None,
+        }),
+        t(12),
+    );
+    assert_eq!(kind(&s), (K::Prompt, None));
+    assert_eq!(s.activity().since, Some(t(10)));
+    // Compaction annulée : le prompt suivant, ou la fin du tour, en sortent.
+    apply(&mut s, &ev(HookKind::PreCompact { trigger: None }), t(20));
+    apply(
+        &mut s,
+        &ev(HookKind::UserPromptSubmit { prompt: None }),
+        t(21),
+    );
+    assert_eq!(kind(&s), (K::Prompt, None));
+    apply(&mut s, &ev(HookKind::PreCompact { trigger: None }), t(22));
+    apply(&mut s, &stop(), t(23));
+    assert_eq!(kind(&s), (K::Idle, None));
+    // Sans aucune fin : bornée par le tic du démon.
+    apply(&mut s, &ev(HookKind::PreCompact { trigger: None }), t(30));
+    assert!(!s.tick(t(30 + 179)));
+    assert_eq!(kind(&s), (K::Compacting, None));
+    assert!(s.tick(t(30 + 180)));
+    assert_eq!(kind(&s), (K::Idle, None));
+    // Fin de session.
+    apply(&mut s, &ev(HookKind::SessionEnd { reason: None }), t(13));
+    assert_eq!(kind(&s), (K::Idle, None));
+}
+
+#[test]
+fn activity_waits_for_running_subagents() {
+    use crate::domain::activity::ActivityKind as K;
+    let mut s = running();
+    apply(
+        &mut s,
+        &ev(HookKind::SubagentStart {
+            agent_id: Some("a1".into()),
+            agent_type: Some("Explore".into()),
+        }),
+        t(1),
+    );
+    apply(&mut s, &stop(), t(2));
+    assert_eq!(s.activity().kind, K::Subagents);
+    apply(
+        &mut s,
+        &ev(HookKind::SubagentStop {
+            agent_id: Some("a1".into()),
+            agent_type: Some("Explore".into()),
+            last_assistant_message: None,
+            agent_transcript_path: None,
+        }),
+        t(3),
+    );
+    assert_eq!(s.activity().kind, K::Idle);
+    // Fin du processus : `idle`.
+    apply(
+        &mut s,
+        &ev(HookKind::UserPromptSubmit { prompt: None }),
+        t(4),
+    );
+    s.process_exited(&ProcessExit::Code(0), t(5));
+    assert_eq!(s.activity().kind, K::Idle);
 }

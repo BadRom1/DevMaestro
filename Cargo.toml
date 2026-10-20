@@ -32,3 +32,7 @@ toml = { version = "1.1.8", default-features = false, features = ["std", "parse"
 # (`cargo search` / `cargo info`). Client bloquant (appelé dans `spawn_blocking`,
 # pas de second runtime), TLS par rustls, sans gzip.
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+# Vue conversation (v0.3, lot 10) : suivi des transcripts (inotify sous Linux).
+# Version vérifiée sur crates.io le 2026-10-20 (`cargo info`, API crates.io :
+# dernière stable 8.2.0, la 9.0 est encore en rc). Sans les dépendances macOS.
+notify = { version = "8.2.0", default-features = false }

@@ -154,6 +154,7 @@
 use serde_json::{Map, Value};
 use time::{Duration, OffsetDateTime};
 
+use super::activity::{Activity, ActivityKind};
 use super::hooks::{HookEvent, HookKind, ToolCall};
 use super::session::{
     ASK_USER_QUESTION, Pending, PermissionMode, PermissionPending, QuestionPending, SessionStatus,
@@ -164,6 +165,11 @@ use super::subagents::{SubagentChange, Subagents, parse_task_notifications};
 /// Délai pendant lequel une notification d'attente arrivée après la clôture
 /// d'une demande du même genre est ignorée.
 pub const RECENT_RESOLUTION_WINDOW: Duration = Duration::seconds(2);
+
+/// Une compaction sans `SessionStart` `compact` ni prompt ni fin de tour
+/// cesse d'être affichée au bout de ce délai (évalué par [`SessionState::tick`] ;
+/// une compaction mesurée dure environ 26 s, prototype n° 5, Q4).
+pub const COMPACTION_TIMEOUT: Duration = Duration::minutes(3);
 
 /// Nombre maximal de `PreToolUse` gardés pour retrouver un `tool_use_id`.
 const MAX_SEEN_TOOL_USES: usize = 64;
@@ -260,6 +266,11 @@ pub struct SessionState {
     /// `background_tasks` (connu ou non) : la session reste retenue jusqu'au
     /// `Stop` suivant.
     listed_running: bool,
+    /// Activité de la conversation principale (voir [`super::activity`]),
+    /// sans l'attente d'une demande (ajoutée par [`SessionState::activity`]).
+    doing: Activity,
+    /// Activité d'avant la compaction en cours, rendue à sa fin.
+    before_compact: Option<Activity>,
 }
 
 impl SessionState {
@@ -268,6 +279,103 @@ impl SessionState {
         match self.pending.last() {
             Some(r) => SessionStatus::Waiting(r.pending.kind()),
             None => self.activity.clone(),
+        }
+    }
+
+    /// Activité courante (ADR 0005) : `waiting` tant qu'une demande attend
+    /// (depuis la plus récente), sinon celle dérivée des hooks.
+    pub fn activity(&self) -> Activity {
+        match self.pending.last() {
+            Some(r) => Activity {
+                kind: ActivityKind::Waiting,
+                tool: r.pending.tool_name().map(str::to_owned),
+                since: Some(r.since),
+            },
+            None => self.doing.clone(),
+        }
+    }
+
+    /// Activité de repos : `subagents` si un sous-agent tourne ou retient la
+    /// session, `idle` sinon.
+    fn rest_activity(&mut self, now: OffsetDateTime) {
+        let kind = if self.subagents.running_count() > 0 || self.held || self.listed_running {
+            ActivityKind::Subagents
+        } else {
+            ActivityKind::Idle
+        };
+        self.doing.set(kind, None, now);
+    }
+
+    /// Met à jour l'activité après un événement (voir [`super::activity`]).
+    fn update_activity(&mut self, event: &HookEvent, now: OffsetDateTime) {
+        if self.is_stopped() {
+            self.before_compact = None;
+            self.doing.set(ActivityKind::Idle, None, now);
+            return;
+        }
+        let main = event.common.agent_id.is_none();
+        match &event.kind {
+            HookKind::SessionStart { source, .. } if source.as_deref() == Some("compact") => {
+                match self.before_compact.take() {
+                    Some(previous) => self.doing = previous,
+                    None if self.doing.kind == ActivityKind::Compacting => self.rest_activity(now),
+                    None => {}
+                }
+            }
+            HookKind::SessionStart { .. } => {
+                self.before_compact = None;
+                self.rest_activity(now);
+            }
+            HookKind::PreCompact { .. } => {
+                if self.doing.kind != ActivityKind::Compacting {
+                    self.before_compact = Some(self.doing.clone());
+                }
+                self.doing.set(ActivityKind::Compacting, None, now);
+            }
+            // Compaction annulée ou échouée : le prompt suivant, ou la fin du
+            // tour principal, en sortent (pas de `SessionStart` `compact`).
+            HookKind::UserPromptSubmit { .. } => {
+                self.before_compact = None;
+                self.doing.set(ActivityKind::Prompt, None, now)
+            }
+            HookKind::Stop { .. } | HookKind::StopFailure
+                if self.doing.kind == ActivityKind::Compacting =>
+            {
+                self.before_compact = None;
+                self.rest_activity(now)
+            }
+            _ if self.doing.kind == ActivityKind::Compacting => {}
+            HookKind::PreToolUse(call) if main => {
+                self.doing
+                    .set(ActivityKind::Tool, Some(call.tool_name.clone()), now)
+            }
+            HookKind::PostToolUseFailure {
+                is_interrupt: true, ..
+            } if main => self.rest_activity(now),
+            HookKind::PostToolUse(_)
+            | HookKind::PostToolUseFailure { .. }
+            | HookKind::PermissionDenied { .. }
+                if main =>
+            {
+                self.doing.set(ActivityKind::Prompt, None, now)
+            }
+            HookKind::Stop { .. } | HookKind::StopFailure => self.rest_activity(now),
+            HookKind::Notification {
+                notification_type, ..
+            } if notification_type.as_deref() == Some("idle_prompt")
+                && self.doing.kind != ActivityKind::Subagents =>
+            {
+                self.rest_activity(now)
+            }
+            _ => {}
+        }
+        self.settle_subagents(now);
+    }
+
+    /// `subagents` → `idle` quand plus rien ne retient la session.
+    fn settle_subagents(&mut self, now: OffsetDateTime) {
+        if self.doing.kind == ActivityKind::Subagents {
+            self.rest_activity(now);
         }
     }
 
@@ -296,6 +404,25 @@ impl SessionState {
     /// Réévalue l'attente des sous-agents à `now` (délai de grâce de la
     /// `task-notification`) : vrai si la session vient de passer `Idle`.
     pub fn tick(&mut self, now: OffsetDateTime) -> bool {
+        let before = self.doing.kind;
+        let idle = self.tick_held(now);
+        // Compaction sans fin vue (annulée, ou `SessionStart` perdu) : bornée.
+        if self.doing.kind == ActivityKind::Compacting
+            && self
+                .doing
+                .since
+                .is_some_and(|t| now - t >= COMPACTION_TIMEOUT)
+        {
+            match self.before_compact.take() {
+                Some(previous) if previous.kind != ActivityKind::Prompt => self.doing = previous,
+                _ => self.rest_activity(now),
+            }
+        }
+        self.settle_subagents(now);
+        idle || before != self.doing.kind
+    }
+
+    fn tick_held(&mut self, now: OffsetDateTime) -> bool {
         if self.held
             && self.activity == SessionStatus::Running
             && !self.listed_running
@@ -650,6 +777,8 @@ impl SessionState {
         self.subagents.on_session_end(now);
         self.end_turn(activity, now, &mut fx);
         self.possibly_stale = false;
+        self.before_compact = None;
+        self.doing.set(ActivityKind::Idle, None, now);
         if was_waiting {
             fx.push(Effect::ClearWaiting);
         }
@@ -853,11 +982,12 @@ pub fn apply_tracked(state: &mut SessionState, event: &HookEvent, now: OffsetDat
                 now,
             );
         }
-        HookKind::Other { .. } => {}
+        HookKind::PreCompact { .. } | HookKind::Other { .. } => {}
     }
     // Délai de grâce de la `task-notification` écoulé : la session n'est
     // plus retenue (évalué à chaque événement, et par le tic du démon).
-    state.tick(now);
+    state.tick_held(now);
+    state.update_activity(event, now);
 
     if state.pending.is_empty() {
         state.possibly_stale = false;

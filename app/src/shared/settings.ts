@@ -68,6 +68,17 @@ export interface AppSettings {
 export interface UiSettings {
   /** Taille de toute l'interface, en pour cent (un des `ZOOM_STEPS`), appliquée par le processus principal. */
   zoom: number
+  /** Onglet ouvert par défaut dans le volet d'une session (v0.3, lot 11) ; « Terminal » tant que l'utilisateur n'a pas choisi. */
+  sessionTab: SessionTab
+}
+
+/** Onglets proposés comme onglet par défaut d'une session. */
+export type SessionTab = 'terminal' | 'conversation'
+export const SESSION_TABS: readonly SessionTab[] = ['terminal', 'conversation']
+export const DEFAULT_SESSION_TAB: SessionTab = 'terminal'
+
+function isSessionTab(v: unknown): v is SessionTab {
+  return (SESSION_TABS as readonly unknown[]).includes(v)
 }
 
 /** Paliers de la taille de l'interface (pour cent), du plus petit au plus grand. */
@@ -140,7 +151,7 @@ export interface SettingsPatch {
     branchPrefix?: string
     notifyIntegrated?: boolean
   }
-  ui?: { zoom?: number }
+  ui?: { zoom?: number; sessionTab?: SessionTab }
 }
 
 export const MAX_PROJECT_PROFILES = 500
@@ -161,7 +172,7 @@ export function defaultSettings(): AppSettings {
     profileLabels: {},
     view: 'projet',
     worktrees: { location: 'sibling', projectLocations: {}, branchPrefix: '', notifyIntegrated: true },
-    ui: { zoom: DEFAULT_ZOOM },
+    ui: { zoom: DEFAULT_ZOOM, sessionTab: DEFAULT_SESSION_TAB },
   }
 }
 
@@ -402,7 +413,10 @@ export function normalizeSettings(raw: unknown): AppSettings {
     profileLabels: labelsFrom(raw.profileLabels),
     view: (MAIN_VIEWS as readonly unknown[]).includes(raw.view) ? (raw.view as MainView) : d.view,
     worktrees: worktreesFrom(raw.worktrees),
-    ui: { zoom: isObj(raw.ui) ? snapZoom(raw.ui.zoom) : DEFAULT_ZOOM },
+    ui: {
+      zoom: isObj(raw.ui) ? snapZoom(raw.ui.zoom) : DEFAULT_ZOOM,
+      sessionTab: isObj(raw.ui) && isSessionTab(raw.ui.sessionTab) ? raw.ui.sessionTab : DEFAULT_SESSION_TAB,
+    },
   }
 }
 
@@ -476,12 +490,16 @@ export function validatePatch(raw: unknown): SettingsPatch {
 function uiPatch(v: unknown): NonNullable<SettingsPatch['ui']> {
   if (!isObj(v)) throw new SettingsError('« ui » doit être un objet')
   for (const k of Object.keys(v)) {
-    if (k !== 'zoom') throw new SettingsError(`réglage inconnu : ui.${k}`)
+    if (k !== 'zoom' && k !== 'sessionTab') throw new SettingsError(`réglage inconnu : ui.${k}`)
   }
   const out: NonNullable<SettingsPatch['ui']> = {}
   if (v.zoom !== undefined) {
     if (!isZoomStep(v.zoom)) throw new SettingsError(`« ui.zoom » doit valoir ${ZOOM_STEPS.join(', ')} (pour cent)`)
     out.zoom = v.zoom
+  }
+  if (v.sessionTab !== undefined) {
+    if (!isSessionTab(v.sessionTab)) throw new SettingsError(`« ui.sessionTab » doit valoir ${SESSION_TABS.join(' ou ')}`)
+    out.sessionTab = v.sessionTab
   }
   return out
 }

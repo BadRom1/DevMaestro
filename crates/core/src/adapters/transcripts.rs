@@ -253,6 +253,10 @@ impl TranscriptSource for FsTranscriptSource {
     fn past_session(&self, profile: &Profile, session_id: &str) -> Option<PastSession> {
         read_transcript(&find_transcript(&profile.config_dir, session_id)?).ok()
     }
+
+    fn transcript_path(&self, profile: &Profile, session_id: &str) -> Option<PathBuf> {
+        find_transcript(&profile.config_dir, session_id)
+    }
 }
 
 #[cfg(test)]

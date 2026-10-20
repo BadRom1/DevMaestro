@@ -81,8 +81,13 @@ export interface RenderedMarkdown {
   highlighted: boolean
 }
 
-/** Rendu sûr et sommaire (titres de niveau 1 à 4, identifiants uniques). */
-export function renderMarkdown(src: string): RenderedMarkdown {
+/**
+ * Rendu sûr et sommaire (titres de niveau 1 à 4, identifiants uniques).
+ * `idPrefix` : préfixe des identifiants des titres, pour plusieurs documents
+ * dans une même page (vue conversation) ; caractères hors `[A-Za-z0-9_-]` remplacés.
+ */
+export function renderMarkdown(src: string, opts: { idPrefix?: string } = {}): RenderedMarkdown {
+  const prefix = opts.idPrefix ? `${opts.idPrefix.replace(/[^A-Za-z0-9_-]/g, '-')}-` : ''
   const highlighted = withinHighlightLimits(src)
   const md = highlighted ? mdColored : mdPlain
   const env = {}
@@ -103,8 +108,8 @@ export function renderMarkdown(src: string): RenderedMarkdown {
     const base = slugify(text)
     // Identifiant libre : un titre « A-1 » ne doit pas prendre celui du second « A ».
     let n = used.get(base) ?? 0
-    let id = `h-${n ? `${base}-${n}` : base}`
-    while (taken.has(id)) id = `h-${base}-${++n}`
+    let id = `${prefix}h-${n ? `${base}-${n}` : base}`
+    while (taken.has(id)) id = `${prefix}h-${base}-${++n}`
     used.set(base, n + 1)
     taken.add(id)
     t.attrSet('id', id)

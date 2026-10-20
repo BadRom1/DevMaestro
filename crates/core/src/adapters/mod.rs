@@ -9,6 +9,7 @@ pub mod git_worktrees;
 pub mod profiles;
 pub mod pty;
 pub mod sqlite;
+pub mod transcript_follow;
 pub mod transcripts;
 pub mod usage_api;
 
@@ -20,5 +21,6 @@ pub use git_worktrees::GitWorktrees;
 pub use profiles::{FsProfileSource, discover_profiles};
 pub use pty::NativePty;
 pub use sqlite::SqliteStore;
+pub use transcript_follow::FsTranscriptFollower;
 pub use transcripts::{FsTranscriptSource, list_past_sessions};
 pub use usage_api::UsageApi;

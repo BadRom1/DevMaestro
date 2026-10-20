@@ -37,6 +37,8 @@ pub const HOOK_EVENTS: &[&str] = &[
     "SessionEnd",
     "SubagentStart",
     "SubagentStop",
+    // Seul signal d'une compaction en cours (ADR 0005, ADR 0002 amendé).
+    "PreCompact",
 ];
 
 /// Événements dont le matcher porte sur le nom de l'outil : `*` = tous.

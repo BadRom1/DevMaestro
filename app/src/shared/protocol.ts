@@ -143,6 +143,21 @@ export interface Session {
    * supprimé. Absent avec un démon plus ancien, `null` hors dépôt.
    */
   project_common_dir?: string | null
+  /**
+   * Activité dérivée des hooks (v0.3, lot 10) : « Claude écrit », outil,
+   * sous-agents, compaction. Absent avec un démon plus ancien.
+   */
+  activity?: SessionActivity | null
+}
+
+export type ActivityKind = 'idle' | 'prompt' | 'tool' | 'subagents' | 'compacting' | 'waiting'
+
+export interface SessionActivity {
+  kind: ActivityKind
+  /** Nom de l'outil en cours (`kind: "tool"`). */
+  tool?: string | null
+  /** Début de l'activité (ISO 8601). */
+  since?: string | null
 }
 
 /* ---------- Worktrees (v0.2, lot 6) ---------- */
@@ -490,6 +505,168 @@ export interface Subagent {
   transcript_path: string | null
 }
 
+/* ---------- Vue conversation (v0.3, lots 10 à 12, ADR 0005) ---------- */
+
+/** Champs communs à toutes les entrées normalisées par le démon. */
+export interface EntryBase {
+  /** Identifiant stable : un `upsert` du même `uid` remplace l'entrée. */
+  uid: string
+  ts: string | null
+  /** Numéro du segment (`/clear` en ouvre un nouveau). */
+  segment: number
+  /** Entrée d'un sous-agent (lue par `conversation.subagent`). */
+  agent_id?: string | null
+}
+
+export type PromptSource = 'typed' | 'queued' | 'suggestion' | 'system' | 'sdk'
+
+export interface PromptEntry extends EntryBase {
+  kind: 'prompt'
+  text: string
+  source: PromptSource | string
+  /** Collages extraits ; `text` les remplace par le repère `[collage <id>]`. */
+  pasted?: { id: string; text: string }[] | null
+  /**
+   * `promptId` du transcript (celui du `UserPromptSubmit`). Limite : le front
+   * ne connaît pas encore celui du prompt qu'il envoie (`sessions.sendPrompt`
+   * ne le rend pas) ; il rapproche son envoi par le texte.
+   */
+  prompt_id?: string | null
+  truncated?: boolean | null
+}
+
+export interface TextEntry extends EntryBase {
+  kind: 'text'
+  markdown: string
+  truncated?: boolean | null
+}
+
+/** Repère seul : le contenu des réflexions n'est jamais conservé. */
+export interface ThinkingEntry extends EntryBase {
+  kind: 'thinking'
+}
+
+export type ToolResultStatus = 'ok' | 'error' | 'interrupted'
+
+export interface ToolResult {
+  status: ToolResultStatus | string
+  text: string
+  truncated?: boolean | null
+  /**
+   * Hunks d'un `Edit` / `Write` (depuis `structuredPatch`) : forme `DiffHunk`
+   * du protocole, ou forme brute de Claude Code (`oldStart`, `lines: ["+…"]`),
+   * lue avec tolérance (`patchHunks`).
+   */
+  patch?: unknown
+}
+
+export interface ToolEntry extends EntryBase {
+  kind: 'tool'
+  tool_use_id: string
+  name: string
+  summary: string
+  input: unknown
+  /** Entrée coupée par le démon (64 Kio) : `conversation.full` avec `part: "input"`. */
+  input_truncated?: boolean | null
+  /** Absent tant que l'outil n'a pas rendu son résultat. */
+  result?: ToolResult | null
+}
+
+export interface QuestionEntry extends EntryBase {
+  kind: 'question'
+  tool_use_id: string
+  /** Questions d'`AskUserQuestion` (forme de Claude Code : `question`, `header`, `options`, `multiSelect`). */
+  questions: unknown
+  /** Réponses choisies (question → libellé ou texte libre) ; absent tant que la question est ouverte. */
+  answers?: unknown
+}
+
+export interface SubagentEntry extends EntryBase {
+  kind: 'subagent'
+  tool_use_id: string
+  /**
+   * Agent **lancé** par cet appel (`null` tant qu'il n'est pas connu) : pas le
+   * fil qui porte l'entrée, contrairement aux autres genres.
+   */
+  agent_id: string | null
+  /** Sous-agent lancé par un sous-agent : l'agent dont le fichier porte l'entrée. */
+  parent_agent_id?: string | null
+  agent_type: string | null
+  description: string | null
+  status: SubagentStatus | string | null
+}
+
+export interface NotificationEntry extends EntryBase {
+  kind: 'notification'
+  task_id: string | null
+  status: string | null
+  summary: string | null
+  truncated?: boolean | null
+}
+
+export interface CompactionEntry extends EntryBase {
+  kind: 'compaction'
+  trigger: string | null
+  pre_tokens: number | null
+  post_tokens: number | null
+  summary: string | null
+  truncated?: boolean | null
+}
+
+export interface CommandEntry extends EntryBase {
+  kind: 'command'
+  /** `/compact`, `/model`… ; mode bash de la TUI : `!`. */
+  name: string
+  args: string | null
+  output: string | null
+  truncated?: boolean | null
+}
+
+export interface ErrorEntry extends EntryBase {
+  kind: 'error'
+  message: string
+  truncated?: boolean | null
+}
+
+export interface UnknownEntry extends EntryBase {
+  kind: 'unknown'
+  type: string | null
+  subtype: string | null
+}
+
+export type ConversationEntry =
+  | PromptEntry
+  | TextEntry
+  | ThinkingEntry
+  | ToolEntry
+  | QuestionEntry
+  | SubagentEntry
+  | NotificationEntry
+  | CompactionEntry
+  | CommandEntry
+  | ErrorEntry
+  | UnknownEntry
+
+export type EntryKind = ConversationEntry['kind']
+
+export interface ConversationSegment {
+  segment: number
+  claude_session_id: string | null
+  reason: 'start' | 'clear' | 'resume' | string
+  started_at: string | null
+}
+
+export interface ConversationPage {
+  segments: ConversationSegment[]
+  /** Ordre chronologique ; les `limit` plus récentes avant `before`. */
+  entries: ConversationEntry[]
+  has_more: boolean
+  invalid_lines?: number | null
+}
+
+export type FullPart = 'input' | 'result' | 'text'
+export const FULL_PARTS: readonly FullPart[] = ['input', 'result', 'text']
+
 export type PermissionDecision = 'allow' | 'allow_always' | 'deny'
 /** Modes que l'app sait demander (`sessions.setMode`). */
 export type SettableMode = 'default' | 'acceptEdits' | 'plan' | 'auto'
@@ -580,6 +757,17 @@ export interface Methods {
   'transcripts.unhide': { params: { profile: string; claude_session_id: string }; result: { hidden: boolean } }
   /** Worktrees d'un dépôt connu (`root` : racine donnée par `projects.resolve`). */
   'worktrees.list': { params: { root: string }; result: WorktreesList }
+  /** Conversation de la session (lot 10) : les `limit` entrées les plus récentes avant `before`. */
+  'conversation.get': { params: { id: string; before?: string; limit?: number }; result: ConversationPage }
+  /** Même forme, pour le fichier d'un sous-agent. */
+  'conversation.subagent': {
+    params: { id: string; agent_id: string; before?: string; limit?: number }
+    result: ConversationPage
+  }
+  /** Contenu entier d'une entrée tronquée (4 Mio au plus). */
+  'conversation.full': { params: { id: string; uid: string; part: FullPart }; result: { text: string; truncated?: boolean } }
+  /** Prompt envoyé à la session (lot 12) : tapé ou collé, puis Entrée. */
+  'sessions.sendPrompt': { params: { id: string; text: string }; result: unknown }
   'worktrees.remove': {
     params: { root: string; path: string; delete_branch: boolean; force: boolean }
     result: WorktreeRemoved
@@ -620,6 +808,10 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'sessions.subagent',
   'worktrees.list',
   'worktrees.remove',
+  'conversation.get',
+  'conversation.subagent',
+  'conversation.full',
+  'sessions.sendPrompt',
 ]
 
 /** Codes d'erreur JSON-RPC du démon (protocole § 3). */
@@ -656,3 +848,11 @@ export type Notification =
   | { method: 'session.subagents_changed'; params: { id: string; agents: Subagent[] } }
   /** Les worktrees d'un dépôt ont changé (création, suppression, intégration, modifications). */
   | { method: 'project.worktrees_changed'; params: { root: string } }
+  /**
+   * Conversation d'une session (lot 10), regroupée toutes les 100 ms : un
+   * `upsert` d'un `uid` connu remplace l'entrée ; `segment_started` : `/clear`.
+   */
+  | {
+      method: 'conversation.changed'
+      params: { id: string; upserts: ConversationEntry[]; segment_started?: ConversationSegment | null }
+    }

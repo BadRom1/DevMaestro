@@ -14,6 +14,7 @@ import {
   MAX_THEME_IMPORT,
   PALETTE_NAMES,
   SCHEMES,
+  SESSION_TABS,
   THEME_TOKENS,
   ZOOM_STEPS,
   checkProfileLabel,
@@ -21,6 +22,7 @@ import {
   profileLabel,
   stepZoom,
   type SchemeTheme,
+  type SessionTab,
   type ThemeImport,
   type ThemeMode,
   type ThemeToken,
@@ -253,6 +255,34 @@ function TextSize() {
   )
 }
 
+const SESSION_TAB_LABELS: Record<SessionTab, string> = { terminal: 'Terminal', conversation: 'Conversation' }
+
+/** « Onglet par défaut d'une session » : celui ouvert en arrivant sur une session. */
+function SessionTabField() {
+  const { settings, update } = useSettings()
+  return (
+    <div className="field">
+      <label className="lbl" htmlFor="st-session-tab">
+        Onglet par défaut d’une session
+      </label>
+      <div className="row-inline">
+        <select
+          id="st-session-tab"
+          value={settings.ui.sessionTab}
+          onChange={(e) => update({ ui: { sessionTab: e.target.value as SessionTab } })}
+        >
+          {SESSION_TABS.map((t) => (
+            <option key={t} value={t}>
+              {SESSION_TAB_LABELS[t]}
+            </option>
+          ))}
+        </select>
+        <span className="hint">Onglet ouvert en arrivant sur une session ; les autres restent à un clic.</span>
+      </div>
+    </div>
+  )
+}
+
 type Parsed = { ok: true; theme: ThemeImport } | { ok: false; error: string } | null
 
 /**
@@ -421,6 +451,7 @@ function Appearance({ scheme }: { scheme: Scheme }) {
       <div className="mb">
         {importing && <ThemeImportPanel onDone={(m) => closeImport(m)} onCancel={() => closeImport(null)} />}
         <TextSize />
+        <SessionTabField />
         <div className="field">
           <span className="lbl" id="st-mode">
             Mode

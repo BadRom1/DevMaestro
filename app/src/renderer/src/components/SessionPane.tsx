@@ -39,13 +39,14 @@ import { DiffView, useSessionDiff } from './DiffView'
 import { FilesView } from './FilesView'
 import { CommitsView } from './CommitsView'
 import { AgentsView } from './Subagents'
+import { ConversationView } from './ConversationView'
 import { runningCount, runningLabel } from '../state/subagents'
 import { ForgetConfirm } from './ForgetConfirm'
 import { ColorBar, ColorPicker, RenameField } from './SessionIdentity'
 import { sortFiles } from '../state/diff'
 import type { DiffFile } from '../../../shared/protocol'
 
-type Tab = 'terminal' | 'diff' | 'commits' | 'files' | 'agents'
+type Tab = 'conversation' | 'terminal' | 'diff' | 'commits' | 'files' | 'agents'
 
 const NO_FILES: readonly DiffFile[] = []
 
@@ -405,7 +406,17 @@ export function SessionPane({
    * prend le focus, sauf si l'utilisateur tape (terminal ou champ).
    */
   const dock = useRequestDock(session?.id ?? null, keys, () => typingElsewhere(termHost.current))
-  const [tab, setTab] = useState<Tab>('terminal')
+  const { settings } = useSettings()
+  /** Onglet ouvert au départ : réglage « Onglet par défaut d'une session » (Terminal tant qu'il n'est pas choisi). */
+  const [tab, setTab] = useState<Tab>(() => settings.ui.sessionTab)
+  /**
+   * Conversations déjà ouvertes : la vue reste montée (masquée) quand on change
+   * d'onglet, pour garder le fil, sa position et les volets dépliés.
+   */
+  const [convOpened, setConvOpened] = useState<string | null>(null)
+  useEffect(() => {
+    if (tab === 'conversation' && session && convOpened !== session.id) setConvOpened(session.id)
+  }, [tab, session?.id])
   /** Fichier à montrer dans le diff (« Voir le diff » depuis l'onglet Fichiers). */
   const [diffFocus, setDiffFocus] = useState<{ sessionId: string; path: string; n: number } | null>(null)
   /** Extrait à montrer dans l'onglet Fichiers (clic dans la liste de la revue). */
@@ -422,7 +433,11 @@ export function SessionPane({
   useEffect(() => {
     if ((tab === 'diff' || tab === 'files') && session && !diffOpened.has(session.id)) setDiffOpened((s) => new Set(s).add(session.id))
   }, [tab, session?.id])
-  const diff = useSessionDiff(session?.id ?? null, diffSeq, tab !== 'terminal' || (!!session && diffOpened.has(session.id)))
+  const diff = useSessionDiff(
+    session?.id ?? null,
+    diffSeq,
+    (tab !== 'terminal' && tab !== 'conversation') || (!!session && diffOpened.has(session.id)),
+  )
   const fileCount = diff.summary?.files.length ?? null
   /** Liste du diff dans l'ordre de l'onglet Diff : la revue part dans le même ordre d'où qu'on l'envoie. */
   const reviewFiles = useMemo(() => (diff.summary ? sortFiles(diff.summary.files) : NO_FILES), [diff.summary])
@@ -435,6 +450,7 @@ export function SessionPane({
     document.getElementById(`${tabsId}-terminal`)?.focus()
   }
   const tabs = [
+    ['conversation', 'Conversation'],
     ['terminal', 'Terminal'],
     ['diff', 'Diff'],
     ['commits', 'Commits'],
@@ -502,7 +518,7 @@ export function SessionPane({
             }}
           >
             {l}
-            {k === 'terminal' && pending.length > 0 && (
+            {(k === 'terminal' || k === 'conversation') && pending.length > 0 && (
               <span className="badge wait" aria-label={`${pending.length} à répondre`}>
                 {pending.length}
               </span>
@@ -554,6 +570,24 @@ export function SessionPane({
           emptyText="Choisis une session à gauche, ou lance-en une nouvelle."
         />
         </div>
+        {session && (tab === 'conversation' || convOpened === session.id) && (
+          <div
+            className="diff-layer conv-layer"
+            role="tabpanel"
+            id={`${tabsId}-conversation-panel`}
+            aria-labelledby={`${tabsId}-conversation`}
+            hidden={tab !== 'conversation'}
+          >
+            <ViewBoundary key={session.id} label="Conversation">
+              <ConversationView key={session.id} session={session} onLink={onLink} hidden={tab !== 'conversation'} />
+            </ViewBoundary>
+          </div>
+        )}
+        {!session && tab === 'conversation' && (
+          <div className="diff-layer" role="tabpanel" id={`${tabsId}-conversation-panel`} aria-labelledby={`${tabsId}-conversation`}>
+            <p className="empty">Choisis une session pour lire sa conversation.</p>
+          </div>
+        )}
         {tab === 'diff' && (
           <div className="diff-layer" role="tabpanel" id={`${tabsId}-diff-panel`} aria-labelledby={`${tabsId}-diff`}>
             {session ? (

@@ -20,6 +20,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
 mod commits;
+mod conversation;
 mod subagents;
 mod worktrees;
 
@@ -42,8 +43,8 @@ use crate::ports::{
 };
 use crate::protocol::error_code;
 use crate::protocol::json::{
-    effect_json, metrics_json, past_session_json, pending_request_json, profile_json, status_json,
-    time_json,
+    activity_json, effect_json, metrics_json, past_session_json, pending_request_json,
+    profile_json, status_json, time_json,
 };
 
 /// Taille par défaut d'un terminal quand le client n'en donne pas.
@@ -234,6 +235,8 @@ pub struct Deps {
     pub diff: Box<dyn crate::ports::DiffSource>,
     pub files: Box<dyn crate::ports::FileAccess>,
     pub worktrees: Box<dyn crate::ports::WorktreeGit>,
+    /// Suivi en direct des transcripts (vue conversation).
+    pub follower: Box<dyn crate::ports::TranscriptFollower>,
 }
 
 /// Événement diffusé aux connexions. Léger : une connexion lente regroupe
@@ -256,6 +259,9 @@ pub enum Event {
     /// Les worktrees d'un projet ont changé (`project.worktrees_changed`,
     /// racine du projet).
     WorktreesChanged(PathBuf),
+    /// La conversation d'une session a changé (`conversation.changed`,
+    /// calculée par connexion depuis sa révision au moment d'envoyer).
+    ConversationChanged(Uuid),
 }
 
 /// Anti-rebond du recalcul du diff d'une session.
@@ -305,6 +311,36 @@ pub struct ReviewToSend {
     pub instruction: &'static str,
     /// Texte à coller (au plus [`crate::domain::diff::MAX_REVIEW_BYTES`]).
     pub text: String,
+}
+
+/// Prompt prêt à écrire (`sessions.sendPrompt`).
+#[derive(Debug)]
+pub struct PromptToSend {
+    pub id: Uuid,
+    pub input: mpsc::Sender<Vec<u8>>,
+    pub lock: PtyLock,
+    /// Texte nettoyé (caractères de contrôle retirés sauf `\n` et `\t`,
+    /// fins de ligne `\r\n` / `\r` ramenées à `\n`, blancs de bord retirés).
+    pub text: String,
+    /// Collé en *bracketed paste* (multiligne, tabulation, `\` final, ou long) ;
+    /// sinon tapé.
+    pub paste: bool,
+}
+
+/// Taille maximale d'un prompt envoyé (256 Kio).
+pub const MAX_PROMPT_BYTES: usize = 256 * 1024;
+/// Un prompt d'une ligne de moins de ce nombre de caractères est tapé.
+pub const TYPED_PROMPT_CHARS: usize = 2000;
+
+/// Prompt nettoyé : fins de ligne normalisées, caractères de contrôle
+/// retirés (sauf saut de ligne et tabulation), blancs de bord retirés.
+pub fn clean_prompt(raw: &str) -> String {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let kept: String = normalized
+        .chars()
+        .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
+        .collect();
+    kept.trim().to_owned()
 }
 
 /// Âge maximal de la liste réutilisée par `sessions.diffFile` et
@@ -525,6 +561,14 @@ pub struct Daemon {
     repo_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     /// Worktrees en cours de suppression : aucun lancement ni reprise dedans.
     removing: Mutex<std::collections::HashSet<PathBuf>>,
+    /// Conversations suivies (vue conversation), chacune sous son verrou.
+    conversations: Mutex<HashMap<Uuid, Arc<Mutex<conversation::ConvState>>>>,
+    /// Actions déposées par les hooks pour la pompe des conversations.
+    conv_actions: Mutex<HashMap<Uuid, Vec<conversation::ConvAction>>>,
+    /// Réveil de la pompe des conversations.
+    conv_wake: tokio::sync::Notify,
+    /// Plus grande révision d'une conversation oubliée.
+    conv_rev_floor: AtomicU64,
 }
 
 /// Liste des fichiers d'un dépôt, quand, pour quelle empreinte du diff et
@@ -737,6 +781,7 @@ impl Entry {
             "model": self.model,
             "mode": s.state.permission_mode.as_ref().map(|m| m.as_str()),
             "status": status_json(&s.state.status()),
+            "activity": activity_json(&s.state.activity()),
             "pending": s.state.pending().iter()
                 .map(|r| pending_request_json(r, self.answerable(r.id)))
                 .collect::<Vec<_>>(),
@@ -857,6 +902,10 @@ impl Daemon {
             worktree_watch: Mutex::new(HashMap::new()),
             repo_locks: Mutex::new(HashMap::new()),
             removing: Mutex::new(std::collections::HashSet::new()),
+            conversations: Mutex::new(HashMap::new()),
+            conv_actions: Mutex::new(HashMap::new()),
+            conv_wake: tokio::sync::Notify::new(),
+            conv_rev_floor: AtomicU64::new(0),
         })
     }
 
@@ -1529,6 +1578,7 @@ impl Daemon {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(id);
+        self.drop_conversation(id);
         info!("session {id} oubliée (retirée du registre et de la base, transcript masqué)");
         let _ = self.events.send(Event::Removed(*id));
         Ok(json!({"forgotten": true}))
@@ -1628,17 +1678,28 @@ impl Daemon {
         &self,
         id: &Uuid,
     ) -> Result<(PathBuf, mpsc::Sender<Vec<u8>>, PtyLock), RpcError> {
+        self.input_target(
+            id,
+            "la session ne tourne pas : la reprendre pour lui envoyer la revue",
+        )
+    }
+
+    /// Session à qui écrire une revue ou un prompt (`not_running` : message
+    /// si elle ne tourne pas).
+    fn input_target(
+        &self,
+        id: &Uuid,
+        not_running: &str,
+    ) -> Result<(PathBuf, mpsc::Sender<Vec<u8>>, PtyLock), RpcError> {
         let reg = self.lock();
         let e = reg
             .sessions
             .get(id)
             .ok_or_else(|| RpcError::unknown_session(id))?;
-        let run = e.run.as_ref().ok_or_else(|| {
-            RpcError::new(
-                error_code::INVALID_STATE,
-                "la session ne tourne pas : la reprendre pour lui envoyer la revue",
-            )
-        })?;
+        let run = e
+            .run
+            .as_ref()
+            .ok_or_else(|| RpcError::new(error_code::INVALID_STATE, not_running))?;
         if matches!(e.session.state.status(), SessionStatus::Waiting(_))
             || !e.session.state.pending().is_empty()
         {
@@ -1655,14 +1716,56 @@ impl Daemon {
     /// aucune demande apparue pendant la préparation (lecture du disque,
     /// `git`). Mêmes erreurs que [`Self::review_target`].
     pub fn recheck_review(&self, review: &ReviewToSend) -> Result<(), RpcError> {
-        let (_, input, _) = self.review_target(&review.id)?;
-        if !input.same_channel(&review.input) {
+        self.recheck_input(&review.id, &review.input)
+    }
+
+    /// Même processus, toujours en vie, aucune demande ouverte.
+    pub fn recheck_input(
+        &self,
+        id: &Uuid,
+        expected: &mpsc::Sender<Vec<u8>>,
+    ) -> Result<(), RpcError> {
+        let (_, input, _) = self.input_target(id, "la session ne tourne plus")?;
+        if !input.same_channel(expected) {
             return Err(RpcError::new(
                 error_code::INVALID_STATE,
                 "la session ne tourne plus",
             ));
         }
         Ok(())
+    }
+
+    /// `sessions.sendPrompt {id, text}` (v0.3, lot 12) : nettoie et valide le
+    /// prompt, et renvoie de quoi l'écrire (voir [`PromptToSend`]).
+    pub fn prepare_prompt(&self, params: &Value) -> Result<PromptToSend, RpcError> {
+        let id = session_id_param(params)?;
+        let raw = opt_str(params, "text")?.ok_or_else(|| RpcError::params("« text » manquant"))?;
+        let text = clean_prompt(&raw);
+        if text.is_empty() {
+            return Err(RpcError::params("prompt vide"));
+        }
+        if text.len() > MAX_PROMPT_BYTES {
+            return Err(RpcError::params(format!(
+                "prompt trop long : {} octets, {MAX_PROMPT_BYTES} au plus",
+                text.len()
+            )));
+        }
+        let (_, input, lock) = self.input_target(
+            &id,
+            "la session ne tourne pas : la reprendre pour lui écrire",
+        )?;
+        // Un `\` final ferait passer la TUI à la ligne au lieu d'envoyer.
+        let paste = text.contains('\n')
+            || text.contains('\t')
+            || text.ends_with('\\')
+            || text.chars().count() >= TYPED_PROMPT_CHARS;
+        Ok(PromptToSend {
+            id,
+            input,
+            lock,
+            text,
+            paste,
+        })
     }
 
     /// `sessions.sendReview` : valide la revue (commentaires de diff et de
@@ -3256,6 +3359,8 @@ impl Daemon {
             });
         }
         self.emit_effects(id, &applied.effects);
+        // Vue conversation : une action pour la pompe (aucune lecture ici).
+        self.conversation_hook(id, &event, now);
         if applied.subagents == SubagentChange::Structural {
             self.persist_subagents(entry);
         }

@@ -24,8 +24,8 @@ use uuid::Uuid;
 use super::log::warning;
 use super::peer::Peer;
 use super::supervisor::{
-    DEFAULT_SIZE, Daemon, Event, ReviewToSend, RpcError, SetModeError, opt_str, session_id_param,
-    size_param,
+    DEFAULT_SIZE, Daemon, Event, PromptToSend, ReviewToSend, RpcError, SetModeError, opt_str,
+    session_id_param, size_param,
 };
 use super::terminal::{Chunk, Snapshot, Terminal};
 use crate::protocol::{
@@ -55,8 +55,13 @@ pub fn snapshot_json(s: &Snapshot) -> Value {
     })
 }
 
+/// Révision de chaque conversation lue par une connexion : ses
+/// `conversation.changed` partent de là.
+type ConvCursors = Arc<std::sync::Mutex<HashMap<Uuid, u64>>>;
+
 struct Connection {
     daemon: Arc<Daemon>,
+    conv_cursors: ConvCursors,
     out: mpsc::Sender<Frame>,
     subscriptions: HashMap<Uuid, JoinHandle<()>>,
     notifications: Option<JoinHandle<()>>,
@@ -87,6 +92,7 @@ pub async fn handle_connection(daemon: Arc<Daemon>, stream: UnixStream) {
     });
     let mut conn = Connection {
         daemon,
+        conv_cursors: ConvCursors::default(),
         out,
         subscriptions: HashMap::new(),
         notifications: None,
@@ -260,7 +266,8 @@ impl Connection {
         let rx = self.daemon.events();
         let out = self.out.clone();
         let daemon = self.daemon.clone();
-        self.notifications = Some(tokio::spawn(forward_events(daemon, rx, out)));
+        let cursors = self.conv_cursors.clone();
+        self.notifications = Some(tokio::spawn(forward_events(daemon, rx, out, cursors)));
     }
 
     async fn on_rpc(&mut self, bytes: &[u8]) {
@@ -487,6 +494,38 @@ impl Connection {
             }
             "transcripts.hide" => d.set_transcript_hidden(params, true)?,
             "transcripts.unhide" => d.set_transcript_hidden(params, false)?,
+            "conversation.get" | "conversation.subagent" => {
+                // Lecture du transcript : hors du runtime.
+                let (d2, params, sub) =
+                    (d.clone(), params.clone(), method == "conversation.subagent");
+                let (value, sid, rev) =
+                    tokio::task::spawn_blocking(move || d2.conversation_get(&params, sub))
+                        .await
+                        .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??;
+                // Les `conversation.changed` de cette connexion partent de
+                // l'instantané (une révision déjà posée est gardée : rien ne
+                // se perd, au pire un doublon).
+                self.conv_cursors
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .entry(sid)
+                    .or_insert(rev);
+                // Un changement survenu entre l'instantané et la pose de la
+                // révision a pu partir sans elle : on refait un envoi.
+                d.conversation_touched(sid);
+                value
+            }
+            "conversation.full" => {
+                let (d2, params) = (d.clone(), params.clone());
+                tokio::task::spawn_blocking(move || d2.conversation_full(&params))
+                    .await
+                    .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
+            }
+            "sessions.sendPrompt" => {
+                let prompt = d.prepare_prompt(params)?;
+                send_prompt(&d, &prompt).await?;
+                json!({"sent": true})
+            }
             "sessions.subagents" => d.subagents_list(params)?,
             "sessions.subagent" => d.subagent_detail(params)?,
             "sessions.answerPermission" => d.answer_permission(params)?,
@@ -558,13 +597,55 @@ async fn send_review(d: &Arc<Daemon>, review: &ReviewToSend) -> Result<(), RpcEr
         .await
         .map_err(gone)?;
     tokio::time::sleep(REVIEW_STEP).await;
-    let mut paste = b"\x1b[200~".to_vec();
-    paste.extend_from_slice(review.text.as_bytes());
-    paste.extend_from_slice(b"\x1b[201~");
-    tx.send(paste).await.map_err(gone)?;
+    tx.send(bracketed_paste(&review.text)).await.map_err(gone)?;
     tokio::time::sleep(REVIEW_STEP).await;
-    tx.send(b"\r".to_vec()).await.map_err(gone)?;
-    Ok(())
+    enter_if_still_free(d, &review.id, tx).await
+}
+
+/// Texte encadré pour un *bracketed paste* (le texte ne contient plus de
+/// caractère de contrôle autre que saut de ligne et tabulation : il ne peut
+/// pas fermer l'encadrement).
+fn bracketed_paste(text: &str) -> Vec<u8> {
+    let mut paste = b"\x1b[200~".to_vec();
+    paste.extend_from_slice(text.as_bytes());
+    paste.extend_from_slice(b"\x1b[201~");
+    paste
+}
+
+/// Entrée finale, après une dernière vérification : une demande apparue
+/// pendant l'envoi (Claude a ouvert une permission) fait abandonner sans
+/// Entrée, avec la même erreur que le refus initial — le texte reste alors
+/// dans le champ de la TUI. Risque résiduel : une demande qui s'ouvre entre
+/// cette vérification et la lecture de l'Entrée par la TUI (quelques
+/// millisecondes) ; l'Entrée irait au dialogue.
+async fn enter_if_still_free(
+    d: &Arc<Daemon>,
+    id: &uuid::Uuid,
+    tx: &mpsc::Sender<Vec<u8>>,
+) -> Result<(), RpcError> {
+    d.recheck_input(id, tx)?;
+    tx.send(b"\r".to_vec())
+        .await
+        .map_err(|_| RpcError::new(error_code::INVALID_STATE, "la session ne tourne plus"))
+}
+
+/// Écrit un prompt (`sessions.sendPrompt`) : tapé d'un bloc s'il est court
+/// et sur une ligne, sinon collé en *bracketed paste* ; puis Entrée (règle
+/// du prototype n° 1, Q8, et ADR 0005). Verrou des écritures tenu pendant
+/// tout l'envoi, état revérifié une fois le verrou pris (demande apparue,
+/// processus changé : refus sans rien écrire).
+async fn send_prompt(d: &Arc<Daemon>, p: &PromptToSend) -> Result<(), RpcError> {
+    let _guard = p.lock.lock().await;
+    d.recheck_input(&p.id, &p.input)?;
+    let gone = |_| RpcError::new(error_code::INVALID_STATE, "la session ne tourne plus");
+    let bytes = if p.paste {
+        bracketed_paste(&p.text)
+    } else {
+        p.text.as_bytes().to_vec()
+    };
+    p.input.send(bytes).await.map_err(gone)?;
+    tokio::time::sleep(REVIEW_STEP).await;
+    enter_if_still_free(d, &p.id, &p.input).await
 }
 
 /// Écrit les Shift+Tab d'un `sessions.setMode` accepté. Si l'écriture
@@ -679,6 +760,13 @@ fn queue_event(daemon: &Daemon, queue: &mut VecDeque<Event>, ev: Event) {
     {
         return; // Regroupé : la liste est relue au moment d'envoyer.
     }
+    if let Event::ConversationChanged(id) = &ev
+        && queue
+            .iter()
+            .any(|e| matches!(e, Event::ConversationChanged(other) if other == id))
+    {
+        return; // Regroupé : calculé depuis la révision de la connexion à l'envoi.
+    }
     if let Event::WorktreesChanged(root) = &ev
         && queue
             .iter()
@@ -723,6 +811,13 @@ fn resync_events(daemon: &Daemon, queue: &mut VecDeque<Event>) {
             .into_iter()
             .map(Event::WorktreesChanged),
     );
+    // Les conversations : rien n'est perdu, tout part de la révision de la connexion.
+    queue.extend(
+        daemon
+            .sessions_with_conversation()
+            .into_iter()
+            .map(Event::ConversationChanged),
+    );
     queue.push_back(Event::Quotas);
 }
 
@@ -744,6 +839,8 @@ fn event_frame(daemon: &Daemon, ev: Event) -> Option<Frame> {
         Event::WorktreesChanged(root) => {
             notification("project.worktrees_changed", json!({"root": root}))
         }
+        // Calculée par connexion (voir `forward_events`).
+        Event::ConversationChanged(_) => return None,
     };
     Some(Frame::rpc(&value))
 }
@@ -756,6 +853,7 @@ async fn forward_events(
     daemon: Arc<Daemon>,
     mut rx: broadcast::Receiver<Event>,
     out: mpsc::Sender<Frame>,
+    cursors: ConvCursors,
 ) {
     use broadcast::error::{RecvError, TryRecvError};
     let mut queue: VecDeque<Event> = VecDeque::new();
@@ -779,8 +877,19 @@ async fn forward_events(
         tokio::select! {
             permit = out.reserve() => {
                 let Ok(permit) = permit else { return };
-                if let Some(frame) = queue.pop_front().and_then(|ev| event_frame(&daemon, ev)) {
-                    permit.send(frame);
+                match queue.pop_front() {
+                    Some(Event::ConversationChanged(id)) => {
+                        drop(permit);
+                        if !send_conversation(&daemon, id, &out, &cursors).await {
+                            return;
+                        }
+                    }
+                    Some(ev) => {
+                        if let Some(frame) = event_frame(&daemon, ev) {
+                            permit.send(frame);
+                        }
+                    }
+                    None => {}
                 }
             }
             r = rx.recv() => match r {
@@ -790,4 +899,42 @@ async fn forward_events(
             },
         }
     }
+}
+
+/// `conversation.changed` d'une session pour une connexion qui l'a lue
+/// (`conversation.get`) : tout ce qui a changé depuis sa révision, calculé
+/// hors du runtime. `false` si la connexion est fermée.
+async fn send_conversation(
+    daemon: &Arc<Daemon>,
+    id: Uuid,
+    out: &mpsc::Sender<Frame>,
+    cursors: &ConvCursors,
+) -> bool {
+    let Some(cursor) = cursors
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .copied()
+    else {
+        return true; // Conversation pas lue par ce client.
+    };
+    let d = daemon.clone();
+    let Ok(Some((frames, rev))) =
+        tokio::task::spawn_blocking(move || d.conversation_changes(&id, cursor)).await
+    else {
+        return true;
+    };
+    for f in frames {
+        if out.send(Frame::rpc(&f)).await.is_err() {
+            return false;
+        }
+    }
+    if let Some(c) = cursors
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(&id)
+    {
+        *c = (*c).max(rev);
+    }
+    true
 }

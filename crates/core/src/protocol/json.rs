@@ -189,6 +189,133 @@ pub fn past_session_json(s: &PastSession) -> Value {
     })
 }
 
+/// Activité d'une session (ADR 0005) : `{kind, tool?, since}`.
+pub fn activity_json(a: &crate::domain::Activity) -> Value {
+    let mut v = json!({"kind": a.kind.as_str(), "since": time_json(a.since)});
+    if let Some(t) = &a.tool {
+        v["tool"] = json!(t);
+    }
+    v
+}
+
+/// Segment d'une conversation : `{segment, claude_session_id, reason, started_at}`.
+pub fn segment_json(s: &crate::domain::conversation::Segment) -> Value {
+    json!({
+        "segment": s.segment,
+        "claude_session_id": s.claude_session_id,
+        "reason": s.reason,
+        "started_at": s.started_at,
+    })
+}
+
+/// Entrée d'une conversation (`docs/protocole.md`, « Entrée de conversation »).
+pub fn conversation_entry_json(e: &crate::domain::conversation::Entry) -> Value {
+    use crate::domain::conversation::Body;
+    let mut v = json!({
+        "uid": e.uid,
+        "kind": e.body.kind(),
+        "ts": e.ts,
+        "segment": e.segment,
+    });
+    if let Some(a) = &e.agent_id {
+        v["agent_id"] = json!(a);
+    }
+    let fields = match &e.body {
+        Body::Prompt {
+            text,
+            source,
+            pasted,
+            prompt_id,
+        } => json!({
+            "text": text,
+            "source": source,
+            "prompt_id": prompt_id,
+            "pasted": pasted.iter().map(|p| json!({"id": p.id, "text": p.text})).collect::<Vec<_>>(),
+            "truncated": e.truncated,
+        }),
+        Body::Text { markdown } => json!({"markdown": markdown, "truncated": e.truncated}),
+        Body::Thinking => json!({}),
+        Body::Tool {
+            tool_use_id,
+            name,
+            summary,
+            input,
+            input_truncated,
+            result,
+        } => {
+            let mut t = json!({
+                "tool_use_id": tool_use_id,
+                "name": name,
+                "summary": summary,
+                "input": input,
+                "input_truncated": input_truncated,
+            });
+            if let Some(r) = result {
+                let mut rj = json!({"status": r.status, "text": r.text, "truncated": r.truncated});
+                if let Some(p) = &r.patch {
+                    rj["patch"] = p.clone();
+                }
+                t["result"] = rj;
+            }
+            t
+        }
+        Body::Question {
+            tool_use_id,
+            questions,
+            answers,
+        } => json!({"tool_use_id": tool_use_id, "questions": questions, "answers": answers}),
+        Body::Subagent {
+            tool_use_id,
+            agent_id,
+            agent_type,
+            description,
+            status,
+        } => {
+            // `agent_id` : l'agent **lancé** (une entrée `subagent` se range
+            // dans le fil de son parent) ; l'agent dont le fichier porte
+            // l'entrée (sous-agent imbriqué) passe dans `parent_agent_id`.
+            if let Some(owner) = &e.agent_id {
+                v["parent_agent_id"] = json!(owner);
+            }
+            json!({
+                "tool_use_id": tool_use_id,
+                "agent_id": agent_id,
+                "agent_type": agent_type,
+                "description": description,
+                "status": status,
+            })
+        }
+        Body::Notification {
+            task_id,
+            status,
+            summary,
+        } => {
+            json!({"task_id": task_id, "status": status, "summary": summary, "truncated": e.truncated})
+        }
+        Body::Compaction {
+            trigger,
+            pre_tokens,
+            post_tokens,
+            summary,
+        } => json!({
+            "trigger": trigger,
+            "pre_tokens": pre_tokens,
+            "post_tokens": post_tokens,
+            "summary": summary,
+            "truncated": e.truncated,
+        }),
+        Body::Command { name, args, output } => {
+            json!({"name": name, "args": args, "output": output, "truncated": e.truncated})
+        }
+        Body::Error { message } => json!({"message": message, "truncated": e.truncated}),
+        Body::Unknown { kind, subtype } => json!({"type": kind, "subtype": subtype}),
+    };
+    if let (Some(obj), Value::Object(f)) = (v.as_object_mut(), fields) {
+        obj.extend(f);
+    }
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

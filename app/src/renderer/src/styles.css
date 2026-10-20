@@ -640,3 +640,70 @@ tr.cm td { padding: 6px 12px 8px 60px; white-space: normal }
 .app-crash { height: 100%; display: grid; place-content: center; justify-items: start; gap: 12px; padding: 32px; max-width: 720px; margin: 0 auto }
 .app-crash h1 { margin: 0; font-size: 20px }
 .app-crash p { margin: 0; overflow-wrap: anywhere }
+
+/* Vue conversation (v0.3, lot 11) : fil, outils repliables, activité, saisie. Statuts : glyphe et texte, jamais la couleur seule. */
+.conv-layer { grid-template-rows: minmax(0, 1fr); grid-template-columns: minmax(0, 1fr) }
+.conv-layer[hidden] { display: none }
+.cv { display: grid; grid-template-rows: minmax(0, 1fr) auto auto; min-height: 0; height: 100%; position: relative }
+.cv-feed { position: relative; display: grid; min-height: 0 }
+.cv-scroll { position: relative; overflow-y: auto; overflow-x: hidden; min-height: 0; padding: 12px 0 8px; overflow-anchor: none }
+.cv-scroll:focus-visible { outline-offset: -2px }
+.cv-list { position: relative }
+.cv-window { will-change: transform }
+.cv-item { padding: 3px 20px; max-width: 92ch; margin: 0 auto }
+.cv-item > * + * { margin-top: 6px }
+.cv-older { display: flex; justify-content: center; align-items: center; gap: 8px; padding: 4px 0 10px }
+.cv-who { display: flex; align-items: center; gap: 8px; margin-bottom: 3px }
+.cv-prompt { margin-top: 10px; padding: 8px 12px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line) }
+.cv-pending { max-width: calc(92ch - 40px); margin: 10px auto 0; border-style: dashed }
+.cv-ptext { white-space: pre-wrap; overflow-wrap: anywhere }
+.cv-text .cv-md { max-width: none; padding: 2px 0; font-size: 14px }
+.cv-md > :last-child { margin-bottom: 0 }
+.cv-mark { color: var(--muted); font-size: 12.5px; padding: 2px 0 }
+.cv-mark > [aria-hidden="true"] { display: inline-block; width: 16px; text-align: center }
+.cv-notif { color: var(--fg) }
+.cv-unknown { font-style: italic }
+.cv-error { color: var(--err); font-size: 12.5px; border-left: 3px solid var(--err); padding: 2px 8px }
+.cv-tool { border: 1px solid var(--line); border-radius: var(--r); background: var(--panel) }
+.cv-tool.open { background: var(--sunk) }
+.cv-head { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: none; padding: 4px 8px; text-align: left; min-width: 0 }
+.cv-head:hover { background: color-mix(in srgb, var(--accent) 6%, transparent) }
+.cv-caret { color: var(--faint); width: 10px; flex: none }
+.cv-icon { font-family: var(--f-mono); color: var(--muted); width: 16px; text-align: center; flex: none }
+.cv-tname { font-family: var(--f-mono); font-size: 12.5px; font-weight: 600; flex: none }
+.cv-sum { color: var(--muted); font-family: var(--f-mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 }
+.cv-st { flex: none; font-size: 11.5px; color: var(--muted); white-space: nowrap }
+.cv-st.ok { color: var(--done) }
+.cv-st.error { color: var(--err) }
+.cv-st.interrupted { color: var(--wait) }
+.cv-st.running { color: var(--run) }
+.cv-body { padding: 4px 10px 10px 28px; display: grid; gap: 8px; min-width: 0 }
+.cv-sect { display: grid; gap: 3px; min-width: 0 }
+.cv-pre { margin: 0; font-family: var(--f-mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px }
+.cv-pre.err { border-color: var(--err) }
+.cv-diffwrap { overflow-x: auto; max-height: 420px; overflow-y: auto; border: 1px solid var(--line); border-radius: 4px }
+.cv-more { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 2px }
+.cv-paste { margin-top: 6px; border: 1px dashed var(--line-2); border-radius: 4px }
+.cv-question { border: 1px solid var(--line-2); border-left: 3px solid var(--accent); border-radius: var(--r); padding: 8px 12px }
+.cv-q + .cv-q { margin-top: 8px }
+.cv-qtext { margin: 4px 0; font-weight: 600 }
+.cv-opts { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px }
+.cv-opts li { color: var(--muted) }
+.cv-opts li.chosen { color: var(--fg); font-weight: 600 }
+.cv-answer { margin: 4px 0 0 }
+.cv-sep { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin: 12px 0 }
+.cv-sep::before, .cv-sep::after { content: ""; flex: 1; border-top: 1px dashed var(--line-2) }
+.cv-sep.cv-compact { display: block; border: 1px dashed var(--line-2); border-radius: var(--r) }
+.cv-sep.cv-compact::before, .cv-sep.cv-compact::after { content: none }
+.cv-clear { color: var(--fg) }
+.cv-clear::before, .cv-clear::after { border-top-style: solid }
+.cv-thread { border-left: 2px solid var(--line-2); padding-left: 10px; display: grid; gap: 6px }
+.cv-invalid { text-align: center }
+.cv-bottom { position: absolute; right: 20px; bottom: 12px; z-index: 2; box-shadow: 0 2px 8px rgba(0, 0, 0, .25) }
+.cv-activity { min-height: 22px; padding: 2px 20px; font-size: 12.5px; color: var(--muted) }
+.cv-act { display: inline-flex; align-items: center; gap: 6px }
+.cv-composer { padding: 6px 16px 8px; border-top: 1px solid var(--line); display: grid; gap: 4px }
+.cv-input { display: flex; gap: 8px; align-items: flex-end }
+.cv-input textarea { flex: 1; resize: none; min-height: 34px; max-height: 30vh; padding: 6px 10px; border-radius: var(--r); border: 1px solid var(--line-2); background: var(--sunk); line-height: 1.45 }
+.cv-input textarea[aria-disabled="true"] { opacity: .6; cursor: not-allowed }
+.cv-composer > .hint { margin: 0 }

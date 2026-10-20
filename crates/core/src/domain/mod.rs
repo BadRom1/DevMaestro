@@ -1,6 +1,8 @@
 //! Modèle de domaine (architecture § 5) et règles pures.
 
+pub mod activity;
 pub mod commits;
+pub mod conversation;
 pub mod decision;
 pub mod diff;
 pub mod files;
@@ -16,6 +18,7 @@ pub mod subagents;
 pub mod transcript;
 pub mod worktree;
 
+pub use activity::{Activity, ActivityKind};
 pub use hooks::{BackgroundTask, HookCommon, HookEvent, HookKind, HookParseError, ToolCall};
 pub use metrics::{Metrics, ModelInfo, RateLimitWindow, RateLimits};
 pub use profile::Profile;

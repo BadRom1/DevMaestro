@@ -38,10 +38,12 @@ import {
   type LoadState,
 } from './state/subagentsLoad'
 import { resolveScheme } from './state/themeTokens'
+import { forgetComposerMemory } from './components/ConversationView'
 import { applyTheme, systemPrefersLight, terminalTheme, type ThemeMode } from './theme'
 
-/** État gardé des onglets Diff, Fichiers et Commits d'une session oubliée : libéré. */
+/** État gardé des onglets Diff, Fichiers, Commits et Conversation d'une session oubliée : libéré. */
 function forgetViewMemory(id: string): void {
+  forgetComposerMemory(id)
   forgetFilesMemory(id)
   forgetDiffMemory(id)
   forgetCommitsMemory(id)

@@ -4,7 +4,7 @@
  * minimal (identifiants UUID, entiers bornés, énumérations, chaînes de
  * longueur bornée). Les champs inconnus sont retirés. Messages en français.
  */
-import { COMMIT_RANGES, MAX_TITLE, SESSION_COLORS, type MethodName } from '../shared/protocol'
+import { COMMIT_RANGES, FULL_PARTS, MAX_TITLE, SESSION_COLORS, type MethodName } from '../shared/protocol'
 import { ZOOM_DIRECTIONS, type ZoomDirection } from '../shared/settings'
 import { WORKTREE_LOCATIONS, branchNameProblem } from '../shared/worktrees'
 
@@ -14,6 +14,15 @@ export class ValidationError extends Error {
 
 /** Identifiant de sous-agent de Claude Code (« a1dcf2f8a7682d931 ») : pas un UUID. */
 const AGENT_ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/
+
+/**
+ * Identifiant d'une entrée de conversation (`uid`, curseur `before`) : forme
+ * choisie par le démon, non fixée par le contrat ; caractères sûrs, 256 au plus.
+ */
+const ENTRY_UID_RE = /^[A-Za-z0-9_.:#@-]{1,256}$/
+
+/** Prompt envoyé par `sessions.sendPrompt` : 256 Kio d'UTF-8 au plus. */
+export const MAX_PROMPT_BYTES = 256 * 1024
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -62,6 +71,31 @@ function str(o: Obj, k: string, max: number, opts: { nonEmpty?: boolean; codePoi
   const n = opts.codePoints ? [...v].length : v.length
   if (n > max) throw new ValidationError(`« ${k} » est trop long (${max} caractères au plus)`)
   if (opts.nonEmpty && v.trim() === '') throw new ValidationError(`« ${k} » est vide`)
+  return v
+}
+
+function agentId(o: Obj, k: string): string {
+  const a = o[k]
+  if (typeof a !== 'string' || !AGENT_ID_RE.test(a)) throw new ValidationError(`« ${k} » doit être un identifiant de sous-agent`)
+  return a
+}
+
+function entryUid(o: Obj, k: string): string {
+  const v = o[k]
+  if (typeof v !== 'string' || !ENTRY_UID_RE.test(v)) throw new ValidationError(`« ${k} » doit être un identifiant d'entrée`)
+  return v
+}
+
+/** Texte d'un prompt : non vide après nettoyage, 256 Kio d'UTF-8 au plus, sans caractère nul. */
+function promptText(o: Obj, k: string): string {
+  const v = o[k]
+  if (typeof v !== 'string') throw new ValidationError(`« ${k} » doit être une chaîne`)
+  // Borne grossière avant l'encodage (4 octets au plus par point de code UTF-16).
+  if (v.length > MAX_PROMPT_BYTES || new TextEncoder().encode(v).length > MAX_PROMPT_BYTES) {
+    throw new ValidationError(`« ${k} » est trop long (256 Kio au plus)`)
+  }
+  if (v.includes('\0')) throw new ValidationError(`« ${k} » contient un caractère nul`)
+  if (v.trim() === '') throw new ValidationError(`« ${k} » est vide`)
   return v
 }
 
@@ -276,13 +310,30 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
     case 'sessions.subagents':
       out.id = uuid(o, 'id')
       return out
-    case 'sessions.subagent': {
+    case 'sessions.subagent':
       out.id = uuid(o, 'id')
-      const a = o.agent_id
-      if (typeof a !== 'string' || !AGENT_ID_RE.test(a)) throw new ValidationError('« agent_id » doit être un identifiant de sous-agent')
-      out.agent_id = a
+      out.agent_id = agentId(o, 'agent_id')
       return out
-    }
+    case 'conversation.get':
+      out.id = uuid(o, 'id')
+      optional(o, out, 'before', entryUid)
+      optional(o, out, 'limit', (x, k) => int(x, k, 1, 1000))
+      return out
+    case 'conversation.subagent':
+      out.id = uuid(o, 'id')
+      out.agent_id = agentId(o, 'agent_id')
+      optional(o, out, 'before', entryUid)
+      optional(o, out, 'limit', (x, k) => int(x, k, 1, 1000))
+      return out
+    case 'conversation.full':
+      out.id = uuid(o, 'id')
+      out.uid = entryUid(o, 'uid')
+      out.part = oneOf(o, 'part', FULL_PARTS)
+      return out
+    case 'sessions.sendPrompt':
+      out.id = uuid(o, 'id')
+      out.text = promptText(o, 'text')
+      return out
     case 'files.list':
       out.id = uuid(o, 'id')
       // Racine : chemin absent ou vide.

@@ -128,6 +128,12 @@ pub enum HookKind {
         /// `agent_transcript_path` : transcript du sous-agent.
         agent_transcript_path: Option<String>,
     },
+    /// Compaction qui commence (`/compact` ou automatique) : seul signal de
+    /// la compaction en cours (ADR 0005, ADR 0002 amendé).
+    PreCompact {
+        /// `manual` ou `auto`.
+        trigger: Option<String>,
+    },
     /// Événement que le domaine ne connaît pas (encore).
     Other {
         name: String,
@@ -163,6 +169,7 @@ impl HookKind {
             HookKind::SessionEnd { .. } => "SessionEnd",
             HookKind::SubagentStart { .. } => "SubagentStart",
             HookKind::SubagentStop { .. } => "SubagentStop",
+            HookKind::PreCompact { .. } => "PreCompact",
             HookKind::Other { name } => name,
         }
     }
@@ -250,6 +257,9 @@ impl HookEvent {
                 agent_type: str_field(obj, "agent_type"),
                 last_assistant_message: str_field(obj, "last_assistant_message"),
                 agent_transcript_path: str_field(obj, "agent_transcript_path"),
+            },
+            "PreCompact" => HookKind::PreCompact {
+                trigger: str_field(obj, "trigger"),
             },
             _ => HookKind::Other { name },
         };
@@ -360,16 +370,28 @@ mod tests {
     #[test]
     fn unknown_event_is_other() {
         let ev = HookEvent::parse(
-            &format!(r#"{{"session_id":"{SID}","hook_event_name":"PreCompact","trigger":"auto"}}"#),
+            &format!(r#"{{"session_id":"{SID}","hook_event_name":"Elicitation","x":1}}"#),
             None,
         )
         .unwrap();
         assert_eq!(
             ev.kind,
             HookKind::Other {
-                name: "PreCompact".into()
+                name: "Elicitation".into()
             }
         );
+        let ev = HookEvent::parse(
+            &format!(r#"{{"session_id":"{SID}","hook_event_name":"PreCompact","trigger":"auto"}}"#),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            ev.kind,
+            HookKind::PreCompact {
+                trigger: Some("auto".into())
+            }
+        );
+        assert_eq!(ev.kind.name(), "PreCompact");
     }
 
     #[test]

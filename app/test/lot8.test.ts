@@ -31,7 +31,7 @@ import { WHEEL_ZOOM_INTERVAL_MS, WheelZoom } from '../src/renderer/src/state/whe
 
 describe('taille de l’interface : réglage', () => {
   it('par défaut 100 %, paliers de 80 à 200 %', () => {
-    expect(defaultSettings().ui).toEqual({ zoom: 100 })
+    expect(defaultSettings().ui).toEqual({ zoom: 100, sessionTab: 'terminal' })
     expect(ZOOM_STEPS[0]).toBe(80)
     expect(ZOOM_STEPS[ZOOM_STEPS.length - 1]).toBe(200)
     expect([...ZOOM_STEPS].sort((a, b) => a - b)).toEqual([...ZOOM_STEPS])

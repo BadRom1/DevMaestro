@@ -31,8 +31,20 @@
 //!   `Stop` qui les liste en cours. Touche `f` : fin des deux (`SubagentStop`
 //!   avec rapport, `<task-notification>`, `Stop` intermédiaires), jusqu'au
 //!   `Stop` final sans tâche de fond ;
+//! - `/conv`, `/conv-agent`, `/compact`, `/clear` : vue conversation (v0.3,
+//!   lot 10), lignes de transcript réalistes (reprises des fixtures du
+//!   prototype n° 5) écrites au fil des hooks : tour avec `Read` (touche `r`
+//!   pour son résultat) puis `Edit` ; sous-agent Explore en arrière-plan
+//!   (fichier `subagents/agent-<id>.jsonl` et `.meta.json`, touche `f` pour
+//!   sa fin et sa `task-notification`) ; `PreCompact` puis (touche `c`) la
+//!   compaction et `SessionStart` `compact` ; `/clear` : `SessionEnd`, nouvel
+//!   identifiant, nouveau fichier, `SessionStart` `clear` ;
 //! - `/exit` (après un `SessionEnd`), `/crash` (code 3, sans `SessionEnd`),
 //!   `/tetu` (ignore `SIGHUP`).
+//!
+//! Chaque tour ordinaire écrit aussi son prompt, son appel `Bash` et son
+//! résultat, puis « Fait. » dans le transcript, et les hooks portent le vrai
+//! `transcript_path` (`<config>/projects/<cwd encodé>/<session_id>.jsonl`).
 //!
 //! Shift+Tab (`ESC [ Z`) fait tourner le mode comme la TUI de Claude Code
 //! 2.1.303 : `default` → `acceptEdits` → `plan` → `auto` → `default` ; le
@@ -57,6 +69,8 @@ use serde_json::{Value, json};
 
 static WINCH: AtomicBool = AtomicBool::new(false);
 static TOOL_SEQ: AtomicU32 = AtomicU32::new(0);
+/// Lignes de transcript écrites (identifiants `uuid` propres au processus).
+static LINE_SEQ: AtomicU32 = AtomicU32::new(0);
 /// Relais lancés sans attente, pas encore terminés.
 static PENDING_HOOKS: AtomicU32 = AtomicU32::new(0);
 
@@ -260,6 +274,8 @@ enum Answer {
 struct Fake {
     args: Args,
     session_id: String,
+    /// `session_id` courant de Claude Code (change au `/clear`).
+    current: RefCell<String>,
     cwd: String,
     hooks: Value,
     plugin_root: String,
@@ -288,33 +304,99 @@ impl Fake {
     /// sinon `~/.claude`), sauf avec un marqueur de session enfant hérité
     /// (`CLAUDE_CODE_CHILD_SESSION`), qui coupe l'enregistrement.
     fn write_transcript(&self) {
+        // `FAKE_CLAUDE_LATE_TRANSCRIPT` : rien n'est écrit au lancement (le
+        // transcript, et même `projects/`, n'apparaissent qu'au premier tour).
+        if std::env::var_os("FAKE_CLAUDE_LATE_TRANSCRIPT").is_some() {
+            return;
+        }
         if std::env::var_os("CLAUDE_CODE_CHILD_SESSION").is_some() {
             out("Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker\r\n");
             return;
         }
+        // Une ligne d'intendance, comme la première ligne d'un vrai transcript.
+        self.append(json!({"type": "permission-mode", "permissionMode": self.hook_mode()}));
+    }
+
+    /// `<config>/projects/<cwd encodé>` (`CLAUDE_CONFIG_DIR`, sinon `~/.claude`).
+    fn project_dir(&self) -> Option<PathBuf> {
         let config = std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")));
-        let Some(config) = config else { return };
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))?;
         let encoded: String = self
             .cwd
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
             .collect();
-        let dir = config.join("projects").join(encoded);
-        let _ = std::fs::create_dir_all(&dir);
+        Some(config.join("projects").join(encoded))
+    }
+
+    /// Transcript courant (celui que portent les hooks).
+    fn transcript_path(&self) -> PathBuf {
+        let name = format!("{}.jsonl", self.current.borrow());
+        match self.project_dir() {
+            Some(d) => d.join(name),
+            None => PathBuf::from("/tmp/faux").join(name),
+        }
+    }
+
+    /// Ajoute une ligne au transcript courant (`sessionId`, `cwd`,
+    /// `timestamp` et `uuid` posés s'ils manquent), comme Claude Code : une
+    /// seule écriture en ajout.
+    fn append(&self, line: Value) {
+        self.append_to(&self.transcript_path(), line);
+    }
+
+    fn append_to(&self, path: &Path, mut line: Value) {
+        if std::env::var_os("CLAUDE_CODE_CHILD_SESSION").is_some() {
+            return;
+        }
         let now = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_default();
-        let line = json!({"type": "system", "sessionId": self.session_id, "cwd": self.cwd,
-                          "timestamp": now});
+        let obj = line.as_object_mut().expect("ligne objet");
+        obj.entry("sessionId")
+            .or_insert(json!(*self.current.borrow()));
+        obj.entry("cwd").or_insert(json!(self.cwd));
+        obj.entry("timestamp").or_insert(json!(now));
+        if obj
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|t| matches!(t, "user" | "assistant" | "system"))
+        {
+            obj.entry("uuid").or_insert(json!(new_uid()));
+        }
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join(format!("{}.jsonl", self.session_id)))
+            .open(path)
         {
             let _ = f.write_all(format!("{line}\n").as_bytes());
         }
+    }
+
+    /// Prompt tapé, tel que Claude Code l'écrit (`promptSource: "typed"`).
+    fn user_prompt(&self, text: &str, prompt_id: &str) {
+        self.append(
+            json!({"type": "user", "promptSource": "typed", "origin": {"kind": "human"},
+            "promptId": prompt_id, "message": {"role": "user", "content": text}}),
+        );
+    }
+
+    /// Une ligne `assistant` d'un bloc (message `msg`).
+    fn assistant(&self, msg: &str, block: Value) {
+        self.append(json!({"type": "assistant",
+            "message": {"id": msg, "role": "assistant", "content": [block]}}));
+    }
+
+    /// Résultat d'outil (`tool_result` et `toolUseResult`).
+    fn tool_result(&self, tool_use_id: &str, content: &str, tur: Value) {
+        self.append(
+            json!({"type": "user", "toolUseResult": tur, "message": {"role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": content}]}}),
+        );
     }
 
     /// `/hook-perime <mode>` : un hook neutre (`Notification`) qui porte un
@@ -349,9 +431,14 @@ impl Fake {
     }
 
     fn base(&self, event: &str) -> Value {
+        // `FAKE_CLAUDE_FOREIGN_PATH` : un `transcript_path` étranger à la
+        // session (le démon doit l'ignorer).
+        let path = std::env::var_os("FAKE_CLAUDE_FOREIGN_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.transcript_path());
         json!({
-            "session_id": self.session_id,
-            "transcript_path": format!("/tmp/faux/{}.jsonl", self.session_id),
+            "session_id": *self.current.borrow(),
+            "transcript_path": path,
             "cwd": self.cwd,
             "hook_event_name": event,
         })
@@ -696,13 +783,20 @@ impl Fake {
     /// Tour ordinaire : une permission Bash, acceptée par la TUI si l'app ne
     /// répond pas avant [`AUTO_ANSWER`].
     fn turn(&self, keys: &mut Keys, prompt: &str) {
+        let n = TOOL_SEQ.fetch_add(1, Ordering::SeqCst);
+        let prompt_id = format!("prompt-{}-{n}", std::process::id());
+        self.user_prompt(prompt, &prompt_id);
         self.prompt_submit(prompt);
         out(&format!("\x1b[1m●\x1b[0m Réponse à : {prompt}\r\n"));
-        let n = TOOL_SEQ.fetch_add(1, Ordering::SeqCst);
         let tool_use_id = format!("toolu_faux_{n}");
         let input =
             json!({"command": format!("touch /tmp/faux-{n}"), "description": "Fichier vide"});
+        let msg = format!("msg_faux_{n}");
         self.pre_tool("Bash", &input, &tool_use_id);
+        self.assistant(
+            &msg,
+            json!({"type": "tool_use", "id": tool_use_id, "name": "Bash", "input": input}),
+        );
         match self.ask_permission(keys, "Bash", &input, json!([]), 'o', Some(AUTO_ANSWER)) {
             Answer::Tui(true) => {
                 out("  Bash(touch) autorisé\r\n");
@@ -714,6 +808,15 @@ impl Fake {
             }
             _ => out("  Bash(touch) refusé\r\n"),
         }
+        self.tool_result(
+            &tool_use_id,
+            "",
+            json!({"stdout": "", "stderr": "", "interrupted": false}),
+        );
+        self.assistant(
+            &format!("{msg}_fin"),
+            json!({"type": "text", "text": "Fait."}),
+        );
         self.end_turn();
     }
 
@@ -761,6 +864,7 @@ impl Fake {
             let me = Fake {
                 args: Args::default(),
                 session_id: self.session_id.clone(),
+                current: RefCell::new(self.current.borrow().clone()),
                 cwd: self.cwd.clone(),
                 hooks: fake_hooks,
                 plugin_root: self.plugin_root.clone(),
@@ -922,6 +1026,226 @@ impl Fake {
 
 /// Mode `--probe-control <socket> <étiquette>` : se connecte au socket de
 /// contrôle, envoie `hello` et écrit « accepté » ou « refusé ».
+/// `uuid` d'une ligne de transcript, propre au processus.
+fn new_uid() -> String {
+    format!(
+        "u-{}-{}",
+        std::process::id(),
+        LINE_SEQ.fetch_add(1, Ordering::SeqCst)
+    )
+}
+
+impl Fake {
+    /// `/conv` : un tour réaliste repris de la session A du prototype n° 5
+    /// (texte, `Read` puis `Edit`), écrit au fil des hooks comme Claude Code
+    /// (un bloc par ligne, réflexion, texte et appel d'un même message
+    /// ensemble au `PreToolUse`). Touche `r` : le `Read` rend son résultat
+    /// (de quoi voir l'outil sans résultat, puis complété).
+    fn conv(&self, keys: &mut Keys, line: &str) {
+        let n = TOOL_SEQ.fetch_add(1, Ordering::SeqCst);
+        let prompt_id = format!("prompt-{}-{n}", std::process::id());
+        self.user_prompt("Lis calcul.py puis ajoute multiplication.", &prompt_id);
+        self.prompt_submit(line);
+        let msg = format!("msg_conv_{n}_a");
+        let read_id = format!("toolu_conv_read_{n}");
+        let read_input = json!({"file_path": format!("{}/calcul.py", self.cwd)});
+        self.pre_tool("Read", &read_input, &read_id);
+        self.assistant(
+            &msg,
+            json!({"type": "thinking", "thinking": "", "signature": "x"}),
+        );
+        self.assistant(
+            &msg,
+            json!({"type": "text", "text": "ALPHADEBUT Je lis le fichier."}),
+        );
+        self.assistant(
+            &msg,
+            json!({"type": "tool_use", "id": read_id, "name": "Read", "input": read_input}),
+        );
+        out("Read en cours (touche r)\r\n");
+        while !matches!(keys.next(Duration::from_millis(10)), Some(Key::Char('r'))) {}
+        self.post_tool("Read", &read_input, &read_id);
+        self.tool_result(
+            &read_id,
+            "1\tdef addition(a, b):\n2\t    return a + b\n",
+            json!({"type": "text", "file": {"filePath": "calcul.py", "numLines": 2}}),
+        );
+        let msg = format!("msg_conv_{n}_b");
+        let edit_id = format!("toolu_conv_edit_{n}");
+        let edit_input = json!({"file_path": format!("{}/calcul.py", self.cwd),
+            "old_string": "    return a + b\n", "new_string": "    return a + b\n\n\ndef multiplication(a, b):\n    return a * b\n"});
+        self.pre_tool("Edit", &edit_input, &edit_id);
+        self.assistant(
+            &msg,
+            json!({"type": "tool_use", "id": edit_id, "name": "Edit", "input": edit_input}),
+        );
+        self.post_tool("Edit", &edit_input, &edit_id);
+        self.tool_result(
+            &edit_id,
+            "The file calcul.py has been updated successfully.",
+            json!({"filePath": "calcul.py", "structuredPatch": [{"oldStart": 1, "oldLines": 2,
+                "newStart": 1, "newLines": 6, "lines": [" def addition(a, b):", "     return a + b",
+                "+", "+", "+def multiplication(a, b):", "+    return a * b"]}]}),
+        );
+        self.assistant(
+            &format!("msg_conv_{n}_c"),
+            json!({"type": "text", "text": "BETADEBUT Fonction **multiplication** ajoutée."}),
+        );
+        self.end_turn();
+    }
+
+    /// `/conv-agent` : un sous-agent Explore en arrière-plan, comme dans la
+    /// session A : appel `Agent`, `SubagentStart`, fichier
+    /// `<transcript>/subagents/agent-<id>.jsonl` et son `.meta.json`
+    /// (`toolUseId`), résultat `async_launched`, fin du tour, puis touche
+    /// `f` : fin du sous-agent et `<task-notification>`.
+    fn conv_agent(&self, keys: &mut Keys, line: &str) {
+        let n = TOOL_SEQ.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let prompt_id = format!("prompt-{pid}-{n}");
+        let agent = format!("aconv{pid}x{n}");
+        let tool_use_id = format!("toolu_conv_agent_{n}");
+        self.user_prompt("Lance un sous-agent Explore.", &prompt_id);
+        self.prompt_submit(line);
+        let input = json!({"description": "Compter les fichiers", "subagent_type": "Explore",
+            "prompt": "Compte les fichiers .txt.", "run_in_background": true});
+        self.pre_tool("Agent", &input, &tool_use_id);
+        self.assistant(
+            &format!("msg_conv_agent_{n}"),
+            json!({"type": "tool_use", "id": tool_use_id, "name": "Agent", "input": input}),
+        );
+        let dir = self.transcript_path().with_extension("").join("subagents");
+        let file = dir.join(format!("agent-{agent}.jsonl"));
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(
+            dir.join(format!("agent-{agent}.meta.json")),
+            json!({"agentType": "Explore", "description": "Compter les fichiers",
+                "toolUseId": tool_use_id, "spawnDepth": 1, "requestShape": "background"})
+            .to_string(),
+        );
+        let mut start = self.base("SubagentStart");
+        start["agent_id"] = json!(agent);
+        start["agent_type"] = json!("Explore");
+        self.hook("SubagentStart", start);
+        self.append_to(&file, json!({"type": "user", "isSidechain": true, "agentId": agent,
+            "promptId": prompt_id, "message": {"role": "user", "content": "Compte les fichiers .txt."}}));
+        let glob_id = format!("toolu_conv_glob_{n}");
+        self.append_to(
+            &file,
+            json!({"type": "assistant", "isSidechain": true, "agentId": agent,
+            "message": {"id": format!("msg_sub_{n}"), "content": [{"type": "tool_use",
+            "id": glob_id, "name": "Glob", "input": {"pattern": "**/*.txt"}}]}}),
+        );
+        let mut post = self.with_mode("PostToolUse");
+        post["tool_name"] = json!("Agent");
+        post["tool_input"] = input.clone();
+        post["tool_use_id"] = json!(tool_use_id);
+        let response = json!({"isAsync": true, "status": "async_launched", "agentId": agent,
+            "description": "Compter les fichiers", "resolvedModel": "claude-opus-5-5"});
+        post["tool_response"] = response.clone();
+        self.hook("PostToolUse", post);
+        self.tool_result(&tool_use_id, "Async agent launched successfully.", response);
+        self.assistant(
+            &format!("msg_conv_agent_{n}_b"),
+            json!({"type": "text", "text": "Le sous-agent travaille."}),
+        );
+        self.stop_with(&[(agent.as_str(), "Compter les fichiers")]);
+        out("Sous-agent en cours (touche f)\r\n");
+        while !matches!(keys.next(Duration::from_millis(10)), Some(Key::Char('f'))) {}
+        self.append_to(
+            &file,
+            json!({"type": "user", "isSidechain": true, "agentId": agent,
+            "toolUseResult": {"numFiles": 2}, "message": {"content": [{"type": "tool_result",
+            "tool_use_id": glob_id, "content": "a.txt\nb.txt"}]}}),
+        );
+        self.append_to(
+            &file,
+            json!({"type": "assistant", "isSidechain": true, "agentId": agent,
+            "message": {"id": format!("msg_sub_{n}_b"), "content": [{"type": "text",
+            "text": "J'ai trouvé **2** fichiers."}]}}),
+        );
+        let mut stop = self.with_mode("SubagentStop");
+        stop["agent_id"] = json!(agent);
+        stop["agent_type"] = json!("Explore");
+        stop["agent_transcript_path"] = json!(file);
+        stop["last_assistant_message"] = json!("J'ai trouvé 2 fichiers.");
+        stop["background_tasks"] = json!([{"id": agent, "type": "subagent", "status": "running"}]);
+        self.hook("SubagentStop", stop);
+        let notification = format!(
+            "<task-notification>\n<task-id>{agent}</task-id>\n<tool-use-id>{tool_use_id}</tool-use-id>\n\
+             <status>completed</status>\n<summary>Agent \"Compter les fichiers\" finished</summary>\n\
+             </task-notification>"
+        );
+        self.append(json!({"type": "user", "promptSource": "system", "promptId": format!("{prompt_id}-n"),
+            "origin": {"kind": "task-notification"}, "message": {"role": "user", "content": notification}}));
+        self.prompt_submit(&notification);
+        self.assistant(
+            &format!("msg_conv_agent_{n}_c"),
+            json!({"type": "text", "text": "Le sous-agent a trouvé 2 fichiers."}),
+        );
+        self.end_turn();
+    }
+
+    /// `/compact` : `PreCompact`, puis (touche `c`) les lignes de la
+    /// compaction et `SessionStart` `compact` (même fichier, même identifiant).
+    fn compact(&self, keys: &mut Keys) {
+        self.append(json!({"type": "user", "message": {"role": "user", "content": "/compact"}}));
+        let mut ev = self.with_mode("PreCompact");
+        ev["trigger"] = json!("manual");
+        self.hook("PreCompact", ev);
+        out("Compaction… (touche c)\r\n");
+        while !matches!(keys.next(Duration::from_millis(10)), Some(Key::Char('c'))) {}
+        let boundary = new_uid();
+        self.append(
+            json!({"type": "system", "subtype": "compact_boundary", "uuid": boundary,
+            "content": "Conversation compacted", "compactMetadata": {"trigger": "manual",
+            "preTokens": 49233, "postTokens": 18235}}),
+        );
+        self.append(json!({"type": "user", "parentUuid": boundary, "isCompactSummary": true,
+            "isVisibleInTranscriptOnly": true, "message": {"role": "user", "content": "Résumé de la conversation."}}));
+        let cmd = new_uid();
+        self.append(json!({"type": "user", "uuid": cmd, "message": {"role": "user",
+            "content": "<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>"}}));
+        self.append(json!({"type": "user", "parentUuid": cmd, "message": {"role": "user",
+            "content": "<local-command-stdout>\u{1b}[2mCompacted\u{1b}[22m</local-command-stdout>"}}));
+        let mut ev = self.base("SessionStart");
+        ev["source"] = json!("compact");
+        self.hook("SessionStart", ev);
+        out("Compacté.\r\n");
+    }
+
+    /// `/clear` : `SessionEnd` (`clear`), nouvel identifiant et nouveau
+    /// fichier, `SessionStart` (`clear`), comme Claude Code 2.1.304.
+    fn clear(&self) {
+        let mut ev = self.base("SessionEnd");
+        ev["reason"] = json!("clear");
+        self.hook("SessionEnd", ev);
+        let n = TOOL_SEQ.fetch_add(1, Ordering::SeqCst);
+        let new_id = format!(
+            "{:08x}-0000-4000-8000-{:012x}",
+            std::process::id(),
+            n as u64 + 1
+        );
+        *self.current.borrow_mut() = new_id;
+        let mut ev = self.base("SessionStart");
+        ev["source"] = json!("clear");
+        self.hook("SessionStart", ev);
+        self.append(
+            json!({"type": "user", "isMeta": true, "message": {"role": "user",
+            "content": "<local-command-caveat>Caveat</local-command-caveat>"}}),
+        );
+        let cmd = new_uid();
+        self.append(json!({"type": "user", "uuid": cmd, "message": {"role": "user",
+            "content": "<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"}}));
+        self.append(
+            json!({"type": "system", "subtype": "local_command", "parentUuid": cmd,
+            "content": "<local-command-stdout></local-command-stdout>",
+            "commandRun": {"command": "clear", "args": ""}}),
+        );
+        out("Conversation effacée.\r\n");
+    }
+}
+
 fn probe_control(socket: &str, label: &str) -> ! {
     use std::os::unix::net::UnixStream;
     let accepted = (|| -> Option<bool> {
@@ -1019,6 +1343,7 @@ fn main() {
         cwd: std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default(),
+        current: RefCell::new(session_id.clone()),
         session_id,
         hooks,
         plugin_root,
@@ -1178,6 +1503,7 @@ fn main() {
                         let me = Fake {
                             args: Args::default(),
                             session_id: fake.session_id.clone(),
+                            current: RefCell::new(fake.current.borrow().clone()),
                             cwd: fake.cwd.clone(),
                             hooks: fake.hooks.clone(),
                             plugin_root: fake.plugin_root.clone(),
@@ -1198,6 +1524,10 @@ fn main() {
                         out("pied retiré\r\n");
                     }
                     "/ask" => fake.ask(&mut keys, text),
+                    "/conv" => fake.conv(&mut keys, text),
+                    "/conv-agent" => fake.conv_agent(&mut keys, text),
+                    "/compact" => fake.compact(&mut keys),
+                    "/clear" => fake.clear(),
                     "/agents" => fake.agents(&mut keys, text),
                     t if t == "/perm" || t.starts_with("/perm ") => fake.perm(&mut keys, t),
                     "" => {}

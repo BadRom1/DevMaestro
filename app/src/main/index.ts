@@ -276,7 +276,8 @@ client.on('notification', (n) => {
     n.method === 'quotas.updated' ||
     n.method === 'session.diff_changed' ||
     n.method === 'session.subagents_changed' ||
-    n.method === 'project.worktrees_changed'
+    n.method === 'project.worktrees_changed' ||
+    n.method === 'conversation.changed'
   ) {
     toPage(Ipc.notification, { method: n.method, params: n.params })
   }
