@@ -262,6 +262,49 @@ describe('rendu de chaque type d’entrée', () => {
     expect(body.textContent).toContain('Fichier modifié')
   })
 
+  it('/clear masqué par le démon (hidden_by_segment) : pas affiché, le séparateur reste ; absent : affiché', async () => {
+    const clear = (hidden?: boolean): ConversationEntry => ({
+      ...base,
+      uid: 'clr',
+      kind: 'command',
+      segment: 1,
+      name: '/clear',
+      args: null,
+      output: null,
+      ...(hidden === undefined ? {} : { hidden_by_segment: hidden }),
+    })
+    handler = () => pageOf([t('a', 'Avant'), clear(true), t('b', 'Après', 1)])
+    await render(session(), 100_000)
+    expect(items().map((i) => i.dataset.uid)).toEqual(['a', 'b'])
+    expect(host!.querySelector('.cv-clear')?.textContent).toBe('Nouvelle conversation (/clear)')
+    act(() => root!.unmount())
+    root = null
+    handler = () => pageOf([t('a', 'Avant'), clear(), t('b', 'Après', 1)])
+    await render(session(), 100_000)
+    expect(items().map((i) => i.dataset.uid)).toEqual(['a', 'clr', 'b'])
+  })
+
+  it('fil d’un sous-agent : sa consigne (prompt système) vient de Claude, pas de « Toi »', async () => {
+    const s = session()
+    const agent = 'a413854c8aebbc6cf'
+    handler = (m) =>
+      m === 'conversation.subagent'
+        ? pageOf([
+            { ...base, uid: 'sp', kind: 'prompt', text: 'Compte les fichiers .txt', source: 'system', agent_id: agent },
+            { ...t('s1', 'Je compte.'), agent_id: agent },
+          ])
+        : pageOf(allKinds())
+    await render(s, 100_000)
+    act(() => button('Explore')!.click())
+    await flush()
+    const who = host!.querySelector('.cv-thread .cv-who')!
+    expect(who.textContent).toContain('Claude (agent parent)')
+    expect(who.textContent).not.toContain('Toi')
+    expect(who.textContent).not.toContain('système')
+    // Fil principal : le prompt tapé reste « Toi ».
+    expect(host!.querySelector('[data-uid="p"] .cv-who')?.textContent).toContain('Toi')
+  })
+
   it('sous-agent replié, chargé à l’ouverture puis tenu à jour', async () => {
     const s = session()
     handler = (m) =>
@@ -376,6 +419,66 @@ describe('virtualisation et défilement', () => {
     expect(items().at(-1)!.dataset.uid).toBe('neuf2')
   })
 
+  it('collée en bas : la fenêtre rétrécit (zone des demandes), notre défilement rattrapé ne décolle pas le fil', async () => {
+    handler = () => pageOf(many(500))
+    await render(session())
+    const max = () => feed().scrollHeight - feed().clientHeight
+    expect(feed().scrollTop).toBe(max())
+    try {
+      // La zone des demandes s'ouvre : 200 px de moins ; l'événement de défilement arrive après, sans remontée.
+      viewportNow = VIEWPORT - 200
+      act(() => feed().dispatchEvent(new Event('scroll')))
+      expect(feed().scrollTop).toBe(max())
+      expect(button('Aller en bas')).toBeUndefined()
+      // Une vraie remontée, elle, décolle le fil.
+      scrollTo(feed().scrollTop - 300)
+      expect(button('Aller en bas')).toBeDefined()
+    } finally {
+      viewportNow = VIEWPORT
+    }
+  })
+
+  it('collée en bas : chaque changement de taille du fil y recolle, tant que l’utilisateur n’a pas remonté', async () => {
+    type Cb = () => void
+    const made: { cb: Cb; targets: Set<Element> }[] = []
+    class FakeRO {
+      targets = new Set<Element>()
+      constructor(readonly cb: Cb) {
+        made.push(this)
+      }
+      observe(t: Element) {
+        this.targets.add(t)
+      }
+      unobserve(t: Element) {
+        this.targets.delete(t)
+      }
+      disconnect() {
+        this.targets.clear()
+      }
+    }
+    const g = globalThis as { ResizeObserver?: unknown }
+    const before = g.ResizeObserver
+    g.ResizeObserver = FakeRO
+    try {
+      handler = () => pageOf(many(500))
+      await render(session())
+      const ro = made.find((m) => m.targets.has(feed()))!
+      expect(ro).toBeDefined()
+      const max = () => feed().scrollHeight - feed().clientHeight
+      viewportNow = VIEWPORT - 250
+      act(() => ro.cb())
+      expect(feed().scrollTop).toBe(max())
+      // Remonté : un changement de taille ne le ramène plus en bas.
+      scrollTo(1000)
+      viewportNow = VIEWPORT - 100
+      act(() => ro.cb())
+      expect(feed().scrollTop).toBe(1000)
+    } finally {
+      g.ResizeObserver = before
+      viewportNow = VIEWPORT
+    }
+  })
+
   it('en haut du fil : les entrées plus anciennes sont demandées avec le curseur, la ligne lue reste en place', async () => {
     const s = session()
     handler = (_m, p) => (p.before ? pageOf(many(200, 0), false) : pageOf(many(300, 200), true))
@@ -437,6 +540,9 @@ describe('saisie', () => {
     key('Enter')
     expect(calls.some((c) => c.method === 'sessions.sendPrompt')).toBe(false)
     expect(host!.textContent).toContain('Réponds d’abord à la demande en attente')
+    // La phrase est dans l'aide seulement ; le champ n'affiche qu'un rappel court (pas la même phrase deux fois).
+    expect(ta.placeholder).toBe('Demande en attente')
+    expect(host!.querySelector('.cv-composer .hint')!.textContent).toContain('Réponds d’abord à la demande en attente')
     expect(host!.textContent).toContain('Si la TUI affiche un sondage ou une suggestion, réponds dans le terminal.')
     act(() => root!.unmount())
     root = null

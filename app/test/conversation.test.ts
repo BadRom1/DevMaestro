@@ -150,6 +150,39 @@ describe('fusion des notifications', () => {
     expect(upsertEntries(base, [{ kind: 'text' } as unknown as ConversationEntry])).toBe(base)
   })
 
+  it('ordre du lot du démon : une entrée nouvelle se range avant l’entrée connue qui la suit dans le lot', () => {
+    const cmd: ConversationEntry = { uid: 'cmd', kind: 'command', ts: null, segment: 0, name: '/compact', args: null, output: null }
+    const compaction: ConversationEntry = { uid: 'cp', kind: 'compaction', ts: null, segment: 0, trigger: 'manual', pre_tokens: 1, post_tokens: 1, summary: null }
+    let s = ready([text('a', 'un'), compaction])
+    s = conversationReducer(s, { type: 'changed', upserts: [cmd, { ...compaction, summary: 'résumé' }] })
+    expect(s.entries.map((e) => e.uid)).toEqual(['a', 'cmd', 'cp'])
+    expect((s.entries[2] as { summary: string }).summary).toBe('résumé')
+  })
+
+  it('ordre du lot : une ancienne entrée mise à jour dans le lot ne fait pas insérer la nouvelle au milieu du fil', () => {
+    const base = [text('a', 'un'), text('b', 'deux'), text('c', 'trois')]
+    expect(upsertEntries(base, [text('a', 'un bis'), text('x', 'x')]).map((e) => e.uid)).toEqual(['a', 'b', 'c', 'x'])
+    // Plusieurs nouvelles devant une connue : rangées devant elle, dans l'ordre du lot ; rien de connu après : à la fin.
+    expect(upsertEntries(base, [text('x', 'x'), text('y', 'y'), text('c', 'trois'), text('z', 'z')]).map((e) => e.uid)).toEqual([
+      'a',
+      'b',
+      'x',
+      'y',
+      'c',
+      'z',
+    ])
+    expect(upsertEntries(base, [text('m', 'm'), text('n', 'n')]).map((e) => e.uid)).toEqual(['a', 'b', 'c', 'm', 'n'])
+  })
+
+  it('pendant le chargement : la commande arrivée avec sa compaction se range aussi avant elle', () => {
+    const cmd: ConversationEntry = { uid: 'cmd', kind: 'command', ts: null, segment: 0, name: '/compact', args: null, output: null }
+    const compaction: ConversationEntry = { uid: 'cp', kind: 'compaction', ts: null, segment: 0, trigger: 'auto', pre_tokens: 1, post_tokens: 1, summary: null }
+    let s = conversationReducer(initialConversation, { type: 'reload' })
+    s = conversationReducer(s, { type: 'changed', upserts: [cmd, compaction] })
+    s = conversationReducer(s, { type: 'loaded', page: page([text('a', 'un'), compaction]) })
+    expect(s.entries.map((e) => e.uid)).toEqual(['a', 'cmd', 'cp'])
+  })
+
   it('résultat d’outil qui complète l’appel : même place dans le fil', () => {
     const tool: ConversationEntry = { uid: 't', kind: 'tool', ts: null, segment: 0, tool_use_id: 'x', name: 'Bash', summary: 'ls', input: {} }
     let s = ready([prompt('p', 'go'), tool, text('z', 'fin')])

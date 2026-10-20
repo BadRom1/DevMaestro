@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { validateParams, ValidationError } from '../src/main/validate'
 import type { DiffFile, FileDiff } from '../src/shared/protocol'
-import { anchorKey, baseLabel, countLabel, diffRows, skippedCount, sortFiles, stepFile, totals } from '../src/renderer/src/state/diff'
+import { anchorKey, baseLabel, countLabel, diffRows, linesLabel, skippedCount, sortFiles, stepFile, totals } from '../src/renderer/src/state/diff'
 import {
   MAX_COMMENTS,
   MAX_COMMENT_CHARS,
@@ -235,6 +235,11 @@ describe('commentaires de revue', () => {
 
 describe('compteurs absents et liste tronquée', () => {
   it('« ? » pour un fichier non compté', () => {
+    // Libellés pour lecteur d'écran : 0 et 1 au singulier en français.
+    expect([0, 1, 2].map((n) => linesLabel(n, 'ajout'))).toEqual(['0 ajout', '1 ajout', '2 ajouts'])
+    expect([0, 1, 12].map((n) => linesLabel(n, 'suppression'))).toEqual(['0 suppression', '1 suppression', '12 suppressions'])
+    expect(linesLabel(null, 'ajout')).toBe('nombre inconnu d’ajouts')
+    expect(linesLabel(undefined, 'suppression')).toBe('nombre inconnu de suppressions')
     expect(countLabel(null)).toBe('?')
     expect(countLabel(0)).toBe('0')
     expect(totals([f('a', 'M', { additions: 2, deletions: 1 }), f('b', '?', { additions: null, deletions: null })])).toEqual({

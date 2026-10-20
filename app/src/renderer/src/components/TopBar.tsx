@@ -16,11 +16,13 @@ import type { MainView } from '../../../shared/settings'
 import type { ThemeMode } from '../theme'
 import { Meter, ProfileChip, StatusGlyph } from './common'
 
-const THEMES: [ThemeMode, string][] = [
+/** Mêmes libellés que dans les Réglages (`SettingsDialog`). */
+export const THEMES: [ThemeMode, string][] = [
   ['light', 'Clair'],
   ['dark', 'Sombre'],
   ['system', 'Auto'],
 ]
+export const AUTO_TITLE = 'Auto : suit le mode clair ou sombre du système'
 
 function metaText(meta: WindowMeta | null): string | undefined {
   if (!meta) return undefined
@@ -45,14 +47,14 @@ function QuotaLine({
   return (
     <>
       <span className="k">{k}</span>
-      <span className="v" title={pct === null ? undefined : metaText(meta)}>
+      <span className="v" title={pct === null ? undefined : [reset && `reset ${reset}`, metaText(meta)].filter(Boolean).join(' · ') || undefined}>
         {pct === null ? (
           <span title={error ? `Inconnu : ${error}` : 'Aucune mesure pour l’instant'}>
             inconnu{error && <span className="sr-only"> ({error})</span>}
           </span>
         ) : (
           <>
-            <Meter pct={pct} label={`Quota ${k}`} /> {Math.round(pct)} %{reset ? ` · reset ${reset}` : ''}
+            <Meter pct={pct} label={`Quota ${k}`} /> {Math.round(pct)} %{reset && <span className="q-reset"> · reset {reset}</span>}
           </>
         )}
       </span>
@@ -152,25 +154,28 @@ export function TopBar(props: {
   const quotas = quotaViews(props.sessions, props.profiles, props.daemonQuotas)
   return (
     <header className="top">
-      <div className="brand">
-        <b>DevMaestro</b>
-        <span className="ver">v0.1</span>
-      </div>
-      <div className="quotas" aria-label="Quotas par profil">
-        {quotas.map((q) => (
-          <div className="quota" key={q.profile} title={quotaTitle(q, labelOf(q.profile).long)}>
-            <ProfileChip profile={q.profile} profiles={props.profiles} className="who" />
-            <QuotaLine k="5 h" pct={q.fiveHour?.used_pct ?? null} reset={formatReset(q.fiveHour?.resets_at)} error={q.error} meta={q.fiveHourMeta} />
-            <QuotaLine k="hebdo" pct={q.sevenDay?.used_pct ?? null} reset={formatReset(q.sevenDay?.resets_at)} error={q.error} meta={q.sevenDayMeta} />
-          </div>
-        ))}
-        {props.onRefreshQuotas && quotas.length > 0 && (
-          <RefreshQuotas
-            onRefresh={props.onRefreshQuotas}
-            seq={props.quotasSeq}
-            profiles={Object.keys(props.daemonQuotas ?? {}).length ? Object.keys(props.daemonQuotas ?? {}) : quotas.map((q) => q.profile)}
-          />
-        )}
+      {/* Trois groupes qui passent à la ligne d'un bloc (zoom, fenêtre étroite) : marque et quotas, vue, actions. */}
+      <div className="top-g top-main">
+        <div className="brand">
+          <b>DevMaestro</b>
+          <span className="ver">v0.1</span>
+        </div>
+        <div className="quotas" aria-label="Quotas par profil">
+          {quotas.map((q) => (
+            <div className="quota" key={q.profile} title={quotaTitle(q, labelOf(q.profile).long)}>
+              <ProfileChip profile={q.profile} profiles={props.profiles} className="who" />
+              <QuotaLine k="5 h" pct={q.fiveHour?.used_pct ?? null} reset={formatReset(q.fiveHour?.resets_at)} error={q.error} meta={q.fiveHourMeta} />
+              <QuotaLine k="hebdo" pct={q.sevenDay?.used_pct ?? null} reset={formatReset(q.sevenDay?.resets_at)} error={q.error} meta={q.sevenDayMeta} />
+            </div>
+          ))}
+          {props.onRefreshQuotas && quotas.length > 0 && (
+            <RefreshQuotas
+              onRefresh={props.onRefreshQuotas}
+              seq={props.quotasSeq}
+              profiles={Object.keys(props.daemonQuotas ?? {}).length ? Object.keys(props.daemonQuotas ?? {}) : quotas.map((q) => q.profile)}
+            />
+          )}
+        </div>
       </div>
       <div className="seg" role="group" aria-label="Vue">
         <button aria-pressed={props.view === 'projet'} onClick={() => props.onView('projet')}>
@@ -181,28 +186,35 @@ export function TopBar(props: {
         </button>
       </div>
       <span className="spacer" />
-      {props.waitingCount > 0 && (
-        <button
-          className="pill-wait"
-          onClick={props.onNextWaiting}
-          title="Aller à la première session qui attend une réponse"
-        >
-          <StatusGlyph glyph={{ kind: 'waiting', label: 'À répondre' }} /> {props.waitingCount} à répondre
-        </button>
-      )}
-      <div className="seg" role="group" aria-label="Thème">
-        {THEMES.map(([m, label]) => (
-          <button key={m} aria-pressed={props.themeMode === m} onClick={() => props.onTheme(m)}>
-            {label}
+      <div className="top-g top-acts">
+        {props.waitingCount > 0 && (
+          <button
+            className="pill-wait"
+            onClick={props.onNextWaiting}
+            title="Aller à la première session qui attend une réponse"
+          >
+            <StatusGlyph glyph={{ kind: 'waiting', label: 'À répondre' }} /> {props.waitingCount} à répondre
           </button>
-        ))}
+        )}
+        <div className="seg" role="group" aria-label="Thème">
+          {THEMES.map(([m, label]) => (
+            <button
+              key={m}
+              aria-pressed={props.themeMode === m}
+              title={m === 'system' ? AUTO_TITLE : undefined}
+              onClick={() => props.onTheme(m)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <button className="btn" onClick={props.onSettings}>
+          Réglages
+        </button>
+        <button className="btn pri" onClick={props.onNew}>
+          + Nouvelle session
+        </button>
       </div>
-      <button className="btn" onClick={props.onSettings}>
-        Réglages
-      </button>
-      <button className="btn pri" onClick={props.onNew}>
-        + Nouvelle session
-      </button>
     </header>
   )
 }

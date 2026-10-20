@@ -12,7 +12,7 @@ import { call, errorCode, errorText } from '../api'
 import { ALREADY_CLOSED } from '../state/errors'
 import { basename, formatPct, formatUsd, relativeTime, sessionColor, sessionDisplayName } from '../state/format'
 import { browserStorage } from '../state/collapse'
-import { COLUMNS, demandSummary, firstPending, kanbanColumns, oneClickAllowed } from '../state/kanban'
+import { COLUMNS, demandSummary, firstPending, kanbanColumns, oneClickAllowed, permissionParts } from '../state/kanban'
 import {
   cardSelected,
   filterFor,
@@ -113,6 +113,7 @@ function Card({
   const name = sessionDisplayName(session)
   const projectName = project?.name ?? basename(project?.root ?? session.project_root ?? session.cwd)
   const req = firstPending(session)
+  const perm = req ? permissionParts(req.pending) : null
   const m = session.metrics
   const agentsRunning = runningLabel(runningCount(session, agents))
   // Clic ailleurs que sur un bouton de la carte : ouvre la session (au clavier : le bouton du nom).
@@ -142,7 +143,20 @@ function Card({
       </div>
       {req && (
         <p className="kask" title={demandSummary(req.pending, 1000)}>
-          <b>{req.pending.kind === 'question' ? 'Question' : 'Permission'} :</b> {demandSummary(req.pending)}
+          <b>{req.pending.kind === 'question' ? 'Question' : 'Permission'} :</b>{' '}
+          {perm ? (
+            <>
+              {perm.tool}
+              {perm.input && (
+                <>
+                  {' · '}
+                  <code>{perm.input}</code>
+                </>
+              )}
+            </>
+          ) : (
+            demandSummary(req.pending)
+          )}
           {session.pending.length > 1 && <span className="hint"> (+{session.pending.length - 1})</span>}
         </p>
       )}

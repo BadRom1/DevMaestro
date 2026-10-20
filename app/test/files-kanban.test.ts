@@ -4,7 +4,7 @@ import { ValidationError, validateParams } from '../src/main/validate'
 import type { FileEntry, PendingRequest } from '../src/shared/protocol'
 import { SettingsError, applyPatch, defaultSettings, normalizeSettings, validatePatch } from '../src/shared/settings'
 import { ancestorDirs, defaultFile, filterFiles, isMarkdown, mentionFor, parentOf, visibleRows } from '../src/renderer/src/state/fileTree'
-import { columnOf, demandSummary, firstPending, kanbanColumns, oneClickAllowed, summaryFits } from '../src/renderer/src/state/kanban'
+import { columnOf, demandSummary, firstPending, kanbanColumns, oneClickAllowed, permissionParts, summaryFits } from '../src/renderer/src/state/kanban'
 import { classifyLink, renderMarkdown, resolveRelative, slugify } from '../src/renderer/src/state/markdown'
 import { session } from './fixtures'
 
@@ -131,6 +131,13 @@ describe('vue par statut', () => {
       demandSummary({ kind: 'question', tool_name: 'AskUserQuestion', tool_input: {}, questions: [{ question: 'SQLite ?', options: [] }, { question: 'b', options: [] }] }),
     ).toBe('SQLite ? (+1)')
     expect(demandSummary({ kind: 'permission', detailed: false })).toBe('Permission (détails dans le terminal)')
+  })
+
+  it('permission sur la carte : l’outil et son entrée à part (l’entrée en chasse fixe)', () => {
+    expect(permissionParts(perm(1, '').pending)).toEqual({ tool: 'Bash', input: 'npm test' })
+    expect(permissionParts(perm(1, '', 'x\n'.repeat(200)).pending, 20)!.input).toHaveLength(20 - 'Bash'.length - 3)
+    expect(permissionParts({ kind: 'permission', detailed: false })).toBeNull()
+    expect(permissionParts({ kind: 'question', tool_name: 'AskUserQuestion', tool_input: {}, questions: [] })).toBeNull()
   })
 
   it('vue retenue dans les réglages', () => {

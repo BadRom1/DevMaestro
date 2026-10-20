@@ -31,6 +31,18 @@ Tout le travail est sur la branche locale `v0.1` (non poussée). `main` (publié
 | `32b25ba` | v0.2 lot 3 bis : coloration, sélection envoyée à Claude |
 | `954ba26` | v0.2 lot 6 : worktrees ; filtre et volet du kanban, palette par mode, numéros de ligne |
 
+## Point de reprise (2026-10-20, soir)
+
+Travail fait en autonomie pendant ton absence, tout commité sur `v0.1` et démon + app redémarrés :
+
+- **Vue conversation** (lots 10 à 12, [ADR 0005](adr/0005-vue-conversation.md)) : onglet « Conversation » (fil, outils dépliables, diff d'Edit, sous-agents, compaction, `/clear`), indicateur d'activité, saisie. Essai de bout en bout réussi avec un vrai `claude` piloté par le socket du démon.
+- **Édition de fichiers** (lot 7) : bouton « Modifier » dans l'onglet Fichiers, CodeMirror, Ctrl+S, conflit si Claude a modifié le fichier (différences, recharger, écraser).
+- **Finitions visuelles** après captures hors écran : fil ouvert en bas, contrastes ≥ 4,5:1 partout (clair, sombre, Okabe-Ito, contraste élevé, couleurs personnalisées, terminal), plus de ligatures dans le code, zoom 150 % propre, libellés et petits défauts.
+
+À essayer en priorité : l'onglet Conversation sur une vraie session (lecture, saisie, sous-agents), l'édition d'un fichier pendant que Claude travaille, l'apparence générale (les textes secondaires sont plus foncés).
+
+Prochaines étapes proposées (dans l'ordre) : décider l'accès réseau pour GitHub (ADR, lot 13) ; lancer et livrer (lot 14) ; paquet `.deb` ; dictée (fusion des prototypes n° 3 et 4).
+
 ## Prochains lots
 
 | Lot | Contenu | Pourquoi | État |

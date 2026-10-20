@@ -53,7 +53,8 @@ const highlightStyle = HighlightStyle.define([
 const themeSpec = {
   '&': { height: '100%', color: 'var(--fg)', backgroundColor: 'var(--panel)', fontSize: '12.5px' },
   '&.cm-focused': { outline: '2px solid var(--accent)', outlineOffset: '-2px' },
-  '.cm-scroller': { fontFamily: 'var(--f-mono)', lineHeight: '20px' },
+  // Code : pas de ligatures (`===`, `=>`, `!=` restent lisibles caractère par caractère).
+  '.cm-scroller': { fontFamily: 'var(--f-mono)', lineHeight: '20px', fontVariantLigatures: 'none', fontFeatureSettings: '"calt" 0, "liga" 0' },
   '.cm-content': { caretColor: 'var(--fg)', padding: '12px 0' },
   '.cm-line': { padding: '0 16px 0 12px' },
   '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--fg)' },
@@ -97,7 +98,7 @@ const themeSpec = {
   },
   '.cm-button:focus-visible': { outline: '2px solid var(--accent)', outlineOffset: '-1px' },
   '.cm-tooltip': { backgroundColor: 'var(--panel-2)', color: 'var(--fg)', border: '1px solid var(--line-2)' },
-  '.cm-specialChar': { color: 'var(--err)' },
+  '.cm-specialChar': { color: 'var(--err-ink)' },
 }
 
 const lightTheme = EditorView.theme(themeSpec, { dark: false })

@@ -54,6 +54,7 @@ import {
   inputText,
   isAtBottom,
   isEntry,
+  isHiddenEntry,
   layoutOffsets,
   patchHunks,
   promptProblem,
@@ -288,11 +289,13 @@ function PromptRow({ e, ctx }: { e: PromptEntry; ctx: RowContext }) {
   const time = formatTime(e.ts)
   // Texte entier relu (collages remis en place) : les volets des collages feraient double emploi.
   const fullShown = e.truncated === true && ctx.isOpen(`${e.uid}:text:all`) && ctx.full(e.uid, 'text')?.phase === 'ready'
+  // Fil d'un sous-agent : sa consigne vient de l'agent qui l'a lancé, pas de l'utilisateur.
+  const fromParent = !!e.agent_id && e.source === 'system'
   return (
     <div className="cv-prompt">
       <div className="cv-who">
-        <span className="lbl">Toi</span>
-        {source && <span className="chip">{source}</span>}
+        <span className="lbl">{fromParent ? 'Claude (agent parent)' : 'Toi'}</span>
+        {source && !fromParent && <span className="chip">{source}</span>}
         {time && <span className="hint">{time}</span>}
       </div>
       <LongText
@@ -883,7 +886,8 @@ export function Composer({
           aria-describedby={hintId}
           aria-disabled={blocked ? true : undefined}
           readOnly={!!blocked}
-          placeholder={blocked ?? 'Écris à Claude… (Entrée pour envoyer)'}
+          // Bloqué : la phrase entière est dans l'aide sous le champ ; ici, un rappel court.
+          placeholder={blocked ? (session.alive ? 'Demande en attente' : 'Session arrêtée') : 'Écris à Claude… (Entrée pour envoyer)'}
           rows={Math.min(8, Math.max(1, value.split('\n').length))}
           value={value}
           onChange={(e) => {
@@ -1130,7 +1134,9 @@ export function ConversationView({
   const lastTop = useRef(0)
   const hiddenRef = useRef(hidden)
   hiddenRef.current = hidden
-  const entries = state.entries
+  // Entrées affichées : sans la commande `/clear` qui ouvre un segment (le séparateur la dit déjà). Le réducteur la
+  // garde pour rapprocher un `/clear` envoyé d'ici ; le curseur des entrées plus anciennes reste `state.entries[0]`.
+  const entries = useMemo(() => (state.entries.some(isHiddenEntry) ? state.entries.filter((e) => !isHiddenEntry(e)) : state.entries), [state.entries])
 
   const offsets = useMemo(
     () => layoutOffsets(entries.map((e) => heights.current.get(e.uid) ?? estimateHeight(e))),
@@ -1176,16 +1182,19 @@ export function ConversationView({
         lastTop.current = sc.scrollTop
       }
       bumpMeasure()
+      // Collée en bas : la nouvelle hauteur est appliquée au rendu suivant, l'effet de mise en page y recolle.
     })
   }, [])
   useEffect(() => () => observer?.disconnect(), [observer])
 
-  // Taille de la fenêtre.
+  // Taille de la fenêtre (la zone des demandes, le zoom la changent) : collée en bas, elle y reste.
   useEffect(() => {
     const el = scroller.current
-    if (!el || viewportHeight !== undefined || typeof ResizeObserver === 'undefined') return
+    if (!el || typeof ResizeObserver === 'undefined') return
     const ro = new ResizeObserver(() => {
-      if (el.clientHeight > 0) setViewport(el.clientHeight)
+      if (hiddenRef.current || el.clientHeight <= 0) return
+      if (viewportHeight === undefined) setViewport(el.clientHeight)
+      if (stuck.current) stickToBottom(el)
     })
     ro.observe(el)
     return () => ro.disconnect()
@@ -1220,16 +1229,18 @@ export function ConversationView({
     }
   }, [entries, offsets, state.pending.length, state.olderLoading, hidden, viewport])
 
+  const firstUid = useRef<string | undefined>(undefined)
+  firstUid.current = state.entries[0]?.uid
   const loadOlder = useCallback(() => {
     const { entries: list, offsets: off, range: r } = latest.current
     const first = list[0]
-    if (!first) return
+    if (!first || !firstUid.current) return
     const sc = scroller.current
     const pivot = list[r.start] ?? first
     const idx = list[r.start] ? r.start : 0
     anchor.current = { uid: pivot.uid, delta: listTop.current + off[idx]! - (sc?.scrollTop ?? 0), first: first.uid }
     dispatch({ type: 'olderStart' })
-    call('conversation.get', { id, before: first.uid, limit: PAGE })
+    call('conversation.get', { id, before: firstUid.current, limit: PAGE })
       .then((page) => dispatch({ type: 'older', page }))
       .catch((e: unknown) => {
         anchor.current = null
@@ -1241,23 +1252,32 @@ export function ConversationView({
     const el = scroller.current
     // Onglet masqué : `display: none` remet le défilement à 0, ce n'est pas l'utilisateur.
     if (!el || hiddenRef.current) return
+    const bottom = isAtBottom(el.scrollTop, el.scrollHeight, el.clientHeight)
+    if (stuck.current && !bottom && el.scrollTop >= lastTop.current - 1) {
+      // Pas de remontée : c'est notre propre défilement, rattrapé par une hauteur qui a changé depuis (mesure d'une
+      // ligne, zone des demandes). Seul un défilement vers le haut décolle le fil du bas.
+      stickToBottom(el)
+      return
+    }
     lastTop.current = el.scrollTop
     setScrollTop(el.scrollTop)
-    const bottom = isAtBottom(el.scrollTop, el.scrollHeight, el.clientHeight)
     stuck.current = bottom
     setAtBottom(bottom)
     if (el.scrollTop < OLDER_THRESHOLD && state.hasMore && !state.olderLoading && !state.olderError && !anchor.current) loadOlder()
+  }
+
+  /** Défile tout en bas et le retient (position lue, fenêtre virtualisée). */
+  function stickToBottom(el: HTMLElement) {
+    el.scrollTop = el.scrollHeight
+    lastTop.current = el.scrollTop
+    setScrollTop(el.scrollTop)
   }
 
   function toBottom() {
     const el = scroller.current
     stuck.current = true
     setAtBottom(true)
-    if (el) {
-      el.scrollTop = el.scrollHeight
-      lastTop.current = el.scrollTop
-      setScrollTop(el.scrollTop)
-    }
+    if (el) stickToBottom(el)
   }
 
   const top = offsets[range.start] ?? 0

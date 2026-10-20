@@ -95,9 +95,10 @@ fn replays_the_main_transcript_in_order() {
             "notification",
             "thinking",
             "text",
-            // `/compact` : séparateur, commande (la ligne nue est ignorée).
-            "compaction",
+            // `/compact` : la commande, puis le séparateur qu'elle a
+            // déclenché (écrit avant elle ; la ligne nue est ignorée).
             "command",
+            "compaction",
             "prompt",
             "thinking",
             "text",
@@ -374,6 +375,17 @@ fn compaction_gets_its_summary_and_command_its_output() {
         }
     );
     let cmd = find(&c, |b| matches!(b, Body::Command { .. }));
+    // Remise dans l'ordre : la commande (15:45:16) avant la compaction
+    // (15:45:43), juste devant elle, `uid` inchangés.
+    let all = c.entries(None);
+    let ci = all.iter().position(|e| e.uid == cmd.uid).unwrap();
+    assert_eq!(all[ci + 1].uid, comp.uid);
+    assert_eq!(comp.uid, "d520568f-0ce3-4008-9d50-9d4e393cf1b7");
+    assert_eq!(cmd.uid, "1323d3ca-340c-4f3a-ad25-d3f44cd8e95f");
+    assert!(cmd.ts < comp.ts);
+    assert!(!cmd.hidden_by_segment);
+    assert_eq!(c.entry(&cmd.uid).unwrap().uid, cmd.uid);
+    assert_eq!(c.entry(&comp.uid).unwrap().uid, comp.uid);
     let Body::Command { name, args, output } = &cmd.body else {
         unreachable!()
     };
@@ -401,6 +413,9 @@ fn clear_opens_a_new_segment() {
         matches!(&new[0].body, Body::Command { name, output, .. } if name == "/clear" && output.is_empty())
     );
     assert_eq!(new[0].lines.len(), 2);
+    // Elle ouvre son segment : le séparateur la montre déjà.
+    assert!(new[0].hidden_by_segment);
+    assert!(new[1..].iter().all(|e| !e.hidden_by_segment));
     assert!(matches!(&new[2].body, Body::Text { markdown } if markdown == "Bonjour !"));
     let segs: Vec<&Segment> = c.segments_since(rev).collect();
     assert_eq!(segs.len(), 1);

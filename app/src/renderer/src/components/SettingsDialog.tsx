@@ -43,14 +43,9 @@ import { tildify } from '../state/format'
 import { Meter, ProfileBadge, StatusGlyph } from './common'
 import { ConfirmBar } from './ForgetConfirm'
 import { Modal } from './Modal'
+import { AUTO_TITLE, THEMES } from './TopBar'
 
 type Tab = 'apparence' | 'general'
-
-const MODES: [ThemeMode, string][] = [
-  ['light', 'Clair'],
-  ['dark', 'Sombre'],
-  ['system', 'Suivre le système'],
-]
 
 const PREVIEW_GLYPHS = [
   { kind: 'waiting', label: 'À répondre' },
@@ -241,9 +236,6 @@ function TextSize() {
             onClick={() => set(stepZoom(zoom, 'in'))}
           >
             +
-          </button>
-          <button type="button" className="btn ghost" disabled={zoom === DEFAULT_ZOOM} onClick={() => set(DEFAULT_ZOOM)}>
-            100 %
           </button>
         </div>
         <span className="hint">
@@ -458,15 +450,21 @@ function Appearance({ scheme }: { scheme: Scheme }) {
           </span>
           <div className="row-inline">
             <div className="seg" role="group" aria-labelledby="st-mode">
-              {MODES.map(([m, l]) => (
-                <button key={m} type="button" aria-pressed={theme.mode === m} onClick={() => update({ theme: { mode: m } })}>
+              {THEMES.map(([m, l]) => (
+                <button
+                  key={m}
+                  type="button"
+                  aria-pressed={theme.mode === m}
+                  title={m === 'system' ? AUTO_TITLE : undefined}
+                  onClick={() => update({ theme: { mode: m } })}
+                >
                   {l}
                 </button>
               ))}
             </div>
             <span className="hint">
-              Chaque mode a sa palette et ses couleurs.
-              {theme.mode === 'system' && ` Le système est actuellement en mode ${SCHEME_LABELS[scheme].toLowerCase()}.`}
+              Chaque mode a sa palette et ses couleurs. Auto suit le système
+              {theme.mode === 'system' ? `, actuellement en mode ${SCHEME_LABELS[scheme].toLowerCase()}.` : '.'}
             </span>
           </div>
         </div>

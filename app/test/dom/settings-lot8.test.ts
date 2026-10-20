@@ -96,6 +96,17 @@ describe('réglages : taille du texte', () => {
     act(() => document.querySelector<HTMLButtonElement>('[aria-label="Texte plus grand"]')!.click())
     expect(latest!.ui.zoom).toBe(150)
   })
+
+  it('un seul contrôle de taille (pas de bouton « 100 % » à côté de la liste) ; mode « Auto » comme dans la barre', () => {
+    render()
+    const field = document.querySelector('#st-zoom')!.closest('.field')!
+    expect([...field.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') ?? b.textContent)).toEqual([
+      'Texte plus petit',
+      'Texte plus grand',
+    ])
+    const modes = document.querySelector('[aria-labelledby="st-mode"]')!
+    expect([...modes.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Clair', 'Sombre', 'Auto'])
+  })
 })
 
 describe('réglages : importer un thème (JSON)', () => {

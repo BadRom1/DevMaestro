@@ -25,29 +25,42 @@ import type {
 
 /**
  * Entrées `base` mises à jour par `upserts` : un `uid` connu est remplacé sur
- * place, un nouveau est ajouté à la fin (le démon les envoie dans l'ordre).
- * Renvoie `base` lui-même si rien ne change.
+ * place ; un nouveau se range juste avant la première entrée déjà connue qui
+ * le suit dans le lot (ordre du démon : la commande `/compact` arrive avec sa
+ * compaction et se place devant elle), sinon à la fin. Une entrée ancienne
+ * mise à jour dans le même lot ne sert pas de repère : elle peut être loin
+ * en arrière dans le fil. Renvoie `base` lui-même si rien ne change.
  */
 export function upsertEntries(
   base: readonly ConversationEntry[],
   upserts: readonly ConversationEntry[],
 ): readonly ConversationEntry[] {
-  if (upserts.length === 0) return base
-  let out: ConversationEntry[] | null = null
-  let pos: Map<string, number> | null = null
-  for (const e of upserts) {
-    if (!isEntry(e)) continue
-    if (!out) {
-      out = base.slice()
-      pos = new Map(out.map((x, i) => [x.uid, i]))
+  const batch = upserts.filter(isEntry)
+  if (batch.length === 0) return base
+  const out: ConversationEntry[] = base.slice()
+  let pos = new Map(out.map((x, i) => [x.uid, i]))
+  batch.forEach((e, k) => {
+    const i = pos.get(e.uid)
+    if (i !== undefined) {
+      out[i] = e
+      return
     }
-    const i = pos!.get(e.uid)
-    if (i === undefined) {
-      pos!.set(e.uid, out.length)
+    let at: number | undefined
+    for (let j = k + 1; j < batch.length && at === undefined; j++) at = pos.get(batch[j]!.uid)
+    if (at === undefined) {
+      pos.set(e.uid, out.length)
       out.push(e)
-    } else out[i] = e
-  }
-  return out ?? base
+    } else {
+      out.splice(at, 0, e)
+      pos = new Map(out.map((x, n) => [x.uid, n]))
+    }
+  })
+  return out
+}
+
+/** Entrée masquée par le démon : la commande `/clear` qui ouvre un segment (le séparateur la dit déjà). */
+export function isHiddenEntry(e: ConversationEntry): boolean {
+  return e.kind === 'command' && e.hidden_by_segment === true
 }
 
 /** Entrées plus anciennes `older` placées avant `base` (sans doublon de `uid`). */

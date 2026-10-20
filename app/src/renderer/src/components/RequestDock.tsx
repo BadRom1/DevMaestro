@@ -66,12 +66,15 @@ export function RequestDock({
 }) {
   const listId = useId()
   const n = session ? pending.length : 0
+  // Une seule demande, zone ouverte : le titre de la carte suffit (pas deux titres empilés) ; celui de la zone
+  // reste pour les lecteurs d'écran, et « Réduire » se cale dans le coin de la carte.
+  const solo = n === 1 && !reduced
   return (
-    <div className={`asks${reduced ? ' reduced' : ''}`} ref={dockRef} role="region" aria-live="polite" aria-label="Demandes en attente">
+    <div className={`asks${reduced ? ' reduced' : ''}${solo ? ' solo' : ''}`} ref={dockRef} role="region" aria-live="polite" aria-label="Demandes en attente">
       {session && n > 0 && (
         <>
           <div className="asks-bar">
-            <span className="asks-t">
+            <span className={solo ? 'asks-t sr-only' : 'asks-t'}>
               {reduced
                 ? `Claude attend ta réponse${n > 1 ? ` (${n} demandes)` : ''}`
                 : n > 1

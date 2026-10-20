@@ -636,6 +636,8 @@ export interface CommandEntry extends EntryBase {
   args: string | null
   output: string | null
   truncated?: boolean | null
+  /** `/clear` qui ouvre un segment : le séparateur le remplace, l'entrée n'est pas affichée. */
+  hidden_by_segment?: boolean | null
 }
 
 export interface ErrorEntry extends EntryBase {

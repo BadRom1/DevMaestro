@@ -327,6 +327,13 @@ fn subagent_compaction_and_clear() {
     );
     let all = r["entries"].as_array().unwrap();
     let last = all.last().unwrap();
+    assert_eq!(last["hidden_by_segment"], true);
+    let i = all
+        .iter()
+        .position(|e| e["kind"] == "command" && e["name"] == "/compact")
+        .unwrap();
+    assert_eq!(all[i + 1]["kind"], "compaction");
+    assert!(all[i].get("hidden_by_segment").is_none());
     assert_eq!(
         (last["kind"].as_str(), last["segment"].as_u64()),
         (Some("command"), Some(1))

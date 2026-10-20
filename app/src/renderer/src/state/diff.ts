@@ -103,6 +103,15 @@ export function countLabel(n: number | null | undefined): string {
   return typeof n === 'number' ? String(n) : '?'
 }
 
+/**
+ * « 1 ajout », « 0 suppression », « 12 ajouts » (en français, 0 et 1 au
+ * singulier) ; nombre inconnu : « nombre inconnu d'ajouts ».
+ */
+export function linesLabel(n: number | null | undefined, word: 'ajout' | 'suppression'): string {
+  if (typeof n !== 'number') return `nombre inconnu ${word === 'ajout' ? 'd’ajouts' : 'de suppressions'}`
+  return `${n} ${word}${n > 1 ? 's' : ''}`
+}
+
 /** Nombre de fichiers ignorés car non UTF-8 (liste ou nombre selon le démon). */
 export function skippedCount(v: unknown): number {
   if (Array.isArray(v)) return v.length

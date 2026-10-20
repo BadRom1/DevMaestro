@@ -63,6 +63,17 @@ export function demandSummary(d: Demand, max = 140): string {
 }
 
 /**
+ * Permission détaillée : l'outil et son entrée (commande, chemin…) séparés,
+ * pour poser l'entrée en chasse fixe sur la carte. `null` pour une question ou
+ * une demande sans détail (voir `demandSummary`).
+ */
+export function permissionParts(d: Demand, max = 140): { tool: string; input: string | null } | null {
+  if (d.kind !== 'permission' || d.detailed === false) return null
+  const what = summarizeToolInput(d.tool_name, d.tool_input)
+  return { tool: d.tool_name, input: what ? oneLine(what, Math.max(1, max - [...d.tool_name].length - 3)) : null }
+}
+
+/**
  * Le résumé tient-il en entier sur la carte : une seule ligne (pas de commande
  * multiligne aplatie), rien de coupé, au plus `max` caractères ?
  */

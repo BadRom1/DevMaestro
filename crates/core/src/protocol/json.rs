@@ -220,6 +220,9 @@ pub fn conversation_entry_json(e: &crate::domain::conversation::Entry) -> Value 
     if let Some(a) = &e.agent_id {
         v["agent_id"] = json!(a);
     }
+    if e.hidden_by_segment {
+        v["hidden_by_segment"] = json!(true);
+    }
     let fields = match &e.body {
         Body::Prompt {
             text,

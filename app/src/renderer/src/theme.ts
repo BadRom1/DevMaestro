@@ -2,7 +2,7 @@
 import type { ITheme } from '@xterm/xterm'
 
 import type { ThemeSettings } from '../../shared/settings'
-import { ALL_OVERRIDABLE, schemeTokens, themeOverrides, type Scheme } from './state/themeTokens'
+import { ALL_OVERRIDABLE, INK_OF, readableInk, schemeTokens, themeOverrides, type Scheme } from './state/themeTokens'
 
 export type { ThemeMode } from '../../shared/settings'
 
@@ -33,8 +33,11 @@ export function applyTheme(theme: ThemeSettings, scheme: Scheme): void {
   for (const k of ALL_OVERRIDABLE) root.style.removeProperty(`--${k}`)
   const values = themeOverrides(theme, scheme)
   for (const [k, v] of Object.entries(values)) root.style.setProperty(`--${k}`, v)
+  const tokens = schemeTokens(theme, scheme)
+  // Variantes texte des couleurs d'état, recalculées pour la palette et les couleurs choisies du mode.
+  for (const ink of [...Object.values(INK_OF), 'accent-ink']) if (tokens[ink]) root.style.setProperty(`--${ink}`, tokens[ink])
   // Sélection dérivée de l'accent effectif du mode (toutes palettes, couleurs choisies comprises), comme le terminal.
-  root.style.setProperty('--sel', selectionColor(schemeTokens(theme, scheme).accent, scheme))
+  root.style.setProperty('--sel', selectionColor(tokens.accent, scheme))
 }
 
 /** Fond de sélection : l'accent à 22 % (clair) ou 30 % (sombre), en `#rrggbbaa`. */
@@ -48,7 +51,21 @@ export function selectionColor(accent: string | undefined, scheme: Scheme): stri
  * base du mode, palette, couleurs choisies) et non relues dans le CSS : pas de
  * décalage quand le mode change (les effets des enfants passent avant ceux de l'app).
  */
+/** Couleurs ANSI de texte, relevées si besoin pour se lire (≥ 4,5:1) sur le fond du terminal. */
+const ANSI_TEXT = [
+  'black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white',
+  'brightBlack', 'brightRed', 'brightGreen', 'brightYellow', 'brightBlue', 'brightMagenta', 'brightCyan', 'brightWhite',
+] as const
+
 export function terminalThemeFrom(tokens: Record<string, string>, scheme: Scheme): ITheme {
+  const t = terminalPalette(tokens, scheme)
+  const bg = t.background!
+  // Sombre : `black` sert de fond (inverse, barres) et ne porte pas de texte lisible par convention ; il reste tel quel.
+  for (const k of ANSI_TEXT) if (t[k] && !(scheme === 'dark' && k === 'black')) t[k] = readableInk(t[k]!, [bg], scheme, 4.5)
+  return t
+}
+
+function terminalPalette(tokens: Record<string, string>, scheme: Scheme): ITheme {
   const sunk = tokens.sunk ?? (scheme === 'light' ? '#f7f8fb' : '#0b0d12')
   const fg = tokens.fg ?? (scheme === 'light' ? '#1a1f2c' : '#dde2ec')
   const accent = tokens.accent ?? (scheme === 'light' ? '#2f5bd3' : '#86a8ff')

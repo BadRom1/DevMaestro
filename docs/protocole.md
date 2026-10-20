@@ -641,6 +641,7 @@ Un processus sorti avec un code non nul ou tué par un signal inattendu, sans `S
 ```json
 {"uid": "71356630-…", "kind": "prompt", "ts": "RFC 3339" | null, "segment": 0,
  "agent_id": "a4138…",          // seulement pour une entrée lue dans le fichier d'un sous-agent
+ "hidden_by_segment": true,     // seulement pour la commande /clear qui ouvre son segment
  …champs du genre}
 ```
 
@@ -652,8 +653,8 @@ Un processus sorti avec un code non nul ou tué par un signal inattendu, sans `S
 - `question` : `{tool_use_id, questions, answers}` — `questions` : celles d'`AskUserQuestion` (forme de Claude Code) ; `answers` : `{"<question>": "<réponse>"}` une fois répondue, sinon `null`.
 - `subagent` : `{tool_use_id, agent_id, agent_type, description, status: "running" | "done" | "failed" | "interrupted"}` — appel de l'outil `Agent` (ou `Task`). Son `agent_id` est celui de l'agent **lancé** (`null` tant qu'il n'est pas connu) ; elle se range dans le fil de son parent (un sous-agent lancé par un sous-agent porte en plus `parent_agent_id`, l'agent dont le fichier la porte). Les entrées de l'agent lancé se lisent par `conversation.subagent`. `status` : `running` jusqu'au résultat (`async_launched` : toujours `running`), `done`, `failed` ou `interrupted` selon le résultat, puis la `task-notification` de même `tool-use-id` (`completed` → `done`, `failed` → `failed`, autre → `interrupted`).
 - `notification` : `{task_id, status, summary, truncated}` — fin d'une tâche de fond (`<task-notification>` injectée par Claude Code) : un événement, pas un prompt.
-- `compaction` : `{trigger: "manual" | "auto", pre_tokens, post_tokens, summary, truncated}` — séparateur de `/compact` ; `summary` arrive par un `upsert` (`null` avant).
-- `command` : `{name, args, output, truncated}` — commande locale (`/compact`, `/clear`, `/model`…), sortie sans codes ANSI, complétée par un `upsert` ; mode bash de la TUI : `name: "!"`.
+- `compaction` : `{trigger: "manual" | "auto", pre_tokens, post_tokens, summary, truncated}` — séparateur de `/compact` ; `summary` arrive par un `upsert` (`null` avant). Claude Code écrit le séparateur **avant** la commande `/compact` qui l'a déclenché : le démon range la commande juste devant lui (les `uid` ne changent pas ; la compaction reprend une révision, les deux partent dans le même `conversation.changed`, dans l'ordre du fil). Un client qui garde ses entrées dans l'ordre de leur arrivée place une entrée nouvelle là où la notification la met, avant une entrée déjà connue qui la suit.
+- `command` : `{name, args, output, truncated}` — commande locale (`/compact`, `/clear`, `/model`…), sortie sans codes ANSI, complétée par un `upsert` ; mode bash de la TUI : `name: "!"`. La commande `/clear` qui ouvre un segment (première entrée de ce segment) porte `hidden_by_segment: true` : le séparateur de segment la montre déjà, le front ne l'affiche pas en plus (elle reste dans la liste, pour la pagination). Le champ est absent ailleurs.
 - `error` : `{message, truncated}` — erreur d'API (`system/api_error`, message d'erreur de l'API) ou interruption (`[Request interrupted by user…]`).
 - `unknown` : `{type, subtype}` — type de ligne, sous-type de `system` ou bloc d'`assistant` inconnu : à afficher en repli.
 

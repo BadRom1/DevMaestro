@@ -6,7 +6,7 @@
 import { Fragment, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
 
 import type { DiffFile } from '../../../shared/protocol'
-import { STATUS_LABELS, countLabel, stepFile, type DiffRow, type LineAnchor } from '../state/diff'
+import { STATUS_LABELS, countLabel, linesLabel, stepFile, type DiffRow, type LineAnchor } from '../state/diff'
 import type { ReviewAction, ReviewDraft } from '../state/review'
 import { PathLabel } from './common'
 import { CommentBox } from './ReviewBar'
@@ -83,7 +83,7 @@ export function DiffFileList({
                 className={`frow${isSeen ? ' seen' : ''}`}
                 data-path={f.path}
                 aria-current={f.path === selected}
-                aria-label={`${f.path}, ${STATUS_LABELS[f.status]}, ${f.additions ?? 'nombre inconnu de'} ajouts, ${f.deletions ?? 'nombre inconnu de'} suppressions${n ? `, ${n} commentaire${n > 1 ? 's' : ''}` : ''}${isSeen ? ', vu' : ''}`}
+                aria-label={`${f.path}, ${STATUS_LABELS[f.status]}, ${linesLabel(f.additions, 'ajout')}, ${linesLabel(f.deletions, 'suppression')}${n ? `, ${n} commentaire${n > 1 ? 's' : ''}` : ''}${isSeen ? ', vu' : ''}`}
                 onClick={() => onSelect(f.path)}
               >
                 <span className={`s s-${f.status === '?' ? 'u' : f.status}`} aria-hidden="true">

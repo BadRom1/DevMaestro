@@ -101,6 +101,18 @@ describe('zone des demandes', () => {
     expect(dock().querySelectorAll('[data-request-key]')).toHaveLength(1)
   })
 
+  it('une seule demande ouverte : un seul titre visible (celui de la carte), celui de la zone pour les lecteurs d’écran', () => {
+    render(S)
+    expect(dock().classList.contains('solo')).toBe(true)
+    const title = dock().querySelector('.asks-t')!
+    expect(title.classList.contains('sr-only')).toBe(true)
+    expect(title.textContent).toBe('Demande en attente')
+    // Deux demandes : le titre de la zone (qui les compte) redevient visible.
+    render(session({ ...S, pending: [question(1, 'On continue ?'), question(2, 'Et après ?')] }))
+    expect(dock().classList.contains('solo')).toBe(false)
+    expect(dock().querySelector('.asks-t')!.classList.contains('sr-only')).toBe(false)
+  })
+
   it('« Réduire » : une ligne « Claude attend ta réponse — Afficher », focus gardé, saisie gardée', () => {
     render(S)
     const other = dock().querySelector<HTMLInputElement>('input[type="text"]')!

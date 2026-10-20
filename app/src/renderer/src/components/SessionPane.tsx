@@ -173,63 +173,68 @@ function Header({
   return (
     <div className="sh">
       <div className="sh-1">
-        <StatusGlyph glyph={glyph} decorative={false} />
-        <ColorBar color={color} size="lg" />
-        {renaming ? (
-          <RenameField
-            initial={session.title ?? ''}
-            placeholder={name}
-            onSave={saveTitle}
-            onCancel={() => setRenaming(false)}
-          />
-        ) : (
-          <h2
-            className="sname"
-            title={naming ? `${name} (double-clic pour renommer)` : name}
-            onDoubleClick={() => naming && setRenaming(true)}
-          >
-            {name}
-          </h2>
-        )}
-        <span className="where" title={`${project?.root ?? session.project_root ?? session.cwd} · ${branch}`}>
-          {projectName} <span>/</span> {branch}
-        </span>
-        <ProfileChip profile={session.profile} profiles={profiles} />
-        <span className="chip" title="Modèle">
-          {model}
-        </span>
-        <label className="chip" style={{ paddingRight: 2 }}>
-          mode
-          <select
-            className="mode"
-            aria-label="Mode de la session"
-            aria-busy={pendingMode}
-            value={mode}
-            disabled={pendingMode || !session.alive || session.status.state === 'waiting'}
-            title={
-              session.status.state === 'waiting'
-                ? 'Réponds d’abord à la demande en attente (Shift+Tab agirait sur le dialogue)'
-                : undefined
-            }
-            onChange={(e) => request(e.target.value as SettableMode)}
-          >
-            {!known && (
-              <option value={mode} disabled>
-                {modeLabel(session.mode)}
-              </option>
-            )}
-            {SETTABLE_MODES.map((v) => (
-              <option key={v} value={v}>
-                {modeLabel(v)}
-              </option>
-            ))}
-          </select>
-        </label>
-        {pendingMode && (
-          <span className="hint pending" role="status">
-            <span className="spin" aria-hidden="true" /> en cours…
+        {/* Identité, étiquettes, actions : chacun d'un bloc ; étroit (zoom), identité et actions en ligne 1, étiquettes en ligne 2. */}
+        <div className="sh-id">
+          <StatusGlyph glyph={glyph} decorative={false} />
+          <ColorBar color={color} size="lg" />
+          {renaming ? (
+            <RenameField
+              initial={session.title ?? ''}
+              placeholder={name}
+              onSave={saveTitle}
+              onCancel={() => setRenaming(false)}
+            />
+          ) : (
+            <h2
+              className="sname"
+              title={naming ? `${name} (double-clic pour renommer)` : name}
+              onDoubleClick={() => naming && setRenaming(true)}
+            >
+              {name}
+            </h2>
+          )}
+          <span className="where" title={`${project?.root ?? session.project_root ?? session.cwd} · ${branch}`}>
+            {projectName} <span>/</span> {branch}
           </span>
-        )}
+        </div>
+        <div className="sh-tags">
+          <ProfileChip profile={session.profile} profiles={profiles} />
+          <span className="chip" title="Modèle">
+            {model}
+          </span>
+          <label className="chip" style={{ paddingRight: 2 }}>
+            mode
+            <select
+              className="mode"
+              aria-label="Mode de la session"
+              aria-busy={pendingMode}
+              value={mode}
+              disabled={pendingMode || !session.alive || session.status.state === 'waiting'}
+              title={
+                session.status.state === 'waiting'
+                  ? 'Réponds d’abord à la demande en attente (Shift+Tab agirait sur le dialogue)'
+                  : undefined
+              }
+              onChange={(e) => request(e.target.value as SettableMode)}
+            >
+              {!known && (
+                <option value={mode} disabled>
+                  {modeLabel(session.mode)}
+                </option>
+              )}
+              {SETTABLE_MODES.map((v) => (
+                <option key={v} value={v}>
+                  {modeLabel(v)}
+                </option>
+              ))}
+            </select>
+          </label>
+          {pendingMode && (
+            <span className="hint pending" role="status">
+              <span className="spin" aria-hidden="true" /> en cours…
+            </span>
+          )}
+        </div>
         <div className="acts">
           <button
             className="btn sm ghost"

@@ -272,6 +272,9 @@ pub struct Entry {
     pub rev: u64,
     /// Lignes qui ont contribué à l'entrée, dans l'ordre.
     pub lines: Vec<LineRef>,
+    /// Commande `/clear` qui ouvre son segment : le séparateur de segment
+    /// la montre déjà (à ne pas afficher en plus).
+    pub hidden_by_segment: bool,
 }
 
 /// Un segment : un fichier de transcript de la conversation (nouveau à
@@ -557,6 +560,48 @@ impl Conversation {
         uid
     }
 
+    /// Aucune entrée encore dans le segment de cette source ?
+    fn segment_is_empty(&self, source: u32) -> bool {
+        let src = &self.sources[source as usize];
+        self.entries(src.agent.as_deref())
+            .iter()
+            .all(|e| e.segment != src.segment)
+    }
+
+    /// La commande `/compact` est écrite après le séparateur de la compaction
+    /// qu'elle a déclenchée (prototype n° 5, Q4) : si l'entrée précédente
+    /// est cette compaction (sans commande avant elle), la commande passe
+    /// devant. Les `uid` ne changent pas ; la compaction prend une nouvelle
+    /// révision (les deux partent ensemble, dans l'ordre du fil).
+    fn place_before_compaction(&mut self, uid: &str) {
+        let Some((agent, i)) = self.index.get(uid).cloned() else {
+            return;
+        };
+        if i == 0 {
+            return;
+        }
+        let rev = self.rev + 1;
+        let list = match &agent {
+            None => &mut self.main,
+            Some(a) => match self.subs.get_mut(a) {
+                Some(l) => l,
+                None => return,
+            },
+        };
+        let is_compaction = matches!(list[i - 1].body, Body::Compaction { .. });
+        let preceded =
+            i >= 2 && matches!(&list[i - 2].body, Body::Command { name, .. } if name == "/compact");
+        if !is_compaction || preceded {
+            return;
+        }
+        list.swap(i - 1, i);
+        list[i].rev = rev;
+        let (a, b) = (list[i - 1].uid.clone(), list[i].uid.clone());
+        self.rev = rev;
+        self.index.insert(a, (agent.clone(), i - 1));
+        self.index.insert(b, (agent, i));
+    }
+
     /// Modifie l'entrée `uid` (nouvelle révision, ligne ajoutée).
     fn touch(&mut self, uid: &str, line: Option<LineRef>, f: impl FnOnce(&mut Entry)) -> bool {
         let rev = self.rev + 1;
@@ -657,6 +702,7 @@ impl Conversation {
             truncated,
             rev: 0,
             lines: vec![ctx.line],
+            hidden_by_segment: false,
         };
         self.push(ctx.source, entry)
     }
@@ -712,6 +758,8 @@ impl Conversation {
         {
             let name = tag(t, "command-name").unwrap_or_default();
             let args = tag(t, "command-args").unwrap_or_default();
+            let opens_segment = name == "/clear" && self.segment_is_empty(ctx.source);
+            let compacts = name == "/compact";
             let uid = self.new_entry(
                 ctx,
                 None,
@@ -722,6 +770,12 @@ impl Conversation {
                 },
                 false,
             );
+            if opens_segment {
+                self.touch(&uid, None, |e| e.hidden_by_segment = true);
+            }
+            if compacts {
+                self.place_before_compaction(&uid);
+            }
             self.sources[ctx.source as usize].last_command = Some(uid);
             return;
         }
