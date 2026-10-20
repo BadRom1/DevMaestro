@@ -113,6 +113,12 @@ pub async fn handle_connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 // File bornée : si `claude` lit moins vite, ce client attend
                 // (et lui seul). Une session qui ne tourne pas ignore l'entrée.
                 if let Ok(tx) = conn.daemon.input_sender(&session) {
+                    // Jamais au milieu d'une revue ou de Shift+Tab.
+                    let lock = conn.daemon.pty_lock(&session);
+                    let _guard = match &lock {
+                        Some(l) => Some(l.lock().await),
+                        None => None,
+                    };
                     let _ = tx.send(data).await;
                 }
             }
@@ -342,6 +348,11 @@ impl Connection {
                 let data = opt_str(params, "data")?
                     .ok_or_else(|| RpcError::params("« data » manquant"))?;
                 let tx = d.input_sender(&sid)?;
+                let lock = d.pty_lock(&sid);
+                let _guard = match &lock {
+                    Some(l) => Some(l.lock().await),
+                    None => None,
+                };
                 tx.send(data.into_bytes()).await.map_err(|_| {
                     RpcError::new(error_code::INVALID_STATE, "la session ne tourne plus")
                 })?;
@@ -392,6 +403,25 @@ impl Connection {
                 tokio::task::spawn_blocking(move || d2.forget(&sid))
                     .await
                     .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
+            }
+            "sessions.diff" | "sessions.diffFile" | "sessions.sendReview" => {
+                // `git` : hors du runtime.
+                let (d2, params, m) = (d.clone(), params.clone(), method.to_owned());
+                let r = tokio::task::spawn_blocking(move || match m.as_str() {
+                    "sessions.diff" => d2.diff(&params).map(|v| (v, None)),
+                    "sessions.diffFile" => d2.diff_file(&params).map(|v| (v, None)),
+                    _ => d2
+                        .prepare_review(&params)
+                        .map(|keys| (json!({"sent": true}), Some(keys))),
+                })
+                .await
+                .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??;
+                if let (value, Some((tx, lock, review))) = r {
+                    send_review(&tx, &lock, &review).await?;
+                    value
+                } else {
+                    r.0
+                }
             }
             "quotas.get" => {
                 let refresh = match params.get("refresh") {
@@ -451,6 +481,38 @@ impl Connection {
     }
 }
 
+/// Délai entre la consigne tapée, la revue collée et l'Entrée : la TUI
+/// traite chaque morceau à part (une consigne tapée d'un bloc reste du texte
+/// tapé, la revue reste un collage).
+const REVIEW_STEP: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// Tape la consigne, colle la revue en *bracketed paste*, puis Entrée
+/// (architecture § 9 : seul le contenu est collé).
+///
+/// Le verrou des écritures de la session est tenu pendant les trois envois :
+/// ni une autre revue, ni des Shift+Tab, ni une entrée clavier passée par le
+/// démon ne s'intercalent. (Des touches tapées par l'utilisateur pendant ces
+/// 160 ms attendent derrière le verrou.)
+async fn send_review(
+    tx: &mpsc::Sender<Vec<u8>>,
+    lock: &tokio::sync::Mutex<()>,
+    review: &str,
+) -> Result<(), RpcError> {
+    let _guard = lock.lock().await;
+    let gone = |_| RpcError::new(error_code::INVALID_STATE, "la session ne tourne plus");
+    tx.send(crate::domain::diff::REVIEW_INSTRUCTION.as_bytes().to_vec())
+        .await
+        .map_err(gone)?;
+    tokio::time::sleep(REVIEW_STEP).await;
+    let mut paste = b"\x1b[200~".to_vec();
+    paste.extend_from_slice(review.as_bytes());
+    paste.extend_from_slice(b"\x1b[201~");
+    tx.send(paste).await.map_err(gone)?;
+    tokio::time::sleep(REVIEW_STEP).await;
+    tx.send(b"\r".to_vec()).await.map_err(gone)?;
+    Ok(())
+}
+
 /// Écrit les Shift+Tab d'un `sessions.setMode` accepté. Si l'écriture
 /// échoue (processus terminé), le changement attendu est abandonné.
 async fn send_mode_keys(
@@ -458,6 +520,11 @@ async fn send_mode_keys(
     params: &Value,
     (tx, bytes, sent): super::supervisor::ModeKeys,
 ) -> Result<Value, RpcError> {
+    let lock = session_id_param(params).ok().and_then(|id| d.pty_lock(&id));
+    let _guard = match &lock {
+        Some(l) => Some(l.lock().await),
+        None => None,
+    };
     if sent > 0 && tx.send(bytes).await.is_err() {
         if let Ok(id) = session_id_param(params) {
             d.cancel_mode_change(&id);
@@ -544,6 +611,13 @@ fn queue_event(daemon: &Daemon, queue: &mut VecDeque<Event>, ev: Event) {
     if matches!(ev, Event::Quotas) && queue.iter().any(|e| matches!(e, Event::Quotas)) {
         return; // Regroupé : relu au moment d'envoyer.
     }
+    if let Event::DiffChanged(id) = &ev
+        && queue
+            .iter()
+            .any(|e| matches!(e, Event::DiffChanged(other) if other == id))
+    {
+        return;
+    }
     if let Event::Updated(id) = &ev
         && queue
             .iter()
@@ -565,7 +639,10 @@ fn resync_events(daemon: &Daemon, queue: &mut VecDeque<Event>) {
     // Les retraits récents d'abord : un client en retard apprend aussi quelles
     // sessions ont disparu (un `session.removed` inconnu est sans effet).
     queue.extend(daemon.removed_ids().into_iter().map(Event::Removed));
-    queue.extend(daemon.session_ids().into_iter().map(Event::Updated));
+    let ids = daemon.session_ids();
+    queue.extend(ids.iter().copied().map(Event::Updated));
+    // Un client en retard a pu manquer des changements de diff.
+    queue.extend(ids.into_iter().map(Event::DiffChanged));
     queue.push_back(Event::Quotas);
 }
 
@@ -580,6 +657,7 @@ fn event_frame(daemon: &Daemon, ev: Event) -> Option<Frame> {
         }
         Event::Removed(id) => notification("session.removed", json!({"id": id})),
         Event::Quotas => notification("quotas.updated", daemon.quotas_json()),
+        Event::DiffChanged(id) => notification("session.diff_changed", json!({"id": id})),
     };
     Some(Frame::rpc(&value))
 }

@@ -131,6 +131,29 @@ pub trait Vcs: Send + Sync {
     fn resolve(&self, path: &Path) -> Option<RepoInfo>;
 }
 
+/// Échec d'un calcul de diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffError {
+    /// Le dossier n'est pas dans un dépôt git (ou git est absent).
+    NotARepo,
+    /// `git` a échoué ou n'a pas répondu à temps (message en français).
+    Failed(String),
+}
+
+/// Diff d'un worktree par la CLI `git`. Bloquant : à appeler hors du runtime.
+pub trait DiffSource: Send + Sync {
+    /// Fichiers changés depuis la base de la branche (commités, non commités
+    /// et non suivis), chemins relatifs à la racine du worktree.
+    fn changes(&self, cwd: &Path) -> Result<crate::domain::diff::ChangeSet, DiffError>;
+    /// Diff d'un fichier de la liste.
+    /// Diff d'un fichier de la liste `changes` (même racine, même base).
+    fn file_diff(
+        &self,
+        changes: &crate::domain::diff::ChangeSet,
+        file: &crate::domain::diff::ChangedFile,
+    ) -> Result<crate::domain::diff::FileDiff, DiffError>;
+}
+
 /// Une session telle qu'enregistrée en base.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRecord {

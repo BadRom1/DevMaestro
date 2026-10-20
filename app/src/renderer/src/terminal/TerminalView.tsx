@@ -9,12 +9,11 @@
  */
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { Terminal } from '@xterm/xterm'
+import { Terminal, type ITheme } from '@xterm/xterm'
 import { useEffect, useRef, useState } from 'react'
 
 import { ackTerminal, api, call, onTerminalMessage, sendTerminalInput } from '../api'
 import { describeError } from '../state/errors'
-import { terminalTheme } from '../theme'
 import { TerminalFeed } from './feed'
 
 interface Live {
@@ -33,8 +32,7 @@ const usable = (cols: number, rows: number): boolean => cols >= 20 && rows >= 4
 export function TerminalView({
   sessionId,
   alive,
-  scheme,
-  themeKey,
+  theme,
   onSize,
   onLink,
   emptyText,
@@ -42,9 +40,8 @@ export function TerminalView({
 }: {
   sessionId: string | null
   alive: boolean
-  scheme: 'light' | 'dark'
-  /** Clé des couleurs du thème (palette, couleurs choisies). */
-  themeKey?: string
+  /** Couleurs du terminal, calculées par l'app à partir des jetons du thème. */
+  theme: ITheme
   onSize?: (cols: number, rows: number) => void
   /** Lien OSC 8 activé dans le terminal (http/https seulement). */
   onLink?: (url: string) => void
@@ -58,6 +55,8 @@ export function TerminalView({
   const idRef = useRef<string | null>(sessionId)
   const pinned = useRef(false)
   const aliveRef = useRef(alive)
+  const themeRef = useRef(theme)
+  themeRef.current = theme
   aliveRef.current = alive
   const onSizeRef = useRef(onSize)
   onSizeRef.current = onSize
@@ -85,7 +84,7 @@ export function TerminalView({
         scrollback: 5000,
         cursorBlink: false,
         allowProposedApi: false,
-        theme: terminalTheme(scheme),
+        theme: themeRef.current,
         // Liens OSC 8 : jamais ouverts directement, confirmation dans l'app.
         linkHandler: {
           allowNonHttpProtocols: false,
@@ -223,8 +222,8 @@ export function TerminalView({
   }, [alive, ready])
 
   useEffect(() => {
-    if (live.current) live.current.term.options.theme = terminalTheme(scheme)
-  }, [scheme, themeKey, ready])
+    if (live.current) live.current.term.options.theme = theme
+  }, [theme, ready])
 
   return (
     <div className="term">

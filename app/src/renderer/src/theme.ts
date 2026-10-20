@@ -2,7 +2,7 @@
 import type { ITheme } from '@xterm/xterm'
 
 import type { ThemeSettings } from '../../shared/settings'
-import { ALL_OVERRIDABLE, resolveScheme, themeOverrides, type Scheme } from './state/themeTokens'
+import { ALL_OVERRIDABLE, schemeTokens, themeOverrides, type Scheme } from './state/themeTokens'
 
 export type { ThemeMode } from '../../shared/settings'
 
@@ -22,32 +22,35 @@ export function systemPrefersLight(): boolean {
   return window.matchMedia('(prefers-color-scheme: light)').matches
 }
 
-export function effectiveScheme(mode: ThemeSettings['mode']): Scheme {
-  return resolveScheme(mode, systemPrefersLight())
-}
-
-/** Pose `data-theme` et les couleurs de la palette et de l'utilisateur pour le mode affiché. */
-export function applyTheme(theme: ThemeSettings): void {
+/**
+ * Pose `data-theme` et les couleurs de la palette et de l'utilisateur pour le
+ * mode affiché `scheme` (résolu une seule fois, par l'app : voir `resolveScheme`).
+ */
+export function applyTheme(theme: ThemeSettings, scheme: Scheme): void {
   const root = document.documentElement
-  if (theme.mode === 'system') delete root.dataset.theme
-  else root.dataset.theme = theme.mode
+  // Toujours explicite : la feuille de style suit le mode résolu par l'app, pas sa propre requête média.
+  root.dataset.theme = scheme
   for (const k of ALL_OVERRIDABLE) root.style.removeProperty(`--${k}`)
-  const values = themeOverrides(theme, effectiveScheme(theme.mode))
+  const values = themeOverrides(theme, scheme)
   for (const [k, v] of Object.entries(values)) root.style.setProperty(`--${k}`, v)
 }
 
-function token(name: string): string {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim()
-}
-
-/** Couleurs du terminal, tirées des jetons du thème. */
-export function terminalTheme(scheme: 'light' | 'dark'): ITheme {
+/**
+ * Couleurs du terminal, calculées à partir des jetons du thème (`schemeTokens` :
+ * base du mode, palette, couleurs choisies) et non relues dans le CSS : pas de
+ * décalage quand le mode change (les effets des enfants passent avant ceux de l'app).
+ */
+export function terminalThemeFrom(tokens: Record<string, string>, scheme: Scheme): ITheme {
+  const sunk = tokens.sunk ?? (scheme === 'light' ? '#f7f8fb' : '#0b0d12')
+  const fg = tokens.fg ?? (scheme === 'light' ? '#1a1f2c' : '#dde2ec')
+  const accent = tokens.accent ?? (scheme === 'light' ? '#2f5bd3' : '#86a8ff')
   const base: ITheme = {
-    background: token('--sunk'),
-    foreground: token('--fg'),
-    cursor: token('--fg'),
-    cursorAccent: token('--sunk'),
-    selectionBackground: token('--sel'),
+    background: sunk,
+    foreground: fg,
+    cursor: fg,
+    cursorAccent: sunk,
+    // Même sélection que `--sel` : l'accent à 22 % (clair) ou 30 % (sombre).
+    selectionBackground: `${accent}${scheme === 'light' ? '38' : '4d'}`,
   }
   if (scheme === 'light') {
     return {
@@ -89,4 +92,9 @@ export function terminalTheme(scheme: 'light' | 'dark'): ITheme {
     brightCyan: '#8ce0ea',
     brightWhite: '#ffffff',
   }
+}
+
+/** Thème du terminal pour ces réglages et ce mode. */
+export function terminalTheme(theme: ThemeSettings, scheme: Scheme): ITheme {
+  return terminalThemeFrom(schemeTokens(theme, scheme), scheme)
 }

@@ -222,6 +222,67 @@ export interface QuotasReport {
   profiles: Record<string, DaemonProfileQuota>
 }
 
+/* ---------- Diff et relecture (v0.2, lot 1) ---------- */
+
+export interface DiffBase {
+  ref: string
+  sha: string
+  /** `merge_base` : départ de la branche ; `head` : pas de branche par défaut trouvée. */
+  kind: 'merge_base' | 'head'
+}
+
+export type DiffStatus = 'A' | 'M' | 'D' | 'R' | '?'
+
+export interface DiffFile {
+  path: string
+  old_path?: string | null
+  status: DiffStatus
+  /** `null` : non compté (fichiers non suivis au-delà des 200 premiers). */
+  additions: number | null
+  deletions: number | null
+  binary: boolean
+}
+
+export interface DiffSummary {
+  base: DiffBase | null
+  files: DiffFile[]
+  /** Liste coupée par le démon (trop de fichiers). */
+  truncated?: boolean
+  /** Fichiers ignorés parce que leur contenu n'est pas de l'UTF-8 (liste ou nombre). */
+  skipped_non_utf8?: string[] | number | null
+}
+
+export interface DiffLine {
+  kind: ' ' | '+' | '-'
+  old_no: number | null
+  new_no: number | null
+  text: string
+}
+
+export interface DiffHunk {
+  header: string
+  old_start: number
+  old_lines: number
+  new_start: number
+  new_lines: number
+  lines: DiffLine[]
+}
+
+export interface FileDiff {
+  hunks: DiffHunk[]
+  binary: boolean
+  too_large: boolean
+}
+
+export type ReviewSide = 'new' | 'old'
+
+export interface ReviewComment {
+  path: string
+  line: number
+  side: ReviewSide
+  text: string
+}
+
 export type PermissionDecision = 'allow' | 'allow_always' | 'deny'
 /** Modes que l'app sait demander (`sessions.setMode`). */
 export type SettableMode = 'default' | 'acceptEdits' | 'plan' | 'auto'
@@ -290,6 +351,9 @@ export interface Methods {
     params: { profile?: string; limit?: number; include_hidden?: boolean }
     result: { profile: string; sessions: PastSession[] }
   }
+  'sessions.diff': { params: { id: string }; result: DiffSummary }
+  'sessions.diffFile': { params: { id: string; path: string }; result: FileDiff }
+  'sessions.sendReview': { params: { id: string; comments: ReviewComment[]; general?: string }; result: unknown }
   'quotas.get': { params: { refresh?: boolean }; result: QuotasReport }
   'transcripts.hide': { params: { profile: string; claude_session_id: string }; result: { hidden: boolean } }
   'transcripts.unhide': { params: { profile: string; claude_session_id: string }; result: { hidden: boolean } }
@@ -316,6 +380,9 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'transcripts.hide',
   'transcripts.unhide',
   'quotas.get',
+  'sessions.diff',
+  'sessions.diffFile',
+  'sessions.sendReview',
 ]
 
 /** Codes d'erreur JSON-RPC du démon (protocole § 3). */
@@ -342,3 +409,5 @@ export type Notification =
   | { method: 'session.removed'; params: { id: string } }
   /** Quotas mis à jour par le démon (même forme que `quotas.get`). */
   | { method: 'quotas.updated'; params: QuotasReport }
+  /** Les fichiers changés d'une session ont changé (liste ou compteurs). */
+  | { method: 'session.diff_changed'; params: { id: string } }

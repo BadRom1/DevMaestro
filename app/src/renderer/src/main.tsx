@@ -15,7 +15,8 @@ import { defaultSettings, normalizeSettings, type AppSettings } from '../../shar
 import { api, requestTerminalPort } from './api'
 import { App } from './App'
 import { SettingsProvider } from './settings'
-import { applyTheme, legacyThemeMode } from './theme'
+import { resolveScheme } from './state/themeTokens'
+import { applyTheme, legacyThemeMode, systemPrefersLight } from './theme'
 
 /** Réglages du processus principal avant le premier rendu (pas d'éclair de thème). */
 async function loadSettings(): Promise<AppSettings> {
@@ -40,7 +41,7 @@ async function loadSettings(): Promise<AppSettings> {
 
 requestTerminalPort()
 void loadSettings().then((initial) => {
-  applyTheme(initial.theme)
+  applyTheme(initial.theme, resolveScheme(initial.theme.mode, systemPrefersLight()))
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <SettingsProvider initial={initial}>

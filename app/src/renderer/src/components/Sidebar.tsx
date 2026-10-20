@@ -154,7 +154,11 @@ export function Sidebar(props: {
             {(branch !== name || missing) && (
               <span className="sub">
                 {branch !== name && <span className="br">{branch}</span>}
-                {missing && <span className="gone">dossier supprimé</span>}
+                {missing && (
+                  <span className="gone" title={`ancien emplacement : ${s.cwd}`}>
+                    dossier supprimé
+                  </span>
+                )}
               </span>
             )}
           </span>
@@ -214,7 +218,11 @@ export function Sidebar(props: {
             {(p.git_branch || missing) && (
               <span className="sub">
                 {p.git_branch && <span className="br">{p.git_branch}</span>}
-                {missing && <span className="gone">dossier supprimé</span>}
+                {missing && (
+                  <span className="gone" title={`ancien emplacement : ${p.cwd}`}>
+                    dossier supprimé
+                  </span>
+                )}
               </span>
             )}
           </span>
@@ -246,6 +254,8 @@ export function Sidebar(props: {
   return (
     // `tabIndex={-1}` : point de retour du focus quand l'élément déclencheur a disparu.
     <nav className="panel side" aria-label="Projets et sessions" tabIndex={-1}>
+      {/* Projets en haut (défilement propre), anciennes sessions ancrées en bas. */}
+      <div className="side-projects">
       <div className="cap">
         <span className="lbl">Projets</span>
         <span className="hint">par dépôt git ou dossier</span>
@@ -268,7 +278,11 @@ export function Sidebar(props: {
             onToggle={() => toggle(key)}
             extra={
               <>
-                {g.missing && <span className="gone">dossier supprimé</span>}
+                {g.missing && (
+                  <span className="gone" title={`ancien emplacement : ${g.root ?? 'inconnu'}`}>
+                    dossier supprimé
+                  </span>
+                )}
                 {g.waiting > 0 && (
                   <span className="count" aria-label={`${g.waiting} à répondre`}>
                     {g.waiting} ⚠
@@ -281,7 +295,8 @@ export function Sidebar(props: {
           </Group>
         )
       })}
-      <div className="old">
+      </div>
+      <div className={`old${pastOpen ? ' open' : ''}`}>
         <button className="cap sec" aria-expanded={pastOpen} aria-controls={pastListId} onClick={() => toggle(PAST_SECTION)}>
           <Chevron open={pastOpen} />
           <span className="lbl">Anciennes sessions</span>
@@ -290,7 +305,7 @@ export function Sidebar(props: {
           </span>
           <span className="hint">à reprendre</span>
         </button>
-        <div id={pastListId} hidden={!pastOpen}>
+        <div id={pastListId} className="old-list" hidden={!pastOpen}>
           {props.past.length === 0 && <p className="empty-note">Aucune ancienne session trouvée.</p>}
           {props.pastGroups.map((g) => {
             const placeholder = g.key === RESOLVING_GROUP
@@ -306,7 +321,11 @@ export function Sidebar(props: {
                 onToggle={() => (placeholder ? setResolvingOpen((o) => !o) : toggle(key))}
                 extra={
                   <>
-                  {g.missing && <span className="gone">dossier supprimé</span>}
+                  {g.missing && (
+                  <span className="gone" title={`ancien emplacement : ${g.root ?? 'inconnu'}`}>
+                    dossier supprimé
+                  </span>
+                )}
                   <span
                     className="hint grp-n"
                     aria-label={`${g.entries.length} session${g.entries.length > 1 ? 's' : ''}, dernière activité ${relativeTime(latest)}`}

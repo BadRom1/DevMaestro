@@ -57,6 +57,8 @@ pub mod error_code {
     /// `sessions.resume` impossible : le dossier de travail de la session
     /// n'existe plus (worktree supprimé…).
     pub const CWD_MISSING: i64 = -32016;
+    /// Diff impossible : la session n'est pas dans un dépôt git.
+    pub const NOT_A_REPO: i64 = -32017;
 }
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {

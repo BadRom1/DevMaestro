@@ -147,9 +147,11 @@ fn log_line(line: Value) {
 }
 
 /// Touche lue au clavier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Key {
     Char(char),
+    /// Texte collé en *bracketed paste* (sauts de ligne compris).
+    Paste(String),
     Enter,
     Backspace,
     ShiftTab,
@@ -161,6 +163,10 @@ struct Keys {
     queue: VecDeque<Key>,
     /// 0 : normal ; 1 : après ESC ; 2 : après ESC [.
     esc: u8,
+    /// Paramètres de la séquence `ESC [` en cours.
+    params: String,
+    /// Collage encadré en cours (`ESC [200~` … `ESC [201~`) et son contenu.
+    paste: Option<String>,
 }
 
 impl Keys {
@@ -168,7 +174,26 @@ impl Keys {
         for c in String::from_utf8_lossy(data).chars() {
             match (self.esc, c) {
                 (0, '\x1b') => self.esc = 1,
-                (1, '[') => self.esc = 2,
+                (1, '[') => {
+                    self.esc = 2;
+                    self.params.clear();
+                }
+                (2, '~') if self.params == "200" => {
+                    self.esc = 0;
+                    self.paste = Some(String::new());
+                }
+                (2, '~') if self.params == "201" => {
+                    self.esc = 0;
+                    if let Some(p) = self.paste.take() {
+                        self.queue.push_back(Key::Paste(p));
+                    }
+                }
+                (2, c) if c.is_ascii_digit() || c == ';' => self.params.push(c),
+                (0, c) if self.paste.is_some() => {
+                    if c == '\n' || c == '\t' || !c.is_control() {
+                        self.paste.as_mut().unwrap().push(c);
+                    }
+                }
                 (2, 'Z') => {
                     self.esc = 0;
                     self.queue.push_back(Key::ShiftTab);
@@ -929,7 +954,12 @@ fn main() {
         rx,
         queue: VecDeque::new(),
         esc: 0,
+        params: String::new(),
+        paste: None,
     };
+    // Parties tapée et collée du prompt en cours (journalisées à l'Entrée).
+    let mut typed = String::new();
+    let mut pasted = String::new();
 
     out("\x1b[2J\x1b[H\x1b[?2004h");
     out("\x1b[1;35m╭─ Faux Claude Code ─╮\x1b[0m\r\n");
@@ -978,8 +1008,22 @@ fn main() {
             continue;
         };
         match key {
+            Key::Paste(p) => {
+                let n = p.lines().count();
+                line.push_str(&p);
+                pasted.push_str(&p);
+                out(&format!("[Pasted text +{n} lines]"));
+            }
             Key::Enter => {
                 out("\r\n");
+                if !pasted.is_empty() {
+                    log_line(json!({
+                        "prompt": line,
+                        "typed": std::mem::take(&mut typed),
+                        "pasted": std::mem::take(&mut pasted),
+                    }));
+                }
+                typed.clear();
                 let text = std::mem::take(&mut line);
                 let text = text.trim();
                 match text {
@@ -1069,6 +1113,7 @@ fn main() {
             }
             Key::Char(c) => {
                 line.push(c);
+                typed.push(c);
                 out(&c.to_string());
             }
         }

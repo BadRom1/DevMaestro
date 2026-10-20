@@ -1,6 +1,7 @@
 //! Modèle de domaine (architecture § 5) et règles pures.
 
 pub mod decision;
+pub mod diff;
 pub mod hooks;
 pub mod metrics;
 pub mod profile;

@@ -259,7 +259,7 @@ export function NewSessionDialog({
                 {names.length === 0 && <option value="default">default</option>}
                 {names.map((n) => (
                   <option key={n} value={n}>
-                    {label(n).long} ({label(n).short})
+                    {label(n).long}
                   </option>
                 ))}
               </select>
@@ -332,9 +332,10 @@ export function NewSessionDialog({
                     />
                     <ProfileBadge profile={c.profile} profiles={profiles} />
                     <span className="rname">{c.label}</span>
+                    <span className="sr-only">profil {label(c.profile).long}</span>
                     <span className="hint">
                       {c.branch ? `${c.branch} · ` : ''}
-                      {label(c.profile).long} · {shortAgo(c.at ? new Date(c.at).toISOString() : null)}
+                      {shortAgo(c.at ? new Date(c.at).toISOString() : null)}
                       {c.kind === 'session' ? ' · arrêtée' : ''}
                     </span>
                   </label>

@@ -219,6 +219,7 @@ pub struct Deps {
     pub store: Box<dyn SessionStore + Sync>,
     pub clock: Box<dyn Clock + Send + Sync>,
     pub quotas: Box<dyn crate::ports::QuotaSource>,
+    pub diff: Box<dyn crate::ports::DiffSource>,
 }
 
 /// Événement diffusé aux connexions. Léger : une connexion lente regroupe
@@ -233,6 +234,92 @@ pub enum Event {
     Removed(Uuid),
     /// Les quotas ont changé (`quotas.updated`, relu au moment d'envoyer).
     Quotas,
+    /// Le diff d'une session a changé (`session.diff_changed`).
+    DiffChanged(Uuid),
+}
+
+/// Anti-rebond du recalcul du diff d'une session.
+pub const DIFF_DEBOUNCE: Duration = Duration::from_millis(500);
+/// Recalcul du diff des sessions qui tournent.
+pub const DIFF_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Suivi du diff d'une session pour `session.diff_changed`.
+#[derive(Debug, Default)]
+struct DiffWatch {
+    /// Empreinte de référence des notifications : la dernière notifiée (ou
+    /// le premier calcul). Un `sessions.diff` ne la remplace pas : chaque
+    /// client est prévenu de tout changement, quel que soit qui a lu le diff.
+    notified: Option<String>,
+    /// Dernière liste calculée, et quand (réutilisée moins de [`DIFF_REUSE`]).
+    last: Option<(Arc<crate::domain::diff::ChangeSet>, Instant)>,
+    /// Un recalcul est déjà prévu.
+    pending: bool,
+    /// Un recalcul est en cours.
+    in_flight: bool,
+    /// Un hook est arrivé pendant le recalcul : en refaire un ensuite.
+    dirty: bool,
+}
+
+/// Verrou des écritures dans le PTY d'une session.
+pub type PtyLock = Arc<tokio::sync::Mutex<()>>;
+
+/// Revue prête à envoyer : file d'entrée du PTY, son verrou, texte à coller.
+pub type ReviewToSend = (mpsc::Sender<Vec<u8>>, PtyLock, String);
+
+/// Âge maximal de la liste réutilisée par `sessions.diffFile` et
+/// `sessions.sendReview` pour valider un chemin.
+pub const DIFF_REUSE: Duration = Duration::from_secs(2);
+
+/// Erreur de diff → erreur du protocole.
+fn diff_error(e: crate::ports::DiffError) -> RpcError {
+    match e {
+        crate::ports::DiffError::NotARepo => RpcError::new(
+            error_code::NOT_A_REPO,
+            "la session n'est pas dans un dépôt git",
+        ),
+        crate::ports::DiffError::Failed(m) => RpcError::new(error_code::INTERNAL_ERROR, m),
+    }
+}
+
+fn changeset_json(c: &crate::domain::diff::ChangeSet) -> Value {
+    json!({
+        "base": {"ref": c.base.reference, "sha": c.base.sha, "kind": c.base.kind.as_str()},
+        "truncated": c.truncated,
+        "skipped_non_utf8": c.skipped_non_utf8,
+        "files": c.files.iter().map(|f| {
+            let mut v = json!({
+                "path": f.path,
+                "status": f.status.as_str(),
+                "additions": f.additions,
+                "deletions": f.deletions,
+                "binary": f.binary,
+            });
+            if let Some(old) = &f.old_path {
+                v["old_path"] = json!(old);
+            }
+            v
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn file_diff_json(d: &crate::domain::diff::FileDiff) -> Value {
+    json!({
+        "hunks": d.hunks.iter().map(|h| json!({
+            "header": h.header,
+            "old_start": h.old_start,
+            "old_lines": h.old_lines,
+            "new_start": h.new_start,
+            "new_lines": h.new_lines,
+            "lines": h.lines.iter().map(|l| json!({
+                "kind": l.kind.to_string(),
+                "old_no": l.old_no,
+                "new_no": l.new_no,
+                "text": l.text,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "binary": d.binary,
+        "too_large": d.too_large,
+    })
 }
 
 /// Intervalle entre deux lectures de l'API d'usage.
@@ -304,6 +391,8 @@ struct Entry {
     /// Le dossier de travail existe (faux : worktree supprimé…) ; relu en même
     /// temps que `has_transcript`.
     cwd_exists: bool,
+    /// Verrou des écritures dans le PTY (revue, Shift+Tab, clavier).
+    pty_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Délai au bout duquel un `sessions.setMode` non confirmé n'empêche plus
@@ -377,6 +466,8 @@ pub struct Daemon {
     quota_calls: Mutex<HashMap<String, Instant>>,
     /// Une tournée de lecture des quotas est en cours.
     quota_refreshing: AtomicBool,
+    /// Suivi du diff des sessions (`session.diff_changed`).
+    diff_watch: Mutex<HashMap<Uuid, DiffWatch>>,
 }
 
 /// Instantané, historique éventuel, flux de sortie et terminal d'une session.
@@ -460,6 +551,7 @@ impl Entry {
             screen_mode: None,
             has_transcript: false,
             cwd_exists: true,
+            pty_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -674,6 +766,7 @@ impl Daemon {
             quotas: Mutex::new((std::collections::BTreeMap::new(), None)),
             quota_calls: Mutex::new(HashMap::new()),
             quota_refreshing: AtomicBool::new(false),
+            diff_watch: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1292,9 +1385,325 @@ impl Daemon {
                 removed.pop_front();
             }
         }
+        self.diff_watch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
         info!("session {id} oubliée (retirée du registre et de la base, transcript masqué)");
         let _ = self.events.send(Event::Removed(*id));
         Ok(json!({"forgotten": true}))
+    }
+
+    // ------------------------------------------------------------------- diff
+
+    /// Dossier d'une session, et si son processus tourne.
+    fn session_cwd(&self, id: &Uuid) -> Result<(PathBuf, bool), RpcError> {
+        let reg = self.lock();
+        let e = reg
+            .sessions
+            .get(id)
+            .ok_or_else(|| RpcError::unknown_session(id))?;
+        Ok((e.session.cwd.clone(), e.run.is_some()))
+    }
+
+    /// Verrou des écritures dans le PTY d'une session : une revue, des
+    /// Shift+Tab ou une entrée clavier ne s'entremêlent jamais.
+    pub fn pty_lock(&self, id: &Uuid) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        self.lock().sessions.get(id).map(|e| e.pty_lock.clone())
+    }
+
+    /// Fichiers changés d'un dossier (calcul complet), erreurs du protocole,
+    /// et mémorisés pour la session. Bloquant.
+    fn compute_changes(
+        &self,
+        id: Uuid,
+        cwd: &Path,
+    ) -> Result<Arc<crate::domain::diff::ChangeSet>, RpcError> {
+        if !cwd.is_dir() {
+            return Err(RpcError::cwd_missing(cwd));
+        }
+        let changes = Arc::new(self.deps.diff.changes(cwd).map_err(diff_error)?);
+        let mut watch = self.diff_watch.lock().unwrap_or_else(|e| e.into_inner());
+        let w = watch.entry(id).or_default();
+        w.last = Some((changes.clone(), Instant::now()));
+        // Référence des notifications, seulement si aucune n'existe encore.
+        if w.notified.is_none() {
+            w.notified = Some(changes.fingerprint());
+        }
+        Ok(changes)
+    }
+
+    /// Dernière liste calculée si elle date de moins de [`DIFF_REUSE`],
+    /// sinon un nouveau calcul. Bloquant.
+    fn recent_changes(
+        &self,
+        id: Uuid,
+        cwd: &Path,
+    ) -> Result<Arc<crate::domain::diff::ChangeSet>, RpcError> {
+        let cached = self
+            .diff_watch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .and_then(|w| w.last.clone())
+            .filter(|(_, at)| at.elapsed() < DIFF_REUSE);
+        match cached {
+            Some((c, _)) => Ok(c),
+            None => self.compute_changes(id, cwd),
+        }
+    }
+
+    /// `sessions.diff {id}` (toujours un calcul complet). Bloquant (`git`).
+    pub fn diff(&self, params: &Value) -> Result<Value, RpcError> {
+        let id = session_id_param(params)?;
+        let (cwd, _) = self.session_cwd(&id)?;
+        let changes = self.compute_changes(id, &cwd)?;
+        Ok(changeset_json(&changes))
+    }
+
+    /// `sessions.diffFile {id, path}` : `path` doit faire partie de la liste
+    /// de `sessions.diff` (la dernière calculée si elle a moins de 2 s) :
+    /// jamais de lecture de fichier arbitraire. Bloquant (`git`).
+    pub fn diff_file(&self, params: &Value) -> Result<Value, RpcError> {
+        let id = session_id_param(params)?;
+        let path = opt_str(params, "path")?.ok_or_else(|| RpcError::params("« path » manquant"))?;
+        let (cwd, _) = self.session_cwd(&id)?;
+        let changes = self.recent_changes(id, &cwd)?;
+        let file = changes.file(&path).ok_or_else(|| {
+            RpcError::params(format!(
+                "« {path} » ne fait pas partie du diff de la session"
+            ))
+        })?;
+        let d = self
+            .deps
+            .diff
+            .file_diff(&changes, file)
+            .map_err(diff_error)?;
+        Ok(file_diff_json(&d))
+    }
+
+    /// Session à qui envoyer une revue : elle doit tourner et n'avoir aucune
+    /// demande en attente (l'Entrée validerait le dialogue de la TUI).
+    fn review_target(
+        &self,
+        id: &Uuid,
+    ) -> Result<(PathBuf, mpsc::Sender<Vec<u8>>, PtyLock), RpcError> {
+        let reg = self.lock();
+        let e = reg
+            .sessions
+            .get(id)
+            .ok_or_else(|| RpcError::unknown_session(id))?;
+        let run = e.run.as_ref().ok_or_else(|| {
+            RpcError::new(
+                error_code::INVALID_STATE,
+                "la session ne tourne pas : la reprendre pour lui envoyer la revue",
+            )
+        })?;
+        if matches!(e.session.state.status(), SessionStatus::Waiting(_))
+            || !e.session.state.pending().is_empty()
+        {
+            return Err(RpcError::new(
+                error_code::INVALID_STATE,
+                "une demande attend une réponse dans la session",
+            ));
+        }
+        Ok((e.session.cwd.clone(), run.input.clone(), e.pty_lock.clone()))
+    }
+
+    /// `sessions.sendReview` : valide la revue, la met en forme (Markdown,
+    /// extraits du diff) et renvoie la file d'entrée du PTY, son verrou et le
+    /// texte à coller. Bloquant (`git`).
+    pub fn prepare_review(&self, params: &Value) -> Result<ReviewToSend, RpcError> {
+        use crate::domain::diff::{
+            MAX_REVIEW_COMMENTS, MAX_REVIEW_TEXT_CHARS, ReviewComment, Side, excerpt, format_review,
+        };
+        let id = session_id_param(params)?;
+        let text_param = |v: &Value, what: &str| -> Result<String, RpcError> {
+            let t = v
+                .as_str()
+                .ok_or_else(|| RpcError::params(format!("« {what} » doit être une chaîne")))?;
+            let n = t.chars().count();
+            if n > MAX_REVIEW_TEXT_CHARS {
+                return Err(RpcError::params(format!(
+                    "« {what} » : {n} caractères, {MAX_REVIEW_TEXT_CHARS} au plus"
+                )));
+            }
+            Ok(t.to_owned())
+        };
+        let general = match params.get("general") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(text_param(v, "general")?).filter(|g| !g.trim().is_empty()),
+        };
+        let raw = match params.get("comments") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(a)) => a.clone(),
+            Some(_) => return Err(RpcError::params("« comments » doit être une liste")),
+        };
+        if raw.len() > MAX_REVIEW_COMMENTS {
+            return Err(RpcError::params(format!(
+                "{} commentaires, {MAX_REVIEW_COMMENTS} au plus",
+                raw.len()
+            )));
+        }
+        let mut comments = Vec::with_capacity(raw.len());
+        for (i, c) in raw.iter().enumerate() {
+            let at = |m: &str| RpcError::params(format!("commentaire {} : {m}", i + 1));
+            let path = c
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .ok_or_else(|| at("« path » manquant"))?
+                .to_owned();
+            let line =
+                c.get("line")
+                    .and_then(Value::as_u64)
+                    .filter(|l| (1..=u32::MAX as u64).contains(l))
+                    .ok_or_else(|| at("« line » : entier positif attendu"))? as u32;
+            let side = match c.get("side").and_then(Value::as_str) {
+                Some("new") => Side::New,
+                Some("old") => Side::Old,
+                _ => return Err(at("« side » : « new » ou « old » attendu")),
+            };
+            let text = text_param(c.get("text").unwrap_or(&Value::Null), "text")
+                .map_err(|e| at(&e.message))?;
+            if text.trim().is_empty() {
+                return Err(at("« text » vide"));
+            }
+            comments.push(ReviewComment {
+                path,
+                line,
+                side,
+                text,
+            });
+        }
+        if comments.is_empty() && general.is_none() {
+            return Err(RpcError::params(
+                "revue vide : au moins un commentaire ou « general » attendu",
+            ));
+        }
+        let (cwd, input, lock) = self.review_target(&id)?;
+        let changes = self.recent_changes(id, &cwd)?;
+        let mut diffs: HashMap<String, crate::domain::diff::FileDiff> = HashMap::new();
+        for c in &comments {
+            let file = changes.file(&c.path).ok_or_else(|| {
+                RpcError::params(format!(
+                    "« {} » ne fait pas partie du diff de la session",
+                    c.path
+                ))
+            })?;
+            if !diffs.contains_key(&c.path) {
+                let d = self.deps.diff.file_diff(&changes, file).unwrap_or_default();
+                diffs.insert(c.path.clone(), d);
+            }
+        }
+        let excerpts: Vec<_> = comments
+            .iter()
+            .map(|c| excerpt(&diffs[&c.path], c.line, c.side))
+            .collect();
+        let review = format_review(general.as_deref(), &comments, &excerpts);
+        info!(
+            "session {id} : revue envoyée ({} commentaire(s))",
+            comments.len()
+        );
+        Ok((input, lock, review))
+    }
+
+    /// Recalcule le diff d'une session dans 500 ms (anti-rebond : un seul
+    /// recalcul en attente par session) et diffuse `session.diff_changed` si
+    /// l'empreinte a changé. Pendant un calcul en cours, un tic du
+    /// sondage est sauté ; un hook le fait refaire ensuite.
+    fn schedule_diff_check(&self, id: Uuid, from_poll: bool) {
+        {
+            let mut watch = self.diff_watch.lock().unwrap_or_else(|e| e.into_inner());
+            let w = watch.entry(id).or_default();
+            if w.pending {
+                return;
+            }
+            if w.in_flight {
+                if !from_poll {
+                    w.dirty = true;
+                }
+                return;
+            }
+            w.pending = true;
+        }
+        let Some(daemon) = self.me.upgrade() else {
+            return;
+        };
+        self.runtime.spawn(async move {
+            tokio::time::sleep(DIFF_DEBOUNCE).await;
+            {
+                let mut watch = daemon.diff_watch.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(w) = watch.get_mut(&id) else {
+                    return;
+                };
+                w.pending = false;
+                w.in_flight = true;
+            }
+            let d = daemon.clone();
+            let _ = tokio::task::spawn_blocking(move || d.check_diff(id)).await;
+            let again = {
+                let mut watch = daemon.diff_watch.lock().unwrap_or_else(|e| e.into_inner());
+                match watch.get_mut(&id) {
+                    Some(w) => {
+                        w.in_flight = false;
+                        std::mem::take(&mut w.dirty)
+                    }
+                    None => false,
+                }
+            };
+            if again {
+                daemon.schedule_diff_check(id, false);
+            }
+        });
+    }
+
+    /// Compare l'empreinte du diff d'une session à la dernière notifiée.
+    /// Bloquant.
+    fn check_diff(&self, id: Uuid) {
+        let Ok((cwd, _)) = self.session_cwd(&id) else {
+            return;
+        };
+        if !cwd.is_dir() {
+            return;
+        }
+        let Ok(changes) = self.deps.diff.changes(&cwd) else {
+            return; // hors dépôt ou git en échec : rien à signaler
+        };
+        let fp = changes.fingerprint();
+        let changed = {
+            let mut watch = self.diff_watch.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(w) = watch.get_mut(&id) else {
+                return; // session oubliée entre-temps
+            };
+            w.last = Some((Arc::new(changes), Instant::now()));
+            let changed = w.notified.as_ref().is_some_and(|old| *old != fp);
+            w.notified = Some(fp);
+            changed
+        };
+        if changed && self.lock().sessions.contains_key(&id) {
+            let _ = self.events.send(Event::DiffChanged(id));
+        }
+    }
+
+    /// Recalcul du diff des sessions qui tournent toutes les [`DIFF_POLL_INTERVAL`].
+    pub fn start_diff_polling(self: &Arc<Self>) {
+        let daemon = Arc::clone(self);
+        self.runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(DIFF_POLL_INTERVAL).await;
+                let running: Vec<Uuid> = daemon
+                    .lock()
+                    .sessions
+                    .values()
+                    .filter(|e| e.run.is_some())
+                    .map(|e| e.session.id)
+                    .collect();
+                for id in running {
+                    daemon.schedule_diff_check(id, true);
+                }
+            }
+        });
     }
 
     // ----------------------------------------------------------------- quotas
@@ -2194,6 +2603,16 @@ impl Daemon {
         self.emit_effects(id, &applied.effects);
         // Après le rattachement : le `session.updated` porte `answerable: true`.
         self.commit(entry);
+        // Fichiers peut-être changés : diff recalculé (anti-rebond).
+        if matches!(
+            event.kind,
+            HookKind::PostToolUse(_)
+                | HookKind::PostToolUseFailure { .. }
+                | HookKind::Stop
+                | HookKind::StopFailure
+        ) {
+            self.schedule_diff_check(id, false);
+        }
         handle
     }
 

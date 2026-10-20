@@ -25,6 +25,8 @@ export interface AppState {
    * `null` tant qu'ils sont inconnus ou si le démon ne sait pas les donner.
    */
   quotas: Record<string, DaemonProfileQuota> | null
+  /** Nombre de `session.diff_changed` reçus par session (rechargement du diff). */
+  diffSeq: Record<string, number>
   /** Nombre de `quotas.updated` reçus par profil (fin d'une actualisation). */
   quotasSeq: Record<string, number>
   /** Demandes signalées « peut-être obsolètes » par effet, par session. */
@@ -41,6 +43,7 @@ export const initialState: AppState = {
   projectRetry: {},
   quotas: null,
   quotasSeq: {},
+  diffSeq: {},
   stale: {},
   selectedId: null,
 }
@@ -63,6 +66,8 @@ export type Action =
   | { type: 'project.failed'; cwd: string; fallback: ProjectInfo; retryAt: number }
   /** Quotas du démon : remplacent ceux des profils présents dans le rapport. */
   | { type: 'quotas'; report: QuotasReport; notified?: boolean }
+  /** Les fichiers changés de la session ont changé. */
+  | { type: 'diff.changed'; id: string }
   /** Ancienne session masquée (`transcripts.hide`) : retirée tout de suite. */
   | { type: 'past.hidden'; profile: string; claude_session_id: string }
   | { type: 'past'; profile: string; sessions: PastSession[] }
@@ -162,6 +167,8 @@ export function reducer(state: AppState, action: Action): AppState {
       }
       return { ...state, quotas: { ...(state.quotas ?? {}), ...profiles }, quotasSeq }
     }
+    case 'diff.changed':
+      return { ...state, diffSeq: { ...state.diffSeq, [action.id]: (state.diffSeq[action.id] ?? 0) + 1 } }
     case 'past.hidden': {
       const list = state.past[action.profile]
       if (!list) return state

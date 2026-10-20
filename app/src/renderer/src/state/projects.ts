@@ -47,6 +47,30 @@ export function missingGroupDir(cwd: string, projects: Record<string, ProjectInf
   return dir
 }
 
+/**
+ * Projet déplacé : un groupe de dossier disparu (sans dépôt retrouvé) rejoint
+ * le dépôt existant du même nom quand ses entrées montrent que c'était un
+ * dépôt git (`wasGit` : une branche est connue pour au moins une entrée) ET
+ * qu'**un seul** dépôt existant porte ce nom. Ses entrées gardent leur pastille
+ * « dossier supprimé ». Sinon le groupe reste à part.
+ */
+export function mergeMovedGroups<G extends { name: string; missing: boolean; isGit: boolean }>(
+  groups: G[],
+  merge: (into: G, from: G) => void,
+  wasGit: (g: G) => boolean,
+): G[] {
+  const targets = groups.filter((g) => !g.missing && g.isGit)
+  const merged = new Set<G>()
+  for (const g of groups) {
+    if (!g.missing || g.isGit || !wasGit(g)) continue
+    const same = targets.filter((t) => t.name === g.name)
+    if (same.length !== 1) continue
+    merge(same[0]!, g)
+    merged.add(g)
+  }
+  return merged.size ? groups.filter((g) => !merged.has(g)) : groups
+}
+
 /** Prochain ancêtre à résoudre pour situer un dossier disparu, ou `null`. */
 export function ancestorToResolve(cwd: string, projects: Record<string, ProjectInfo>): string | null {
   const top = missingGroupDir(cwd, projects)
@@ -100,7 +124,10 @@ export function groupByProject(
     g.sessions.push(s)
     if (s.status.state === 'waiting') g.waiting++
   }
-  const list = [...groups.values()]
+  const list = mergeMovedGroups([...groups.values()], (into, from) => {
+    into.sessions.push(...from.sessions)
+    into.waiting += from.waiting
+  }, (g) => g.sessions.some((s) => !!s.branch))
   for (const g of list) {
     g.sessions.sort(
       (a, b) =>
@@ -197,7 +224,10 @@ export function groupPast(entries: PastEntry[], projects: Record<string, Project
     g.entries.push(p)
     g.latest = Math.max(g.latest, pastTime(p))
   }
-  const list = [...groups.values()]
+  const list = mergeMovedGroups([...groups.values()], (into, from) => {
+    into.entries.push(...from.entries)
+    into.latest = Math.max(into.latest, from.latest)
+  }, (g) => g.entries.some((e) => !!e.git_branch))
   for (const g of list) g.entries.sort((a, b) => pastTime(b) - pastTime(a))
   return list.sort((a, b) => b.latest - a.latest || a.name.localeCompare(b.name, 'fr') || a.key.localeCompare(b.key))
 }

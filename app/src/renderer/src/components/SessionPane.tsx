@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useReducer, useRef, useState } from 'react'
 
 import {
   SETTABLE_MODES,
@@ -25,10 +25,14 @@ import {
 } from '../state/format'
 import { displayedMode, idleMode, modeReducer, normalizeMode } from '../state/modeSwitch'
 import { glyphFor } from '../state/status'
+import type { ITheme } from '@xterm/xterm'
+
 import { TerminalView } from '../terminal/TerminalView'
 import { Meter, ProfileChip, StatusGlyph } from './common'
 import { useSettings } from '../settings'
 import { PermissionCard, QuestionCard } from './RequestCards'
+import { activeComments, type ReviewAction, type ReviewDraft } from '../state/review'
+import { DiffView, useSessionDiff } from './DiffView'
 import { ForgetConfirm } from './ForgetConfirm'
 import { ColorBar, ColorPicker, RenameField } from './SessionIdentity'
 
@@ -324,21 +328,32 @@ export function SessionPane({
   project,
   profiles,
   stale,
-  scheme,
-  themeKey,
+  termTheme,
   termSize,
   onTermSize,
   onLink,
   onSessionUpdated,
   onForget,
+  diffSeq,
+  draft,
+  review,
+  seen: seenFiles,
+  onSeen,
 }: {
   session: Session | null
+  /** Nombre de `session.diff_changed` reçus pour la session affichée. */
+  diffSeq: number
+  /** Revue en cours de la session affichée. */
+  draft: ReviewDraft
+  review: (a: ReviewAction) => void
+  /** Fichiers marqués « vu » dans la session affichée. */
+  seen: Record<string, boolean>
+  onSeen: (path: string, value: boolean) => void
   project: ProjectInfo | undefined
   profiles: Profile[]
   stale: number[]
-  scheme: 'light' | 'dark'
-  /** Change à chaque changement de couleurs : le terminal relit les jetons. */
-  themeKey: string
+  /** Couleurs du terminal (mode affiché, palette, couleurs choisies). */
+  termTheme: ITheme
   termSize: { cols: number; rows: number } | null
   onTermSize: (cols: number, rows: number) => void
   onLink: (url: string) => void
@@ -351,6 +366,20 @@ export function SessionPane({
   const seen = useRef(new Set<string>())
   const keys = pending.map((r) => `${session?.id}:${r.request_id}`)
   const keysSig = keys.join(',')
+  const [tab, setTab] = useState<'terminal' | 'diff'>('terminal')
+  // Le diff n'est calculé qu'une fois l'onglet ouvert pour la session (puis tenu à jour pour le badge).
+  const [diffOpened, setDiffOpened] = useState<ReadonlySet<string>>(() => new Set())
+  useEffect(() => {
+    if (tab === 'diff' && session && !diffOpened.has(session.id)) setDiffOpened((s) => new Set(s).add(session.id))
+  }, [tab, session?.id])
+  const diff = useSessionDiff(session?.id ?? null, diffSeq, tab === 'diff' || (!!session && diffOpened.has(session.id)))
+  const fileCount = diff.summary?.files.length ?? null
+  const pendingComments = activeComments(draft).length
+  const tabsId = useId()
+  const tabs = [
+    ['terminal', 'Terminal'],
+    ['diff', 'Diff'],
+  ] as const
 
   // Nouvelle demande : le focus va à la carte, sauf si l'utilisateur tape (terminal ou champ).
   useEffect(() => {
@@ -382,22 +411,83 @@ export function SessionPane({
         </div>
       )}
       <div className="tabs" role="tablist" aria-label="Vues de la session">
-        <button role="tab" aria-selected="true" id="tab-terminal" aria-controls="panel-terminal">
-          Terminal
-          {pending.length > 0 && <span className="badge wait">{pending.length}</span>}
-        </button>
+        {tabs.map(([k, l]) => (
+          <button
+            key={k}
+            role="tab"
+            id={`${tabsId}-${k}`}
+            aria-selected={tab === k}
+            aria-controls={`${tabsId}-${k}-panel`}
+            tabIndex={tab === k ? 0 : -1}
+            onClick={() => setTab(k)}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+                e.preventDefault()
+                const next = tab === 'terminal' ? 'diff' : 'terminal'
+                setTab(next)
+                document.getElementById(`${tabsId}-${next}`)?.focus()
+              }
+            }}
+          >
+            {l}
+            {k === 'terminal' && pending.length > 0 && (
+              <span className="badge wait" aria-label={`${pending.length} à répondre`}>
+                {pending.length}
+              </span>
+            )}
+            {k === 'diff' && fileCount !== null && fileCount > 0 && (
+              <span className="badge" aria-label={`${fileCount} fichier${fileCount > 1 ? 's' : ''} changé${fileCount > 1 ? 's' : ''}`}>
+                {fileCount}
+              </span>
+            )}
+            {k === 'diff' && pendingComments > 0 && (
+              <span className="badge pend" aria-label={`${pendingComments} commentaire${pendingComments > 1 ? 's' : ''} en attente`}>
+                💬{pendingComments}
+              </span>
+            )}
+          </button>
+        ))}
       </div>
-      <div className="term-panel" role="tabpanel" id="panel-terminal" aria-labelledby="tab-terminal">
+      <div className="term-panel">
+        {/* Le terminal reste monté et dimensionné sous le diff (sa taille ne change pas). */}
+        <div
+          className="term-wrap"
+          role="tabpanel"
+          id={`${tabsId}-terminal-panel`}
+          aria-labelledby={`${tabsId}-terminal`}
+          inert={tab !== 'terminal'}
+        >
         <TerminalView
           sessionId={session?.id ?? null}
           alive={session?.alive ?? false}
-          scheme={scheme}
-          themeKey={themeKey}
+          theme={termTheme}
           onSize={onTermSize}
           onLink={onLink}
           hostRef={termHost}
           emptyText="Choisis une session à gauche, ou lance-en une nouvelle."
         />
+        </div>
+        {tab === 'diff' && (
+          <div className="diff-layer" role="tabpanel" id={`${tabsId}-diff-panel`} aria-labelledby={`${tabsId}-diff`}>
+            {session ? (
+              <DiffView
+                key={session.id}
+                session={session}
+                diff={diff}
+                draft={draft}
+                review={review}
+                seen={seenFiles}
+                onSeen={onSeen}
+                onSent={() => {
+                  setTab('terminal')
+                  document.getElementById(`${tabsId}-terminal`)?.focus()
+                }}
+              />
+            ) : (
+              <p className="empty">Choisis une session pour voir ce qu’elle a changé.</p>
+            )}
+          </div>
+        )}
         {/* Les cartes recouvrent le bas du terminal sans changer sa taille. */}
         <div className="asks" ref={asks} aria-live="polite" aria-label="Demandes en attente">
           {session &&

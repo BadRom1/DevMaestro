@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 
 import type { ConnectionState } from '../../shared/bridge'
 import { validHome } from '../../shared/home'
@@ -15,7 +15,12 @@ import { initialState, needsResolve, reducer } from './state/store'
 import { SettingsDialog } from './components/SettingsDialog'
 import { useSettings } from './settings'
 import { buildProjectChoices } from './state/newSession'
-import { applyTheme, effectiveScheme, type ThemeMode } from './theme'
+import { emptyDraft, reviewReducer, type ReviewAction, type ReviewDraft } from './state/review'
+import { resolveScheme } from './state/themeTokens'
+import { applyTheme, systemPrefersLight, terminalTheme, type ThemeMode } from './theme'
+
+/** Aucun fichier vu (référence stable). */
+const NO_SEEN: Record<string, boolean> = {}
 
 function connectionText(c: ConnectionState): { text: string; bad: boolean } | null {
   switch (c.state) {
@@ -40,15 +45,17 @@ function connectionText(c: ConnectionState): { text: string; bad: boolean } | nu
   }
 }
 
-function useScheme(mode: ThemeMode): 'light' | 'dark' {
-  const [, force] = useState(0)
+/** Préférence du système (clair ou sombre), suivie en direct. */
+function useSystemPrefersLight(): boolean {
+  const [light, setLight] = useState(systemPrefersLight)
   useEffect(() => {
     const mq = window.matchMedia('(prefers-color-scheme: light)')
-    const on = () => force((n) => n + 1)
+    const on = () => setLight(mq.matches)
+    on()
     mq.addEventListener('change', on)
     return () => mq.removeEventListener('change', on)
   }, [])
-  return effectiveScheme(mode)
+  return light
 }
 
 /** Profondeur de la liste des anciennes sessions, par profil. */
@@ -60,10 +67,13 @@ export function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
   const { settings, update: updateSettings } = useSettings()
   const themeMode: ThemeMode = settings.theme.mode
-  const scheme = useScheme(themeMode)
-  // Thème appliqué à chaque changement (mode, palette, couleurs) et quand le système change de mode.
-  useEffect(() => applyTheme(settings.theme), [settings.theme, scheme])
-  const themeKey = useMemo(() => `${scheme}:${JSON.stringify(settings.theme)}`, [scheme, settings.theme])
+  // Seule source du mode affiché : le réglage, et la préférence du système pour « Auto ».
+  const systemLight = useSystemPrefersLight()
+  const scheme = resolveScheme(themeMode, systemLight)
+  // Variables CSS posées avant l'affichage, à chaque changement (mode, palette, couleurs, système).
+  useLayoutEffect(() => applyTheme(settings.theme, scheme), [settings.theme, scheme])
+  // Couleurs du terminal calculées des mêmes jetons (sans relire le CSS : aucun décalage).
+  const termTheme = useMemo(() => terminalTheme(settings.theme, scheme), [settings.theme, scheme])
   const [dialog, setDialog] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const closeSettings = useCallback(() => setSettingsOpen(false), [])
@@ -105,6 +115,7 @@ export function App() {
       if (n.method === 'session.updated') dispatch({ type: 'session.updated', session: n.params.session })
       else if (n.method === 'session.effect') dispatch({ type: 'session.effect', id: n.params.id, effect: n.params.effect })
       else if (n.method === 'session.removed') dispatch({ type: 'session.removed', id: n.params.id })
+      else if (n.method === 'session.diff_changed') dispatch({ type: 'diff.changed', id: n.params.id })
       else if (n.method === 'quotas.updated') dispatch({ type: 'quotas', report: n.params, notified: true })
     })
     return () => {
@@ -265,6 +276,26 @@ export function App() {
     dispatch({ type: 'session.removed', id })
   }, [])
 
+  /** Revues en cours, par session (gardées en changeant de session). */
+  const [reviews, setReviews] = useState<Record<string, ReviewDraft>>({})
+  /** Fichiers marqués « vu », par session puis chemin. */
+  const [seenFiles, setSeenFiles] = useState<Record<string, Record<string, boolean>>>({})
+  const selectedId = state.selectedId
+  const reviewSelected = useCallback(
+    (a: ReviewAction) => {
+      if (!selectedId) return
+      setReviews((r) => ({ ...r, [selectedId]: reviewReducer(r[selectedId] ?? emptyDraft, a) }))
+    },
+    [selectedId],
+  )
+  const seeSelected = useCallback(
+    (path: string, value: boolean) => {
+      if (!selectedId) return
+      setSeenFiles((m) => ({ ...m, [selectedId]: { ...(m[selectedId] ?? {}), [path]: value } }))
+    },
+    [selectedId],
+  )
+
   const onSessionUpdated = useCallback((s: Session) => dispatch({ type: 'session.response', session: s }), [])
 
   const onTermSize = useCallback((cols: number, rows: number) => setTermSize({ cols, rows }), [])
@@ -319,13 +350,17 @@ export function App() {
           project={selectedProject}
           profiles={state.profiles}
           stale={selected ? (state.stale[selected.id] ?? []) : []}
-          scheme={scheme}
-          themeKey={themeKey}
+          termTheme={termTheme}
           termSize={termSize}
           onTermSize={onTermSize}
           onLink={setLink}
           onSessionUpdated={onSessionUpdated}
           onForget={forget}
+          diffSeq={selected ? (state.diffSeq[selected.id] ?? 0) : 0}
+          draft={(selected && reviews[selected.id]) || emptyDraft}
+          review={reviewSelected}
+          seen={(selected && seenFiles[selected.id]) || NO_SEEN}
+          onSeen={seeSelected}
         />
       </main>
       {dialog && (

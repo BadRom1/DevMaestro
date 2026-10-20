@@ -51,10 +51,11 @@ function int(o: Obj, k: string, min: number, max: number): number {
   return v
 }
 
-function str(o: Obj, k: string, max: number, opts: { nonEmpty?: boolean } = {}): string {
+function str(o: Obj, k: string, max: number, opts: { nonEmpty?: boolean; codePoints?: boolean } = {}): string {
   const v = o[k]
   if (typeof v !== 'string') throw new ValidationError(`« ${k} » doit être une chaîne`)
-  if (v.length > max) throw new ValidationError(`« ${k} » est trop long (${max} caractères au plus)`)
+  const n = opts.codePoints ? [...v].length : v.length
+  if (n > max) throw new ValidationError(`« ${k} » est trop long (${max} caractères au plus)`)
   if (opts.nonEmpty && v.trim() === '') throw new ValidationError(`« ${k} » est vide`)
   return v
 }
@@ -128,6 +129,17 @@ function title(o: Obj, k: string): string {
   return v
 }
 
+/** Limites du démon pour une revue : 200 commentaires, 4 000 caractères chacun (et le général). */
+const MAX_REVIEW_COMMENTS = 200
+const MAX_REVIEW_TEXT = 4000
+
+/** Chemin d'un fichier du diff (relatif au dépôt, tel que donné par `sessions.diff`). */
+function relPath(o: Obj, k: string): string {
+  const v = str(o, k, MAX_PATH, { nonEmpty: true })
+  if (v.includes('\0')) throw new ValidationError(`« ${k} » contient un caractère nul`)
+  return v
+}
+
 /** Paramètres nettoyés pour `method`, ou `ValidationError`. */
 export function validateParams(method: MethodName, raw: unknown): Obj {
   const o = obj(raw)
@@ -197,6 +209,38 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       optional(o, out, 'limit', (x, k) => int(x, k, 1, 1000))
       optional(o, out, 'include_hidden', (x, k) => bool(x, k))
       return out
+    case 'sessions.diff':
+      out.id = uuid(o, 'id')
+      return out
+    case 'sessions.diffFile':
+      out.id = uuid(o, 'id')
+      out.path = relPath(o, 'path')
+      return out
+    case 'sessions.sendReview': {
+      out.id = uuid(o, 'id')
+      const list = o.comments
+      if (!Array.isArray(list) || list.length > MAX_REVIEW_COMMENTS) {
+        throw new ValidationError(`« comments » : liste de ${MAX_REVIEW_COMMENTS} commentaires au plus`)
+      }
+      out.comments = list.map((c, i) => {
+        const x = obj(c)
+        const where = `commentaire ${i + 1}`
+        try {
+          return {
+            path: relPath(x, 'path'),
+            line: int(x, 'line', 1, 10_000_000),
+            side: oneOf(x, 'side', ['new', 'old'] as const),
+            text: str(x, 'text', MAX_REVIEW_TEXT, { nonEmpty: true, codePoints: true }),
+          }
+        } catch (e) {
+          throw new ValidationError(`${where} : ${(e as Error).message}`)
+        }
+      })
+      optional(o, out, 'general', (x, k) => str(x, k, MAX_REVIEW_TEXT, { codePoints: true }))
+      const general = typeof out.general === 'string' ? out.general.trim() : ''
+      if ((out.comments as unknown[]).length === 0 && !general) throw new ValidationError('revue vide : aucun commentaire')
+      return out
+    }
     case 'quotas.get':
       optional(o, out, 'refresh', (x, k) => bool(x, k))
       return out

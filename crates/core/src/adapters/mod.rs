@@ -2,6 +2,7 @@
 
 pub mod clock;
 pub mod git_cli;
+pub mod git_diff;
 pub mod profiles;
 pub mod pty;
 pub mod sqlite;
@@ -10,6 +11,7 @@ pub mod usage_api;
 
 pub use clock::SystemClock;
 pub use git_cli::GitCli;
+pub use git_diff::GitDiff;
 pub use profiles::{FsProfileSource, discover_profiles};
 pub use pty::NativePty;
 pub use sqlite::SqliteStore;

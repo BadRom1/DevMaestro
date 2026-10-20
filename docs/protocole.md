@@ -82,7 +82,8 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `-32013` | « Toujours » impossible : aucune règle proposée par Claude Code (`always_rules` vide) |
 | `-32014` | `sessions.setMode` impossible : mode courant inconnu ou hors du cycle de Shift+Tab, ou mode visé hors du cycle |
 | `-32015` | `sessions.resume` impossible : Claude Code n'a pas de transcript pour cette session (message : « Claude Code n'a pas de transcript pour cette session : impossible de la reprendre ») |
-| `-32016` | `sessions.resume` impossible : le dossier de travail n'existe plus (message : « Le dossier de la session n'existe plus (worktree supprimé ?) : <cwd> ») |
+| `-32016` | `sessions.resume` impossible : le dossier de travail n'existe plus (message : « Le dossier de la session n'existe plus (worktree supprimé ?) : <cwd> ») ; aussi `sessions.diff`, `sessions.diffFile`, `sessions.sendReview` |
+| `-32017` | diff impossible : « la session n'est pas dans un dépôt git » |
 
 ## 4. Méthodes
 
@@ -109,6 +110,9 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `transcripts.hide` | `{profile?, claude_session_id}` | `{hidden: true}` |
 | `transcripts.unhide` | `{profile?, claude_session_id}` | `{hidden: false}` |
 | `quotas.get` | `{refresh?: bool}` | `{profiles: {"<profil>": Quotas}}` (voir ci-dessous) |
+| `sessions.diff` | `{id}` | `{base, files}` (voir « Diff et relecture ») |
+| `sessions.diffFile` | `{id, path}` | `{hunks, binary, too_large}` |
+| `sessions.sendReview` | `{id, comments: [{path, line, side, text}], general?}` | `{sent: true}` |
 
 Détails :
 
@@ -166,6 +170,67 @@ La TUI affiche sa propre demande pendant que le relais `PermissionRequest` atten
 - Une réponse acceptée clôt aussitôt la demande dans le démon : effet `request_resolved` avec `how: "answered_by_app"`, puis `session.updated` (la session repasse `running`). Le `PostToolUse` qui suit ne trouve plus rien à clore : une seule clôture par demande.
 - La réponse est remise aux relais (plusieurs si Claude Code a relancé le même hook : déduplication). Si la TUI a répondu entre-temps, Claude Code ignore la décision (constaté).
 
+### Diff et relecture (v0.2, lot 1)
+
+Le démon calcule le diff du worktree de la session par la CLI `git` (arguments séparés, jamais de shell ; depuis la racine du worktree, donc aussi dans un worktree lié ; `--literal-pathspecs` : un nom de fichier n'est jamais un motif ; chaque commande est tuée au bout de 10 s ; hors du runtime du démon). Configuration imposée à chaque appel : `-c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.relative=false -c diff.submodule=short -c core.quotePath=false -c diff.external= -c core.pager=cat`, `--no-pager`, `--no-ext-diff --no-textconv` pour les diffs, références par leur nom complet (`refs/remotes/…`, `refs/heads/…`) ; environnement `GIT_CONFIG_NOSYSTEM=1`, `GIT_OPTIONAL_LOCKS=0` (l'index n'est jamais écrit), `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`. **Risque résiduel** : comparer à l'arbre de travail peut lancer les filtres `filter.<pilote>.clean` du dépôt (`.gitattributes` et configuration du dépôt, comme Git LFS) ; ils ne se coupent pas de façon générique : un dépôt non fiable peut exécuter du code à chaque calcul, comme avec un `git status` de l'utilisateur. Session hors dépôt : `-32017` ; dossier disparu : `-32016` ; session inconnue : `-32001` ; échec de `git` : `-32603`. Une session arrêtée garde un diff lisible.
+
+**`sessions.diff {id}`** :
+
+```json
+{"base": {"ref": "origin/main", "sha": "…", "kind": "merge_base"},
+ "files": [
+   {"path": "src/a.rs", "status": "M", "additions": 3, "deletions": 1, "binary": false},
+   {"path": "src/neuf.rs", "old_path": "src/vieux.rs", "status": "R", "additions": 2, "deletions": 2, "binary": false},
+   {"path": "logo.png", "status": "?", "additions": 0, "deletions": 0, "binary": true},
+   {"path": "build/vieux.log", "status": "?", "additions": null, "deletions": 0, "binary": false}
+ ],
+ "truncated": false, "skipped_non_utf8": 0}
+```
+
+- **Base** : `git merge-base HEAD <branche par défaut>`, la branche par défaut étant `origin/HEAD` (`ref` : `origin/main`…), sinon `main`, sinon `master` (`kind: "merge_base"`) ; à défaut (pas de branche par défaut, pas d'ancêtre commun) `HEAD` (`kind: "head"`, `ref: "HEAD"`) ; dépôt sans commit : l'arbre vide (`kind: "head"`).
+- **Fichiers** : la base comparée à l'arbre de travail (`git diff -M --name-status -z` et `--numstat -z` : commits depuis la base, index et modifications non indexées), plus les fichiers non suivis (`git ls-files --others --exclude-standard`, 2 000 au plus). Chemins relatifs à la racine du worktree, triés. `status` : `A` ajouté, `M` modifié (changement de type compris), `D` supprimé, `R` renommé (avec `old_path`, détection de git par similarité), `?` non suivi (une copie compte comme un ajout). `additions` / `deletions` : lignes (0 pour un binaire). Pour un non suivi, `additions` compte ses lignes pour les **200 plus récents** (date de modification ; résultat gardé en cache tant que taille et date ne changent pas) et vaut `null` pour les autres et au-delà de 1 Mio (rien n'est lu). `binary` : selon git (`-` dans `numstat`), ou un octet nul dans les 8 000 premiers octets pour un non suivi compté (`false` s'il n'est pas lu).
+- `truncated: true` : liste incomplète (plus de 2 000 non suivis, ou sortie de `git` au-delà de 32 Mio). `skipped_non_utf8` : fichiers écartés parce que leur chemin n'est pas de l'UTF-8 (jamais montrés sous un chemin déformé).
+
+**`sessions.diffFile {id, path}`** : `path` doit être un `path` de la liste de la session (la dernière calculée si elle a moins de **2 s**, sinon recalculée ; sinon `-32602`) : aucune lecture d'un autre fichier. `sessions.diff` recalcule toujours.
+
+```json
+{"hunks": [{"header": "@@ -1,3 +1,4 @@ fn x()", "old_start": 1, "old_lines": 3, "new_start": 1, "new_lines": 4,
+            "lines": [{"kind": " ", "old_no": 1, "new_no": 1, "text": "un"},
+                      {"kind": "-", "old_no": 2, "new_no": null, "text": "deux"},
+                      {"kind": "+", "old_no": null, "new_no": 2, "text": "DEUX"}]}],
+ "binary": false, "too_large": false}
+```
+
+- Diff unifié avec 3 lignes de contexte (`git diff -M -U3 <base> -- [<ancien>] <chemin>`) ; un non suivi est montré entièrement ajouté (`@@ -0,0 +1,n @@`). `text` sans le `\n` final (ni `\r`) ; « \ No newline at end of file » est omis.
+- `binary: true` (aucun bloc) pour un fichier binaire ; `too_large: true` (aucun bloc) si un des deux côtés dépasse **1 Mio** ou si le diff dépasse **20 000 lignes**.
+
+**`session.diff_changed {id}`** : le démon recalcule le diff d'une session après chaque `PostToolUse`, `PostToolUseFailure`, `Stop` et `StopFailure`, et toutes les **5 s** pendant qu'elle tourne (rien pour une session arrêtée), avec un anti-rebond de **500 ms** (un seul recalcul en attente par session). Pendant un recalcul en cours, un tic du sondage est sauté et un hook en fait refaire un juste après : jamais d'empilement. Il compare une empreinte (base, `HEAD`, chemins, statuts, compteurs, et taille et date de modification en ns de chaque fichier : un contenu qui change à compteurs égaux est vu) à la dernière **notifiée** pour la session, et n'envoie la notification, à tous les clients, que si elle a changé. `sessions.diff` ne remplace pas cette référence (sauf pour poser la première) : chaque client est prévenu, quel que soit qui a lu le diff. Le premier calcul ne notifie pas. Un client en retard (resynchronisation) reçoit un `session.diff_changed` par session.
+
+**`sessions.sendReview {id, comments: [{path, line, side: "new" | "old", text}], general?}`** → `{sent: true}` :
+
+- Validation (`-32602`, rien n'est envoyé) : au plus **200** commentaires ; `path` dans la liste de `sessions.diff` ; `line` entier ≥ 1 (numéro dans la nouvelle version pour `side: "new"`, dans l'ancienne pour `"old"`) ; `text` non vide, `text` et `general` d'au plus **4 000** caractères ; au moins un commentaire ou un `general` non vide. La session doit tourner (`-32002` « la session ne tourne pas… » sinon) et n'avoir **aucune demande en attente** (statut `waiting`, permission ou question : `-32002` « une demande attend une réponse dans la session », l'Entrée validerait le dialogue de la TUI). Chemins validés sur la liste de la session (moins de 2 s, comme `sessions.diffFile`).
+- Envoi (architecture § 9, prototype n° 1 Q8 : la consigne est tapée, seul le contenu est collé) : la consigne tapée « Voici ma revue de tes changements, applique-la puis dis-moi ce que tu as fait : », puis la revue collée en *bracketed paste* (`ESC[200~ … ESC[201~`), puis Entrée (80 ms entre les trois). Le verrou des écritures de la session est tenu pendant les trois envois : une autre revue, des Shift+Tab (`sessions.setMode`) ou une entrée passée par le démon (trames `0x03`, `sessions.input`) attendent derrière et ne s'intercalent jamais ; des touches tapées par l'utilisateur dans ces 160 ms attendent aussi, puis suivent la revue. Si Claude travaille, Claude Code met le message en file d'attente.
+- Revue (Markdown, en français) :
+
+  ````markdown
+  # Revue de code
+
+  <general>
+
+  ### src/a.rs:42
+  ```diff
+        40 | ligne avant
+  +     42 | ligne commentée
+  ```
+
+  <commentaire>
+
+  ### src/a.rs:12 (ancienne version)
+  …
+  ````
+
+  Pour chaque commentaire : `### <chemin>:<ligne>` (« (ancienne version) » pour `side: "old"`), l'extrait du diff (± 2 lignes autour de la ligne, dans son bloc ; absent si la ligne n'est pas dans le diff), puis le commentaire. La clôture du bloc de code est plus longue que toute suite de « ` » de l'extrait. Tous les caractères de contrôle sauf saut de ligne et tabulation sont retirés de ce qui est collé (commentaires, chemins, extraits) : rien ne peut sortir du collage encadré ni taper de touche.
+
 ### Changer de mode (`sessions.setMode`)
 
 **Contournement** : Claude Code n'a pas d'API pour changer le mode d'une session en cours. Le démon écrit dans le PTY autant de Shift+Tab (`ESC [ Z`) qu'il en faut pour aller du mode courant connu (champ `mode` de la session : dernier `permission_mode` reçu dans un hook, ou dernier mode lu dans le pied de la TUI, voir plus bas) au mode visé, le long du cycle relevé avec **Claude Code 2.1.303** (prototype n° 1, Q9) : `default` (`manual`) → `acceptEdits` → `plan` → `auto` → `default`.
@@ -202,6 +267,7 @@ La TUI affiche sa propre demande pendant que le relais `PermissionRequest` atten
 | `session.effect` | `{id, effect: Effet}` | effets de la machine à états, juste **avant** le `session.updated` correspondant |
 | `session.resync` | `{id, snapshot: Écran}` | un abonné a pris trop de retard (§ 6) |
 | `quotas.updated` | `{profiles: {"<profil>": Quotas}}` | les quotas d'un profil ont changé (même forme que `quotas.get`) |
+| `session.diff_changed` | `{id}` | la liste des fichiers changés ou leurs compteurs ont changé : relire `sessions.diff` (et le fichier affiché) |
 | `session.removed` | `{id}` | la session a été oubliée (`sessions.forget`) : elle n'existe plus ; aucun `session.updated` ne suit pour elle |
 
 Pour un client lent, les `session.updated` en attente d'une même session sont **regroupés** : il reçoit l'état le plus récent au moment de l'envoi, pas chaque étape. Les `session.effect` ne sont pas regroupés ; si plus de 4 096 événements attendent (ou si le client a pris trop de retard sur le démon), la file est remplacée par un `session.removed` pour chacune des dernières sessions oubliées (jusqu'à 1 024, éventuellement déjà connues du client : à ignorer si l'`id` est inconnu) puis un `session.updated` par session, et les effets en trop sont perdus. Le dernier `session.updated` reçu fait toujours foi.

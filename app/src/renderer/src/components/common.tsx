@@ -49,13 +49,12 @@ export function ProfileBadge({ profile, profiles }: { profile: string; profiles:
   )
 }
 
-/** Libellé long d'un profil, badge compris, nom technique en infobulle. */
+/** Libellé long d'un profil (sans le badge court : jamais les deux côte à côte), nom technique en infobulle. */
 export function ProfileChip({ profile, profiles, className = '' }: { profile: string; profiles: { name: string }[]; className?: string }) {
   const { label } = useSettings()
   const l = label(profile)
   return (
     <span className={`chip ${profileClass(profile, profiles)} ${className}`.trim()} title={`Profil Claude Code ${l.long} (${profile})`}>
-      <ProfileBadge profile={profile} profiles={profiles} />
       {l.long}
     </span>
   )
@@ -77,8 +76,19 @@ function charWidth(el: HTMLElement): number {
  * disponible, chemin complet dans l'infobulle. Police à chasse fixe attendue
  * (le budget est un nombre de caractères). Toujours affiché de gauche à droite.
  */
-export function PathLabel({ path, title, className }: { path: string; title?: string; className?: string }) {
-  const ref = useRef<HTMLDivElement>(null)
+export function PathLabel({
+  path,
+  title,
+  className,
+  inline = false,
+}: {
+  path: string
+  title?: string
+  className?: string
+  /** Rendu en `<span>` (dans un bouton, par exemple). */
+  inline?: boolean
+}) {
+  const ref = useRef<HTMLElement>(null)
   const [max, setMax] = useState<number | null>(null)
 
   useLayoutEffect(() => {
@@ -104,8 +114,14 @@ export function PathLabel({ path, title, className }: { path: string; title?: st
   }, [])
 
   return (
-    <div ref={ref} className={className} title={title ?? path} dir="ltr">
-      {max === null ? path : truncateStart(path, max)}
-    </div>
+    inline ? (
+      <span ref={ref} className={className} title={title ?? path} dir="ltr">
+        {max === null ? path : truncateStart(path, max)}
+      </span>
+    ) : (
+      <div ref={ref as React.RefObject<HTMLDivElement>} className={className} title={title ?? path} dir="ltr">
+        {max === null ? path : truncateStart(path, max)}
+      </div>
+    )
   )
 }
