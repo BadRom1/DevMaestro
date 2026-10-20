@@ -113,6 +113,8 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `sessions.diff` | `{id}` | `{base, files}` (voir « Diff et relecture ») |
 | `sessions.diffFile` | `{id, path}` | `{hunks, binary, too_large}` |
 | `sessions.sendReview` | `{id, comments: [{path, line, side, text}], general?}` | `{sent: true}` |
+| `files.list` | `{id, path?}` | `{root, path, entries, truncated}` (voir « Fichiers d'une session ») |
+| `files.read` | `{id, path}` | `{path, size, binary, too_large, content}` |
 
 Détails :
 
@@ -230,6 +232,41 @@ Le démon calcule le diff du worktree de la session par la CLI `git` (arguments 
   ````
 
   Pour chaque commentaire : `### <chemin>:<ligne>` (« (ancienne version) » pour `side: "old"`), l'extrait du diff (± 2 lignes autour de la ligne, dans son bloc ; absent si la ligne n'est pas dans le diff), puis le commentaire. La clôture du bloc de code est plus longue que toute suite de « ` » de l'extrait. Tous les caractères de contrôle sauf saut de ligne et tabulation sont retirés de ce qui est collé (commentaires, chemins, extraits) : rien ne peut sortir du collage encadré ni taper de touche.
+
+### Fichiers d'une session (v0.2, lot 3)
+
+**Racine** : la racine du worktree si le dossier de la session est dans un dépôt git (même si la session a été lancée dans un sous-dossier), sinon le dossier de la session ; toujours résolue (`root`, chemin absolu). Les deux méthodes marchent pour une session arrêtée tant que son dossier existe. Erreurs : `-32001` session inconnue, `-32016` dossier disparu, `-32602` chemin refusé ou invalide (message en français), `-32603` échec de lecture ou de `git`.
+
+**Chemins** (`path`) : relatifs à la racine, séparés par `/` (`""` ou absent : la racine). Refusés (`-32602`) : chemin absolu, composant `..`, octet nul, composant `.git` quelle que soit la casse (`.GIT`, `.Git`… : systèmes de fichiers insensibles à la casse ; jamais listé ni lu). Tout accès au disque passe par `openat2(2)` depuis la racine avec `RESOLVE_BENEATH` et `RESOLVE_NO_MAGICLINKS` : aucune résolution ne sort de la racine, même par un lien symbolique remplacé entre deux appels (noyau sans `openat2` : repli sur la résolution du chemin et une vérification qu'il reste dans la racine, moins robuste face à un lien remplacé entre deux appels ; un avertissement est journalisé une fois). Hors du runtime du démon. Limites assumées (la session peut de toute façon écrire dans ce dossier) : un point de montage (y compris un *bind mount*) sous la racine est parcouru comme un dossier ordinaire, et un lien physique (*hard link*) vers un fichier de `.git` est lisible comme n'importe quel fichier.
+
+**`files.list {id, path?}`** : contenu d'**un** dossier (l'arborescence se charge à la demande).
+
+```json
+{"root": "/home/u/projet", "path": "src", "truncated": false,
+ "entries": [
+   {"name": "sous", "path": "src/sous", "kind": "dir", "size": null, "changed": "M"},
+   {"name": "lien", "path": "src/lien", "kind": "symlink", "size": null, "changed": null},
+   {"name": "a.rs", "path": "src/a.rs", "kind": "file", "size": 1234, "changed": "M"},
+   {"name": "vieux.rs", "path": "src/vieux.rs", "kind": "file", "size": null, "changed": "D"}
+ ]}
+```
+
+- Le dossier demandé doit être un vrai dossier sous la racine, sans lien symbolique sur le chemin (`RESOLVE_NO_SYMLINKS`) : un lien vers un dossier est montré `kind: "symlink"` et n'est **jamais** parcouru (`files.list` dessus : `-32602`).
+- **Dans un dépôt** : fichiers suivis et non suivis non ignorés (`git ls-files --cached --others --exclude-standard -z`, même appel durci que le diff, 200 000 fichiers au plus), plus les fichiers supprimés du diff (`changed: "D"`, `size: null`) ; les dossiers sont déduits de ces chemins. Chaque entrée est décrite sur le disque sans suivre de lien (`lstat` sous la racine). La liste du dépôt est gardée par session tant que l'empreinte du diff ne change pas, **3 s** au plus : un fichier créé apparaît donc au plus tard 3 s après (aussitôt si le diff a changé entre-temps). Un seul `git ls-files` à la fois par session : les appels concurrents attendent le premier et réutilisent sa liste. Chemins non UTF-8 ignorés.
+- **Hors dépôt** : lecture du dossier à chaque appel (pas de cache), sans suivre de lien, `.git` masqué ; FIFO, sockets et périphériques ne sont pas montrés.
+- `kind` : `dir`, `file`, `symlink` ; `size` : taille d'un fichier (`null` sinon). `changed` : statut du diff de la session (`A`, `M`, `D`, `R`, `?`, comme `sessions.diff`, liste de moins de 2 s réutilisée), `"M"` pour un dossier qui contient un fichier changé, `null` sinon et toujours hors dépôt ; à rafraîchir sur `session.diff_changed`.
+- Ordre : dossiers d'abord, puis ordre naturel sans casse (`b2` avant `b10` ; à égalité, ordre des octets). Au plus **2 000** entrées par dossier : les noms sont d'abord choisis, triés (clé de tri calculée une fois par nom) et coupés, **puis** seules les entrées gardées sont décrites sur le disque (`lstat`) ; la coupe est donc déterministe : les 2 000 premières dans l'ordre. `truncated: true` au-delà de 2 000, si la liste du dépôt a été coupée (200 000 fichiers), ou hors dépôt si plus de 20 000 noms ont été lus : seuls ces 20 000 premiers noms rendus par le système (ordre non garanti) sont alors triés et coupés.
+
+**`files.read {id, path}`** :
+
+```json
+{"path": "README.md", "size": 9, "binary": false, "too_large": false, "content": "# Projet\n"}
+```
+
+- Les liens symboliques sont suivis s'ils restent **dans** la racine (`RESOLVE_BENEATH` : un lien absolu, même vers la racine, est refusé), jamais vers `.git`. Le fichier est d'abord ouvert en `O_PATH` (aucun effet de bord) et doit être un fichier ordinaire : dossier, FIFO, périphérique ou socket refusés (`-32602`) ; puis il est rouvert pour la lecture (même inode vérifié).
+- Au plus **2 Mio** : au-delà, `too_large: true`, `content: null` (rien n'est lu). Binaire (octet nul dans les 8 000 premiers octets) : `binary: true`, `content: null`. Sinon `content` : le texte en UTF-8 (octets invalides remplacés par « � »). `path` : le chemin demandé, normalisé.
+- Un fichier ignoré par `.gitignore` reste lisible par son chemin (seule la liste le masque).
+- « Mentionner à Claude » : le front tape `@<path> ` par `sessions.input` (sans Entrée).
 
 ### Changer de mode (`sessions.setMode`)
 

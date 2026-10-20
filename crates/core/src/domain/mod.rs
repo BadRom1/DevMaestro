@@ -2,6 +2,7 @@
 
 pub mod decision;
 pub mod diff;
+pub mod files;
 pub mod hooks;
 pub mod metrics;
 pub mod profile;

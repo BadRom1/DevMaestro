@@ -1,0 +1,95 @@
+/**
+ * Vue par statut (kanban) : colonnes « À répondre », « En cours »,
+ * « Inactive », « Arrêtée » (les sessions en erreur y vont, avec leur glyphe).
+ * Ordre dans une colonne : la demande la plus ancienne d'abord pour « À
+ * répondre » (la plus urgente), sinon la dernière activité d'abord.
+ */
+import type { Demand, PendingRequest, Session } from '../../../shared/protocol'
+import { summarizeToolInput } from '../../../shared/summary'
+import { glyphFor } from './status'
+
+export type ColumnKey = 'waiting' | 'running' | 'idle' | 'stopped'
+
+export const COLUMNS: readonly { key: ColumnKey; title: string }[] = [
+  { key: 'waiting', title: 'À répondre' },
+  { key: 'running', title: 'En cours' },
+  { key: 'idle', title: 'Inactive' },
+  { key: 'stopped', title: 'Arrêtée' },
+]
+
+export function columnOf(s: Session): ColumnKey {
+  const k = glyphFor(s.status).kind
+  return k === 'error' ? 'stopped' : k
+}
+
+function time(iso: string | null | undefined): number {
+  const t = Date.parse(iso ?? '')
+  return Number.isNaN(t) ? 0 : t
+}
+
+/** Heure de la plus ancienne demande en attente (ou de la dernière activité). */
+function waitingSince(s: Session): number {
+  const since = s.pending.map((p) => time(p.since)).filter((t) => t > 0)
+  return since.length ? Math.min(...since) : time(s.last_activity ?? s.updated_at)
+}
+
+export function kanbanColumns(sessions: readonly Session[]): Record<ColumnKey, Session[]> {
+  const cols: Record<ColumnKey, Session[]> = { waiting: [], running: [], idle: [], stopped: [] }
+  for (const s of sessions) cols[columnOf(s)].push(s)
+  cols.waiting.sort((a, b) => waitingSince(a) - waitingSince(b) || a.id.localeCompare(b.id))
+  for (const k of ['running', 'idle', 'stopped'] as const) {
+    cols[k].sort(
+      (a, b) => time(b.last_activity ?? b.created_at) - time(a.last_activity ?? a.created_at) || a.id.localeCompare(b.id),
+    )
+  }
+  return cols
+}
+
+function oneLine(s: string, max: number): string {
+  const t = s.replace(/\s+/g, ' ').trim()
+  const chars = [...t]
+  return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : t
+}
+
+/** Texte court de la demande en attente pour une carte. */
+export function demandSummary(d: Demand, max = 140): string {
+  if (d.detailed === false) return d.kind === 'question' ? 'Question (détails dans le terminal)' : 'Permission (détails dans le terminal)'
+  if (d.kind === 'question') {
+    const q = d.questions[0]?.question ?? 'Question'
+    return oneLine(d.questions.length > 1 ? `${q} (+${d.questions.length - 1})` : q, max)
+  }
+  const what = summarizeToolInput(d.tool_name, d.tool_input)
+  return oneLine(`${d.tool_name}${what ? ` · ${what}` : ''}`, max)
+}
+
+/**
+ * Le résumé tient-il en entier sur la carte : une seule ligne (pas de commande
+ * multiligne aplatie), rien de coupé, au plus `max` caractères ?
+ */
+export function summaryFits(d: Demand, max = 140): boolean {
+  if (d.detailed === false) return false
+  let raw: string
+  if (d.kind === 'question') raw = d.questions.map((q) => q.question).join('\n')
+  else {
+    const what = summarizeToolInput(d.tool_name, d.tool_input)
+    raw = `${d.tool_name}${what ? ` · ${what}` : ''}`
+  }
+  return !/[\r\n]/.test(raw) && !raw.endsWith('…') && [...raw].length <= max
+}
+
+/**
+ * Autoriser / Refuser directement sur la carte ? Seulement si la demande est
+ * répondable, détaillée, pas « peut-être obsolète », et que ce qu'on autorise
+ * se lit en entier sur la carte ; sinon « Ouvrir » la session.
+ */
+export function oneClickAllowed(s: Session, req: PendingRequest, stale: readonly number[]): boolean {
+  if (req.pending.kind !== 'permission' || req.pending.detailed === false) return false
+  if (req.answerable === false || s.possibly_stale || stale.includes(req.request_id)) return false
+  return summaryFits(req.pending)
+}
+
+/** Première demande en attente (la plus ancienne). */
+export function firstPending(s: Session): PendingRequest | null {
+  if (!s.pending.length) return null
+  return [...s.pending].sort((a, b) => time(a.since) - time(b.since) || a.request_id - b.request_id)[0]!
+}

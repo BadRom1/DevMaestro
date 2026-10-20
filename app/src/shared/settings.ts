@@ -37,7 +37,12 @@ export interface AppSettings {
   confirmRemoval: boolean
   /** Libellés choisis par profil (nom technique du démon → libellés) ; absents : valeurs par défaut. */
   profileLabels: Record<string, ProfileLabel>
+  /** Vue principale : par projet (barre latérale et session) ou par statut (kanban). */
+  view: MainView
 }
+
+export type MainView = 'projet' | 'statut'
+export const MAIN_VIEWS: readonly MainView[] = ['projet', 'statut']
 
 export interface ProfileLabel {
   /** Libellé long (≤ 30 caractères), ex. « Perso ». */
@@ -58,6 +63,7 @@ export interface SettingsPatch {
   confirmRemoval?: boolean
   /** Fusionné : `null` rend les libellés par défaut. */
   profileLabels?: Record<string, ProfileLabel | null>
+  view?: MainView
 }
 
 export const MAX_PROJECT_PROFILES = 500
@@ -72,6 +78,7 @@ export function defaultSettings(): AppSettings {
     projectProfiles: {},
     confirmRemoval: true,
     profileLabels: {},
+    view: 'projet',
   }
 }
 
@@ -196,6 +203,7 @@ export function normalizeSettings(raw: unknown): AppSettings {
     projectProfiles: profiles,
     confirmRemoval: typeof raw.confirmRemoval === 'boolean' ? raw.confirmRemoval : d.confirmRemoval,
     profileLabels: labelsFrom(raw.profileLabels),
+    view: (MAIN_VIEWS as readonly unknown[]).includes(raw.view) ? (raw.view as MainView) : d.view,
   }
 }
 
@@ -215,7 +223,7 @@ export function validatePatch(raw: unknown): SettingsPatch {
   if (!isObj(raw)) throw new SettingsError('modification des réglages : objet attendu')
   const out: SettingsPatch = {}
   for (const k of Object.keys(raw)) {
-    if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels'].includes(k)) {
+    if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view'].includes(k)) {
       throw new SettingsError(`réglage inconnu : ${k}`)
     }
   }
@@ -241,6 +249,10 @@ export function validatePatch(raw: unknown): SettingsPatch {
   if (raw.confirmRemoval !== undefined) {
     if (typeof raw.confirmRemoval !== 'boolean') throw new SettingsError('« confirmRemoval » doit être un booléen')
     out.confirmRemoval = raw.confirmRemoval
+  }
+  if (raw.view !== undefined) {
+    if (!(MAIN_VIEWS as readonly unknown[]).includes(raw.view)) throw new SettingsError('« view » doit valoir projet ou statut')
+    out.view = raw.view as MainView
   }
   if (raw.profileLabels !== undefined) {
     if (!isObj(raw.profileLabels)) throw new SettingsError('« profileLabels » doit être un objet')
@@ -276,6 +288,7 @@ export function applyPatch(s: AppSettings, p: SettingsPatch): AppSettings {
     next.projectProfiles = pp
   }
   if (p.confirmRemoval !== undefined) next.confirmRemoval = p.confirmRemoval
+  if (p.view !== undefined) next.view = p.view
   if (p.profileLabels) {
     const pl = { ...s.profileLabels }
     for (const [k, v] of Object.entries(p.profileLabels)) {

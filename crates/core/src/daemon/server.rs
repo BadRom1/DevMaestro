@@ -404,6 +404,19 @@ impl Connection {
                     .await
                     .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
             }
+            "files.list" | "files.read" => {
+                // Système de fichiers et `git` : hors du runtime.
+                let (d2, params, m) = (d.clone(), params.clone(), method.to_owned());
+                tokio::task::spawn_blocking(move || {
+                    if m == "files.list" {
+                        d2.files_list(&params)
+                    } else {
+                        d2.files_read(&params)
+                    }
+                })
+                .await
+                .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
+            }
             "sessions.diff" | "sessions.diffFile" | "sessions.sendReview" => {
                 // `git` : hors du runtime.
                 let (d2, params, m) = (d.clone(), params.clone(), method.to_owned());

@@ -4,7 +4,7 @@ import { api } from '../api'
 import { describeError } from '../state/errors'
 import { Modal } from './Modal'
 
-/** Confirmation avant d'ouvrir un lien du terminal dans le navigateur. */
+/** Confirmation avant d'ouvrir un lien (terminal, fichier Markdown) dans le navigateur. */
 export function LinkDialog({ url, onClose }: { url: string; onClose: () => void }) {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -18,7 +18,7 @@ export function LinkDialog({ url, onClose }: { url: string; onClose: () => void 
   return (
     <Modal title="Ouvrir le lien ?" onClose={onClose} width={560}>
       <div className="mb">
-        <p style={{ margin: 0 }}>Le terminal contient un lien. L’ouvrir dans ton navigateur ?</p>
+        <p style={{ margin: 0 }}>Ce lien mène hors de DevMaestro. L’ouvrir dans ton navigateur ?</p>
         <code className="mono" style={{ overflowWrap: 'anywhere' }}>
           {url}
         </code>

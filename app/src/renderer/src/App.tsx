@@ -12,6 +12,7 @@ import { TopBar } from './components/TopBar'
 import { ancestorToResolve, fallbackProject, groupByProject, groupPast, pastToOffer, sidebarOrder, type PastEntry } from './state/projects'
 import { daemonSaysFolderExists } from './state/format'
 import { initialState, needsResolve, reducer } from './state/store'
+import { KanbanView } from './components/KanbanView'
 import { SettingsDialog } from './components/SettingsDialog'
 import { useSettings } from './settings'
 import { buildProjectChoices } from './state/newSession'
@@ -317,6 +318,8 @@ export function App() {
         onTheme={(m) => updateSettings({ theme: { ...settings.theme, mode: m } })}
         onNew={() => setDialog(true)}
         onSettings={() => setSettingsOpen(true)}
+        view={settings.view}
+        onView={(v) => updateSettings({ view: v })}
       />
       <div className={`conn${banner?.bad ? ' bad' : ''}`} role="status" aria-live="polite" hidden={!banner}>
         {banner?.text}
@@ -331,6 +334,18 @@ export function App() {
           </button>
         </div>
       )}
+      {settings.view === 'statut' ? (
+        <KanbanView
+          sessions={sessions}
+          projects={state.projects}
+          profiles={state.profiles}
+          stale={state.stale}
+          onOpen={(id) => {
+            dispatch({ type: 'select', id })
+            updateSettings({ view: 'projet' })
+          }}
+        />
+      ) : (
       <main className="viewA">
         <Sidebar
           groups={groups}
@@ -363,6 +378,7 @@ export function App() {
           onSeen={seeSelected}
         />
       </main>
+      )}
       {dialog && (
         <NewSessionDialog
           profiles={state.profiles}

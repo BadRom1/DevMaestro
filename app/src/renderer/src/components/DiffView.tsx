@@ -3,7 +3,7 @@
  * de sa branche, diff ligne à ligne, commentaires par ligne envoyés à Claude
  * en une revue (`sessions.sendReview`).
  */
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 
 import { ErrorCode, type DiffFile, type DiffSummary, type FileDiff, type Session } from '../../../shared/protocol'
 import { call, errorCode, errorText } from '../api'
@@ -32,6 +32,18 @@ import { ConfirmBar } from './ForgetConfirm'
 import { PathLabel } from './common'
 
 const DEBOUNCE_MS = 400
+
+/** Fichier choisi et défilement, par session (gardés hors du composant). */
+const diffMemory = new Map<string, { selected: string | null; scroll: number }>()
+
+function diffMemoryFor(id: string): { selected: string | null; scroll: number } {
+  let m = diffMemory.get(id)
+  if (!m) {
+    m = { selected: null, scroll: 0 }
+    diffMemory.set(id, m)
+  }
+  return m
+}
 
 export const OLD_DAEMON_DIFF = 'Le démon ne sait pas encore calculer le diff : mets orchd à jour.'
 
@@ -158,8 +170,11 @@ export function DiffView({
   seen,
   onSeen,
   onSent,
+  focusPath,
 }: {
   session: Session
+  /** Fichier à sélectionner (« Voir le diff » de l'onglet Fichiers) ; `n` change à chaque demande. */
+  focusPath?: { path: string; n: number } | null
   diff: DiffState & { reload: () => void }
   draft: ReviewDraft
   review: (a: ReviewAction) => void
@@ -169,7 +184,23 @@ export function DiffView({
   onSent: () => void
 }) {
   const files = useMemo(() => sortFiles(diff.summary?.files ?? []), [diff.summary])
-  const [selected, setSelected] = useState<string | null>(null)
+  const memo = diffMemoryFor(session.id)
+  const [selected, setSelected] = useState<string | null>(focusPath?.path ?? memo.selected)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const restoreScroll = useRef<number | null>(focusPath ? null : memo.scroll)
+  // Fichier et défilement gardés par session (l'onglet est démonté quand on en change).
+  useEffect(() => {
+    memo.selected = selected
+  }, [memo, selected])
+  useEffect(() => {
+    const el = scrollRef.current
+    return () => {
+      if (el) memo.scroll = el.scrollTop
+    }
+  }, [memo])
+  useEffect(() => {
+    if (focusPath) setSelected(focusPath.path)
+  }, [focusPath?.n])
   const [fileDiff, setFileDiff] = useState<{ path: string; data: FileDiff } | null>(null)
   const [fileError, setFileError] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
@@ -179,6 +210,8 @@ export function DiffView({
 
   // Fichier choisi : le premier, ou le même s'il est toujours dans la liste.
   useEffect(() => {
+    // Liste pas encore chargée : on garde le fichier demandé.
+    if (files.length === 0 && !diff.summary) return
     if (selected && files.some((f) => f.path === selected)) return
     setSelected(files[0]?.path ?? null)
   }, [files, selected])
@@ -206,6 +239,12 @@ export function DiffView({
   }, [session.id, selected, diff.version])
 
   const rows = useMemo(() => (fileDiff && fileDiff.path === selected ? diffRows(fileDiff.data) : []), [fileDiff, selected])
+
+  useLayoutEffect(() => {
+    if (restoreScroll.current === null || rows.length === 0 || !scrollRef.current) return
+    scrollRef.current.scrollTop = restoreScroll.current
+    restoreScroll.current = null
+  }, [rows])
 
   // Lignes rechargées : commentaires (et boîte ouverte) replacés sur leur ligne, ou « ligne modifiée ».
   useEffect(() => {
@@ -376,7 +415,7 @@ export function DiffView({
         ) : (
           <div className="dhead" />
         )}
-        <div className="dscroll" tabIndex={0} aria-label={file ? `Diff de ${file.path}` : 'Diff'}>
+        <div className="dscroll" ref={scrollRef} tabIndex={0} aria-label={file ? `Diff de ${file.path}` : 'Diff'}>
           {fileError && (
             <p className="inline-err pad" role="alert">
               {fileError}

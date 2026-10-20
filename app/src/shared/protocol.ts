@@ -283,6 +283,33 @@ export interface ReviewComment {
   text: string
 }
 
+/* ---------- Onglet Fichiers (v0.2, lot 3) ---------- */
+
+export interface FileEntry {
+  name: string
+  /** Relatif à la racine de la session. */
+  path: string
+  kind: 'dir' | 'file' | 'symlink'
+  size: number | null
+  /** Marque « modifié » (même source que le diff), ou `null`. */
+  changed: DiffStatus | null
+}
+
+export interface FilesList {
+  root: string
+  path: string
+  entries: FileEntry[]
+  truncated: boolean
+}
+
+export interface FileContent {
+  path: string
+  size: number | null
+  binary: boolean
+  too_large: boolean
+  content: string | null
+}
+
 export type PermissionDecision = 'allow' | 'allow_always' | 'deny'
 /** Modes que l'app sait demander (`sessions.setMode`). */
 export type SettableMode = 'default' | 'acceptEdits' | 'plan' | 'auto'
@@ -354,6 +381,10 @@ export interface Methods {
   'sessions.diff': { params: { id: string }; result: DiffSummary }
   'sessions.diffFile': { params: { id: string; path: string }; result: FileDiff }
   'sessions.sendReview': { params: { id: string; comments: ReviewComment[]; general?: string }; result: unknown }
+  /** Texte tapé dans la session (sans Entrée), ex. « @chemin » pour mentionner un fichier. */
+  'sessions.input': { params: { id: string; data: string }; result: unknown }
+  'files.list': { params: { id: string; path?: string }; result: FilesList }
+  'files.read': { params: { id: string; path: string }; result: FileContent }
   'quotas.get': { params: { refresh?: boolean }; result: QuotasReport }
   'transcripts.hide': { params: { profile: string; claude_session_id: string }; result: { hidden: boolean } }
   'transcripts.unhide': { params: { profile: string; claude_session_id: string }; result: { hidden: boolean } }
@@ -383,6 +414,9 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'sessions.diff',
   'sessions.diffFile',
   'sessions.sendReview',
+  'files.list',
+  'files.read',
+  'sessions.input',
 ]
 
 /** Codes d'erreur JSON-RPC du démon (protocole § 3). */

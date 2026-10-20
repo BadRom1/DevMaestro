@@ -12,6 +12,7 @@ import {
   type QuotaView,
   type WindowMeta,
 } from '../state/quotas'
+import type { MainView } from '../../../shared/settings'
 import type { ThemeMode } from '../theme'
 import { Meter, ProfileChip, StatusGlyph } from './common'
 
@@ -144,6 +145,8 @@ export function TopBar(props: {
   onTheme: (m: ThemeMode) => void
   onNew: () => void
   onSettings: () => void
+  view: MainView
+  onView: (v: MainView) => void
 }) {
   const { label: labelOf } = useSettings()
   const quotas = quotaViews(props.sessions, props.profiles, props.daemonQuotas)
@@ -168,6 +171,14 @@ export function TopBar(props: {
             profiles={Object.keys(props.daemonQuotas ?? {}).length ? Object.keys(props.daemonQuotas ?? {}) : quotas.map((q) => q.profile)}
           />
         )}
+      </div>
+      <div className="seg" role="group" aria-label="Vue">
+        <button aria-pressed={props.view === 'projet'} onClick={() => props.onView('projet')}>
+          Par projet
+        </button>
+        <button aria-pressed={props.view === 'statut'} onClick={() => props.onView('statut')}>
+          Par statut
+        </button>
       </div>
       <span className="spacer" />
       {props.waitingCount > 0 && (

@@ -212,6 +212,19 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
     case 'sessions.diff':
       out.id = uuid(o, 'id')
       return out
+    case 'files.list':
+      out.id = uuid(o, 'id')
+      // Racine : chemin absent ou vide.
+      if (present(o, 'path') && o.path !== '') out.path = relPath(o, 'path')
+      return out
+    case 'sessions.input':
+      out.id = uuid(o, 'id')
+      out.data = str(o, 'data', MAX_TEXT, { nonEmpty: true })
+      return out
+    case 'files.read':
+      out.id = uuid(o, 'id')
+      out.path = relPath(o, 'path')
+      return out
     case 'sessions.diffFile':
       out.id = uuid(o, 'id')
       out.path = relPath(o, 'path')

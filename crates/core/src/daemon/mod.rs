@@ -33,8 +33,8 @@ use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::adapters::{
-    FsProfileSource, FsTranscriptSource, GitCli, GitDiff, NativePty, SqliteStore, SystemClock,
-    UsageApi,
+    FsFiles, FsProfileSource, FsTranscriptSource, GitCli, GitDiff, NativePty, SqliteStore,
+    SystemClock, UsageApi,
 };
 use crate::paths::{Paths, create_private_dir};
 use log::{error, info};
@@ -217,6 +217,7 @@ async fn run(paths: Paths, scrubbed: Vec<String>) -> Result<(), String> {
         clock: Box::new(SystemClock),
         quotas: Box::new(UsageApi::from_env()),
         diff: Box::new(GitDiff::default()),
+        files: Box::new(FsFiles),
     };
     if !config.usage_api {
         info!("[quotas] usage_api = false : quotas lus dans les statuslines seulement");

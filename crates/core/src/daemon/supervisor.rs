@@ -220,6 +220,7 @@ pub struct Deps {
     pub clock: Box<dyn Clock + Send + Sync>,
     pub quotas: Box<dyn crate::ports::QuotaSource>,
     pub diff: Box<dyn crate::ports::DiffSource>,
+    pub files: Box<dyn crate::ports::FileAccess>,
 }
 
 /// Événement diffusé aux connexions. Léger : une connexion lente regroupe
@@ -468,6 +469,32 @@ pub struct Daemon {
     quota_refreshing: AtomicBool,
     /// Suivi du diff des sessions (`session.diff_changed`).
     diff_watch: Mutex<HashMap<Uuid, DiffWatch>>,
+    /// Fichiers des dépôts par session (onglet Fichiers).
+    files_cache: Mutex<HashMap<Uuid, FilesCacheEntry>>,
+    /// Un seul `git ls-files` à la fois par session.
+    files_inflight: Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
+}
+
+/// Liste des fichiers d'un dépôt, quand, pour quelle empreinte du diff et
+/// quelle racine.
+type FilesCacheEntry = (Arc<(Vec<String>, bool)>, Instant, Option<String>, PathBuf);
+
+/// Âge maximal de la liste des fichiers d'un dépôt gardée en cache.
+pub const FILES_CACHE_TTL: Duration = Duration::from_secs(3);
+
+/// Erreur d'accès à un fichier → erreur du protocole (`-32602`).
+fn file_error(e: crate::ports::FileError, rel: &str) -> RpcError {
+    use crate::ports::FileError;
+    let shown = if rel.is_empty() { "." } else { rel };
+    match e {
+        FileError::NotFound => RpcError::params(format!("« {shown} » introuvable")),
+        FileError::Outside(why) => RpcError::params(format!("« {shown} » refusé : {why}")),
+        FileError::NotRegular => RpcError::params(format!(
+            "« {shown} » n'est pas un fichier ordinaire (dossier, FIFO, périphérique…)"
+        )),
+        FileError::NotDir => RpcError::params(format!("« {shown} » n'est pas un dossier")),
+        FileError::Io(m) => RpcError::new(error_code::INTERNAL_ERROR, m),
+    }
 }
 
 /// Instantané, historique éventuel, flux de sortie et terminal d'une session.
@@ -767,6 +794,8 @@ impl Daemon {
             quota_calls: Mutex::new(HashMap::new()),
             quota_refreshing: AtomicBool::new(false),
             diff_watch: Mutex::new(HashMap::new()),
+            files_cache: Mutex::new(HashMap::new()),
+            files_inflight: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1389,6 +1418,14 @@ impl Daemon {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(id);
+        self.files_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
+        self.files_inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
         info!("session {id} oubliée (retirée du registre et de la base, transcript masqué)");
         let _ = self.events.send(Event::Removed(*id));
         Ok(json!({"forgotten": true}))
@@ -1704,6 +1741,221 @@ impl Daemon {
                 }
             }
         });
+    }
+
+    // ---------------------------------------------------------------- fichiers
+
+    /// Racine de l'onglet Fichiers : racine du worktree dans un dépôt, sinon
+    /// le dossier de travail (résolu). `true` si c'est un dépôt git.
+    fn files_root(&self, id: &Uuid) -> Result<(PathBuf, PathBuf, bool), RpcError> {
+        let (cwd, _) = self.session_cwd(id)?;
+        if !cwd.is_dir() {
+            return Err(RpcError::cwd_missing(&cwd));
+        }
+        let (root, git) = match self.deps.diff.root(&cwd) {
+            Ok(r) => (r, true),
+            Err(crate::ports::DiffError::NotARepo) => (cwd.clone(), false),
+            Err(e) => return Err(diff_error(e)),
+        };
+        let root = root
+            .canonicalize()
+            .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))?;
+        Ok((cwd, root, git))
+    }
+
+    /// Fichiers du dépôt (`git ls-files`), gardés par session tant que
+    /// l'empreinte du diff ne change pas, [`FILES_CACHE_TTL`] au plus. Un seul
+    /// `git ls-files` à la fois par session : les appels concurrents attendent
+    /// le premier et réutilisent sa liste.
+    fn repo_file_set(&self, id: Uuid, root: &Path) -> Result<Arc<(Vec<String>, bool)>, RpcError> {
+        let fingerprint = || {
+            self.diff_watch
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&id)
+                .and_then(|w| w.notified.clone())
+        };
+        let cached = |fp: &Option<String>| {
+            let cache = self.files_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache
+                .get(&id)
+                .filter(|(_, at, f, r)| at.elapsed() < FILES_CACHE_TTL && f == fp && r == root)
+                .map(|(set, ..)| set.clone())
+        };
+        if let Some(set) = cached(&fingerprint()) {
+            return Ok(set);
+        }
+        let gate = self
+            .files_inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(id)
+            .or_default()
+            .clone();
+        let _one = gate.lock().unwrap_or_else(|e| e.into_inner());
+        // Un autre appel a peut-être fait la liste pendant l'attente.
+        let fp = fingerprint();
+        if let Some(set) = cached(&fp) {
+            return Ok(set);
+        }
+        let set = Arc::new(self.deps.diff.repo_files(root).map_err(diff_error)?);
+        self.files_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, (set.clone(), Instant::now(), fp, root.to_path_buf()));
+        Ok(set)
+    }
+
+    /// `files.list {id, path?}` : contenu d'un dossier. Les noms sont choisis,
+    /// triés (clés de tri calculées une fois) et coupés à
+    /// [`crate::domain::files::MAX_DIR_ENTRIES`] **avant** de décrire chaque
+    /// entrée gardée sur le disque. Bloquant.
+    pub fn files_list(&self, params: &Value) -> Result<Value, RpcError> {
+        use crate::domain::files::{
+            Entry, EntryKind, MAX_DIR_ENTRIES, children, join_rel, normalize_rel, sort_entries,
+        };
+        let id = session_id_param(params)?;
+        let rel = normalize_rel(&opt_str(params, "path")?.unwrap_or_default())
+            .map_err(RpcError::params)?;
+        let (cwd, root, git) = self.files_root(&id)?;
+        // Dans un dépôt, un dossier dont tous les fichiers ont été supprimés
+        // n'existe plus sur le disque mais se liste encore (fichiers `D`).
+        let missing = match self.deps.files.check_dir(&root, &rel) {
+            Ok(()) => false,
+            Err(crate::ports::FileError::NotFound) if git => true,
+            Err(e) => return Err(file_error(e, &rel)),
+        };
+        let mut truncated = false;
+        let mut marks: HashMap<String, &'static str> = HashMap::new();
+        // Noms d'abord, genre provisoire (déduit de la liste ou de readdir).
+        let mut entries: Vec<Entry> = if git {
+            let set = self.repo_file_set(id, &root)?;
+            truncated |= set.1;
+            // Marques du diff (liste de moins de 2 s si possible).
+            marks = self
+                .recent_changes(id, &cwd)
+                .map(|c| {
+                    c.files
+                        .iter()
+                        .map(|f| (f.path.clone(), f.status.as_str()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Fichiers supprimés de l'arbre de travail : montrés quand même.
+            let deleted: Vec<&String> = marks
+                .iter()
+                .filter(|(_, s)| **s == "D")
+                .map(|(p, _)| p)
+                .collect();
+            children(
+                set.0
+                    .iter()
+                    .map(String::as_str)
+                    .chain(deleted.iter().map(|p| p.as_str())),
+                &rel,
+            )
+            .into_iter()
+            .map(|(name, is_dir)| Entry {
+                path: join_rel(&rel, &name),
+                name,
+                kind: if is_dir {
+                    EntryKind::Dir
+                } else {
+                    EntryKind::File
+                },
+                size: None,
+                changed: None,
+            })
+            .collect()
+        } else {
+            let (raw, cut) = self
+                .deps
+                .files
+                .list_dir(&root, &rel)
+                .map_err(|e| file_error(e, &rel))?;
+            truncated |= cut;
+            raw.into_iter()
+                .map(|r| Entry {
+                    path: join_rel(&rel, &r.name),
+                    name: r.name,
+                    kind: r.kind,
+                    size: None,
+                    changed: None,
+                })
+                .collect()
+        };
+        if missing && entries.is_empty() {
+            return Err(file_error(crate::ports::FileError::NotFound, &rel));
+        }
+        sort_entries(&mut entries);
+        if entries.len() > MAX_DIR_ENTRIES {
+            entries.truncate(MAX_DIR_ENTRIES);
+            truncated = true;
+        }
+        // Puis seulement les entrées gardées sont décrites sur le disque.
+        for e in &mut entries {
+            let raw = self.deps.files.lstat(&root, &e.path);
+            e.kind = match &raw {
+                Some(r) if r.kind == EntryKind::Symlink => EntryKind::Symlink,
+                Some(r) => r.kind,
+                None => e.kind,
+            };
+            e.size = raw
+                .and_then(|r| r.size)
+                .filter(|_| e.kind == EntryKind::File);
+            e.changed = if e.kind == EntryKind::Dir {
+                let prefix = format!("{}/", e.path);
+                marks.keys().any(|p| p.starts_with(&prefix)).then_some("M")
+            } else {
+                marks.get(&e.path).copied()
+            };
+        }
+        // Un dossier devenu lien change de rang : ordre refait (déjà coupé).
+        sort_entries(&mut entries);
+        Ok(json!({
+            "root": root,
+            "path": rel,
+            "entries": entries.iter().map(|e| json!({
+                "name": e.name,
+                "path": e.path,
+                "kind": e.kind.as_str(),
+                "size": e.size,
+                "changed": e.changed,
+            })).collect::<Vec<_>>(),
+            "truncated": truncated,
+        }))
+    }
+
+    /// `files.read {id, path}` : un fichier ordinaire sous la racine. Bloquant.
+    pub fn files_read(&self, params: &Value) -> Result<Value, RpcError> {
+        use crate::domain::diff::looks_binary;
+        use crate::domain::files::{MAX_READ_BYTES, normalize_rel};
+        let id = session_id_param(params)?;
+        let rel = normalize_rel(
+            &opt_str(params, "path")?.ok_or_else(|| RpcError::params("« path » manquant"))?,
+        )
+        .map_err(RpcError::params)?;
+        if rel.is_empty() {
+            return Err(RpcError::params("« path » : un fichier attendu"));
+        }
+        let (_, root, _) = self.files_root(&id)?;
+        let f = self
+            .deps
+            .files
+            .read_beneath(&root, &rel, MAX_READ_BYTES)
+            .map_err(|e| file_error(e, &rel))?;
+        let (binary, too_large, content) = match &f.bytes {
+            None => (false, true, Value::Null),
+            Some(b) if looks_binary(b) => (true, false, Value::Null),
+            Some(b) => (false, false, json!(String::from_utf8_lossy(b))),
+        };
+        Ok(json!({
+            "path": rel,
+            "size": f.size,
+            "binary": binary,
+            "too_large": too_large,
+            "content": content,
+        }))
     }
 
     // ----------------------------------------------------------------- quotas

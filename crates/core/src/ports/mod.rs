@@ -146,12 +146,68 @@ pub trait DiffSource: Send + Sync {
     /// et non suivis), chemins relatifs à la racine du worktree.
     fn changes(&self, cwd: &Path) -> Result<crate::domain::diff::ChangeSet, DiffError>;
     /// Diff d'un fichier de la liste.
+    /// Racine du worktree contenant `cwd` ([`DiffError::NotARepo`] hors dépôt).
+    fn root(&self, cwd: &Path) -> Result<PathBuf, DiffError>;
+    /// Fichiers suivis et non suivis non ignorés du worktree `root`
+    /// (`git ls-files --cached --others --exclude-standard`), chemins relatifs
+    /// à la racine ; `true` si la liste a été coupée.
+    fn repo_files(&self, root: &Path) -> Result<(Vec<String>, bool), DiffError>;
     /// Diff d'un fichier de la liste `changes` (même racine, même base).
     fn file_diff(
         &self,
         changes: &crate::domain::diff::ChangeSet,
         file: &crate::domain::diff::ChangedFile,
     ) -> Result<crate::domain::diff::FileDiff, DiffError>;
+}
+
+/// Échec d'un accès au dossier d'une session (onglet Fichiers).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileError {
+    NotFound,
+    /// Le chemin sort de la racine, passe par un lien refusé ou par `.git`.
+    Outside(String),
+    /// Pas un fichier ordinaire (dossier, FIFO, périphérique, socket).
+    NotRegular,
+    /// Pas un dossier.
+    NotDir,
+    Io(String),
+}
+
+/// Une entrée telle que lue sur le disque (sans suivre de lien).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawEntry {
+    pub name: String,
+    pub kind: crate::domain::files::EntryKind,
+    /// Taille d'un fichier ordinaire.
+    pub size: Option<u64>,
+    /// Date de modification (renseignée par `lstat`).
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/// Un fichier lu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadFile {
+    pub size: u64,
+    /// Contenu, `None` s'il dépasse la limite (rien n'est alors lu).
+    pub bytes: Option<Vec<u8>>,
+    /// Chemin réel relatif à la racine (liens suivis).
+    pub resolved: String,
+}
+
+/// Accès en lecture au dossier d'une session, confiné à sa racine
+/// (`root` : chemin absolu résolu). Bloquant.
+pub trait FileAccess: Send + Sync {
+    /// Lit un fichier ordinaire sous la racine (liens suivis s'ils y restent),
+    /// au plus `max` octets.
+    fn read_beneath(&self, root: &Path, rel: &str, max: u64) -> Result<ReadFile, FileError>;
+    /// `rel` est un vrai dossier sous la racine, sans lien sur le chemin.
+    fn check_dir(&self, root: &Path, rel: &str) -> Result<(), FileError>;
+    /// Genre et taille d'une entrée, sans suivre de lien ; `None` si absente.
+    fn lstat(&self, root: &Path, rel: &str) -> Option<RawEntry>;
+    /// Contenu d'un dossier (sans `.git`, sans FIFO ni périphérique), sans
+    /// suivre de lien et sans taille (voir [`FileAccess::lstat`]) ; `true` si
+    /// la lecture a été coupée.
+    fn list_dir(&self, root: &Path, rel: &str) -> Result<(Vec<RawEntry>, bool), FileError>;
 }
 
 /// Une session telle qu'enregistrée en base.

@@ -33,6 +33,9 @@ import { useSettings } from '../settings'
 import { PermissionCard, QuestionCard } from './RequestCards'
 import { activeComments, type ReviewAction, type ReviewDraft } from '../state/review'
 import { DiffView, useSessionDiff } from './DiffView'
+import { FilesView } from './FilesView'
+
+type Tab = 'terminal' | 'diff' | 'files'
 import { ForgetConfirm } from './ForgetConfirm'
 import { ColorBar, ColorPicker, RenameField } from './SessionIdentity'
 
@@ -366,19 +369,22 @@ export function SessionPane({
   const seen = useRef(new Set<string>())
   const keys = pending.map((r) => `${session?.id}:${r.request_id}`)
   const keysSig = keys.join(',')
-  const [tab, setTab] = useState<'terminal' | 'diff'>('terminal')
+  const [tab, setTab] = useState<Tab>('terminal')
+  /** Fichier à montrer dans le diff (« Voir le diff » depuis l'onglet Fichiers). */
+  const [diffFocus, setDiffFocus] = useState<{ path: string; n: number } | null>(null)
   // Le diff n'est calculé qu'une fois l'onglet ouvert pour la session (puis tenu à jour pour le badge).
   const [diffOpened, setDiffOpened] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => {
-    if (tab === 'diff' && session && !diffOpened.has(session.id)) setDiffOpened((s) => new Set(s).add(session.id))
+    if ((tab === 'diff' || tab === 'files') && session && !diffOpened.has(session.id)) setDiffOpened((s) => new Set(s).add(session.id))
   }, [tab, session?.id])
-  const diff = useSessionDiff(session?.id ?? null, diffSeq, tab === 'diff' || (!!session && diffOpened.has(session.id)))
+  const diff = useSessionDiff(session?.id ?? null, diffSeq, tab !== 'terminal' || (!!session && diffOpened.has(session.id)))
   const fileCount = diff.summary?.files.length ?? null
   const pendingComments = activeComments(draft).length
   const tabsId = useId()
   const tabs = [
     ['terminal', 'Terminal'],
     ['diff', 'Diff'],
+    ['files', 'Fichiers'],
   ] as const
 
   // Nouvelle demande : le focus va à la carte, sauf si l'utilisateur tape (terminal ou champ).
@@ -423,7 +429,9 @@ export function SessionPane({
             onKeyDown={(e) => {
               if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
                 e.preventDefault()
-                const next = tab === 'terminal' ? 'diff' : 'terminal'
+                const order = tabs.map(([t]) => t)
+                const i = order.indexOf(tab)
+                const next = order[(i + (e.key === 'ArrowRight' ? 1 : order.length - 1)) % order.length]!
                 setTab(next)
                 document.getElementById(`${tabsId}-${next}`)?.focus()
               }
@@ -472,6 +480,7 @@ export function SessionPane({
             {session ? (
               <DiffView
                 key={session.id}
+                focusPath={diffFocus}
                 session={session}
                 diff={diff}
                 draft={draft}
@@ -485,6 +494,30 @@ export function SessionPane({
               />
             ) : (
               <p className="empty">Choisis une session pour voir ce qu’elle a changé.</p>
+            )}
+          </div>
+        )}
+        {tab === 'files' && (
+          <div className="diff-layer" role="tabpanel" id={`${tabsId}-files-panel`} aria-labelledby={`${tabsId}-files`}>
+            {session ? (
+              <FilesView
+                key={session.id}
+                session={session}
+                diff={diff.summary}
+                diffVersion={diff.version}
+                onLink={onLink}
+                onShowDiff={(path) => {
+                  setDiffFocus((f) => ({ path, n: (f?.n ?? 0) + 1 }))
+                  setTab('diff')
+                }}
+                onMentioned={() => {
+                  setTab('terminal')
+                  // Le terminal reprend le focus pour continuer le message.
+                  requestAnimationFrame(() => termHost.current?.querySelector<HTMLElement>('.xterm-helper-textarea')?.focus())
+                }}
+              />
+            ) : (
+              <p className="empty">Choisis une session pour parcourir ses fichiers.</p>
             )}
           </div>
         )}

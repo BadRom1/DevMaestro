@@ -333,6 +333,40 @@ impl DiffSource for GitDiff {
         })
     }
 
+    fn root(&self, cwd: &Path) -> Result<PathBuf, DiffError> {
+        self.toplevel(cwd)
+    }
+
+    fn repo_files(&self, root: &Path) -> Result<(Vec<String>, bool), DiffError> {
+        let out = self.run(
+            root,
+            &[
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+        )?;
+        if !out.ok {
+            return Err(failed("ls-files", "échec"));
+        }
+        let mut truncated = out.truncated;
+        let mut files = Vec::new();
+        for raw in out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+            if files.len() == crate::domain::files::MAX_REPO_FILES {
+                truncated = true;
+                break;
+            }
+            // Chemin non UTF-8 : ignoré (jamais montré déformé).
+            if let Ok(p) = std::str::from_utf8(raw) {
+                files.push(p.to_owned());
+            }
+        }
+        files.dedup();
+        Ok((files, truncated))
+    }
+
     fn file_diff(&self, changes: &ChangeSet, file: &ChangedFile) -> Result<FileDiff, DiffError> {
         let top = &changes.root;
         let base = &changes.base;
