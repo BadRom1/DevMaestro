@@ -225,11 +225,11 @@ Le domaine ne dépend d'aucun adaptateur. Les tests du domaine rejouent des év�
 | v0.4 | Livraison : PR, merge dans main, suivi de la CI |
 | v0.5 | Dictée vocale |
 
-## 19. Extensibilité par plugins (à concevoir)
+## 19. Extensibilité par plugins (voir ADR 0007, proposé)
 
 Besoin exprimé le 2026-10-19 : que chacun puisse ajouter ses outils. Premiers cas :
 
-- **Graphify** : graphe de connaissances du code (local, MIT, sorties `graph.json` / `graph.html`). Un onglet « Impact » montrerait les modules touchés par le diff d'une session, et une recherche dans le graphe.
+- **Graphify** : graphe de connaissances du code (local, Apache-2.0 depuis juillet 2026, sorties `graph.json` / `graph.html`). Un onglet « Impact » montrerait les modules touchés par le diff d'une session, et une recherche dans le graphe.
 - **API d'un projet d'équipe** : un connecteur propre à une équipe.
 
 Piste à valider avant la v0.3 (ADR à écrire) :
@@ -243,7 +243,7 @@ Piste à valider avant la v0.3 (ADR à écrire) :
 
 | | Graphify | CodeGraph | GitNexus |
 |---|---|---|---|
-| Licence | MIT | MIT | **PolyForm Noncommercial** |
+| Licence | Apache-2.0 (MIT avant juillet 2026) | MIT | **PolyForm Noncommercial** |
 | Stockage | `graph.json` / `graph.html` | SQLite local, réindexation automatique | LadybugDB |
 | Impact | requêtes | `impact`, `affected` | `impact` avec confiance, `detect_changes` depuis un diff git |
 | Visualisation | `graph.html` prêt à afficher | aucune | interface web |
