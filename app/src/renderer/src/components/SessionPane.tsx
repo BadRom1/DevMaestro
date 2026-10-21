@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
 
 import {
   SETTABLE_MODES,
@@ -54,9 +54,10 @@ import { CeilingHint, SwitchAccountButton, SwitchArea, SwitchStatus, type Header
 import { switchInFlight } from '../state/accountSwitch'
 import { sortFiles } from '../state/diff'
 import { guardLeave } from '../state/unsaved'
+import { activateTab, defaultLayout, isVisible, removeTabs, TAB_IDS, zoneOfTab, type Layout, type TabId } from '../state/layout'
+import { getZones, resetLayout, setZones, useZones } from './layoutStore'
+import { ZoneGrid } from './ZoneGrid'
 import type { DiffFile } from '../../../shared/protocol'
-
-type Tab = 'conversation' | 'terminal' | 'diff' | 'commits' | 'files' | 'agents' | 'runners'
 
 const NO_FILES: readonly DiffFile[] = []
 
@@ -493,23 +494,79 @@ export function SessionPane({
    */
   const dock = useRequestDock(session?.id ?? null, keys, () => typingElsewhere(termHost.current))
   const { settings } = useSettings()
-  /** Onglet ouvert au départ : réglage « Onglet par défaut d'une session » (Terminal tant qu'il n'est pas choisi). */
-  const [tab, setTabNow] = useState<Tab>(() => settings.ui.sessionTab)
-  const tabRef = useRef(tab)
-  tabRef.current = tab
-  /** Changement d'onglet : confirmation d'abord si un fichier modifié n'est pas enregistré (onglet Fichiers). */
-  const setTab = (next: Tab) => {
-    if (next === tabRef.current) return
-    guardLeave(session?.id ?? null, 'changer d’onglet', () => setTabNow(next))
+  /** Disposition retenue (globale, commune à toutes les sessions, lot 16). */
+  const stored = useZones()
+  /**
+   * Onglets indisponibles (« Lancer » si le démon ne connaît pas les runners) : retirés de l'affichage
+   * seulement ; toutes les opérations portent sur la disposition complète, qui garde leur place.
+   */
+  const unavailable = useMemo<readonly TabId[]>(() => (runnersSupported === false ? ['runners'] : []), [runnersSupported])
+  const shownOf = (l: Layout) => (unavailable.length ? removeTabs(l, unavailable) : l)
+  /** Disposition affichée. */
+  const layout = useMemo(() => shownOf(stored), [stored, unavailable])
+  const storedRef = useRef(stored)
+  storedRef.current = stored
+  /** Onglet à focaliser une fois un changement de disposition appliqué (`focusSeq` force le rendu qui le pose). */
+  const pendingFocus = useRef<TabId | null>(null)
+  const [focusSeq, setFocusSeq] = useState(0)
+  /** Zone courante : celle qui a eu le focus en dernier (au départ, celle de l'onglet par défaut). */
+  const [focusedZone, setFocusedZone] = useState<string | null>(() => zoneOfTab(getZones(), settings.ui.sessionTab)?.id ?? null)
+  // Au montage : le réglage « Onglet par défaut d'une session » est activé dans sa zone (affichage seulement).
+  useLayoutEffect(() => {
+    const l = getZones()
+    const next = activateTab(l, settings.ui.sessionTab)
+    if (next !== l) setZones(next, false)
+  }, [])
+  const visible = (t: TabId) => isVisible(layout, t)
+  /**
+   * Nouvelle disposition : confirmation d'abord si elle masque l'onglet
+   * Fichiers alors qu'un fichier modifié n'est pas enregistré.
+   */
+  const commitLayout = (next: Layout, opts?: { focusTab?: TabId; persist?: boolean }) => {
+    // Le focus n'est posé que si le changement a lieu : une confirmation refusée (« Rester ») ne laisse rien d'armé.
+    const apply = () => {
+      setZones(next, opts?.persist ?? true)
+      if (opts?.focusTab) {
+        setFocusedZone(zoneOfTab(next, opts.focusTab)?.id ?? null)
+        pendingFocus.current = opts.focusTab
+        setFocusSeq((n) => n + 1)
+      }
+    }
+    if (isVisible(shownOf(storedRef.current), 'files') && !isVisible(shownOf(next), 'files')) guardLeave(session?.id ?? null, 'changer d’onglet', apply)
+    else apply()
   }
+  useLayoutEffect(() => {
+    const t = pendingFocus.current
+    pendingFocus.current = null
+    if (t) document.getElementById(`${tabsId}-${t}`)?.focus()
+  }, [focusSeq])
+  /** Ouvre un onglet dans la zone qui le contient (et en fait la zone courante). */
+  const setTab = (next: TabId) => {
+    const l = storedRef.current
+    setFocusedZone(zoneOfTab(l, next)?.id ?? null)
+    if (!isVisible(shownOf(l), next)) commitLayout(activateTab(l, next))
+  }
+  const resetZones = (focusTab?: TabId) => {
+    const apply = () => {
+      resetLayout()
+      setFocusedZone(zoneOfTab(getZones(), focusTab ?? 'terminal')?.id ?? null)
+      if (focusTab) {
+        pendingFocus.current = focusTab
+        setFocusSeq((n) => n + 1)
+      }
+    }
+    if (visible('files') && !isVisible(defaultLayout(), 'files')) guardLeave(session?.id ?? null, 'réinitialiser la disposition', apply)
+    else apply()
+  }
+  const convVisible = visible('conversation')
   /**
    * Conversations déjà ouvertes : la vue reste montée (masquée) quand on change
    * d'onglet, pour garder le fil, sa position et les volets dépliés.
    */
   const [convOpened, setConvOpened] = useState<string | null>(null)
   useEffect(() => {
-    if (tab === 'conversation' && session && convOpened !== session.id) setConvOpened(session.id)
-  }, [tab, session?.id])
+    if (convVisible && session && convOpened !== session.id) setConvOpened(session.id)
+  }, [convVisible, session?.id])
   /** Fichier à montrer dans le diff (« Voir le diff » depuis l'onglet Fichiers). */
   const [diffFocus, setDiffFocus] = useState<{ sessionId: string; path: string; n: number } | null>(null)
   /** Extrait à montrer dans l'onglet Fichiers (clic dans la liste de la revue). */
@@ -522,14 +579,15 @@ export function SessionPane({
     setTab('commits')
   }
   // Le diff n'est calculé qu'une fois l'onglet ouvert pour la session (puis tenu à jour pour le badge).
+  const diffShown = visible('diff') || visible('files')
   const [diffOpened, setDiffOpened] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => {
-    if ((tab === 'diff' || tab === 'files') && session && !diffOpened.has(session.id)) setDiffOpened((s) => new Set(s).add(session.id))
-  }, [tab, session?.id])
+    if (diffShown && session && !diffOpened.has(session.id)) setDiffOpened((s) => new Set(s).add(session.id))
+  }, [diffShown, session?.id])
   const diff = useSessionDiff(
     session?.id ?? null,
     diffSeq,
-    (tab !== 'terminal' && tab !== 'conversation' && tab !== 'runners') || (!!session && diffOpened.has(session.id)),
+    visible('diff') || visible('commits') || visible('files') || visible('agents') || (!!session && diffOpened.has(session.id)),
   )
   const fileCount = diff.summary?.files.length ?? null
   /** Liste du diff dans l'ordre de l'onglet Diff : la revue part dans le même ordre d'où qu'on l'envoie. */
@@ -542,24 +600,8 @@ export function SessionPane({
     setTab('terminal')
     document.getElementById(`${tabsId}-terminal`)?.focus()
   }
-  const tabs: (readonly [Tab, string])[] = [
-    ['conversation', 'Conversation'],
-    ['terminal', 'Terminal'],
-    ['diff', 'Diff'],
-    ['commits', 'Commits'],
-    ['files', 'Fichiers'],
-    ['agents', 'Agents'],
-    // Démon trop ancien : pas d'onglet « Lancer ».
-    ...(runnersSupported === false ? [] : [['runners', 'Lancer'] as const]),
-  ]
-  // Onglet « Lancer » ouvert puis masqué (démon ancien) : retour au terminal.
-  useEffect(() => {
-    if (tab === 'runners' && runnersSupported === false) setTabNow('terminal')
-  }, [tab, runnersSupported])
   const agentsRunning = session ? runningCount(session, agents) : 0
 
-  // Clic sur un sous-agent dans la barre latérale : onglet « Agents » (pas au montage du volet),
-  // puis focus sur l'agent choisi.
   const openedAgents = useRef(openAgents)
   const focusAgent = useRef(false)
   useEffect(() => {
@@ -568,13 +610,194 @@ export function SessionPane({
     focusAgent.current = true
     setTab('agents')
   }, [openAgents])
+  const agentsVisible = visible('agents')
   useEffect(() => {
-    if (!focusAgent.current || tab !== 'agents') return
+    if (!focusAgent.current || !agentsVisible) return
     focusAgent.current = false
     const panel = document.getElementById(`${tabsId}-agents-panel`)
     panel?.querySelector<HTMLElement>('.ag-item[aria-current="true"]')?.focus()
-  }, [tab, openAgents, agentId, tabsId])
+  }, [agentsVisible, openAgents, agentId, tabsId])
 
+  /** Pastilles d'un onglet (demandes, fichiers changés, exécutions, agents, commentaires). */
+  const extra = (k: TabId) => (
+    <>
+      {(k === 'terminal' || k === 'conversation') && pending.length > 0 && (
+        <span className="badge wait" aria-label={`${pending.length} à répondre`}>
+          {pending.length}
+        </span>
+      )}
+      {k === 'diff' && fileCount !== null && fileCount > 0 && (
+        <span className="badge" aria-label={`${fileCount} fichier${fileCount > 1 ? 's' : ''} changé${fileCount > 1 ? 's' : ''}`}>
+          {fileCount}
+        </span>
+      )}
+      {k === 'runners' && runnersRunning > 0 && (
+        <span className="badge" aria-label={runnersIndicator(runnersRunning) ?? undefined}>
+          {runnersRunning}
+        </span>
+      )}
+      {k === 'agents' && agentsRunning > 0 && (
+        <span className="badge" aria-label={runningLabel(agentsRunning) ?? undefined}>
+          {agentsRunning}
+        </span>
+      )}
+      {k === 'diff' && pendingComments > 0 && (
+        <span className="badge pend" aria-label={`${pendingComments} commentaire${pendingComments > 1 ? 's' : ''} en attente`}>
+          💬{pendingComments}
+        </span>
+      )}
+      {k === 'commits' && commitNotes > 0 && (
+        <span className="badge pend" aria-label={`${commitNotes} commentaire${commitNotes > 1 ? 's' : ''} de commit dans la revue`}>
+          💬{commitNotes}
+        </span>
+      )}
+      {k === 'files' && fileExtracts > 0 && (
+        <span className="badge pend" aria-label={`${fileExtracts} extrait${fileExtracts > 1 ? 's' : ''} de fichier dans la revue`}>
+          💬{fileExtracts}
+        </span>
+      )}
+    </>
+  )
+  const zoneTabs = TAB_IDS.filter((k) => k !== 'runners' || runnersSupported !== false).map((id) => ({ id, extra: extra(id) }))
+
+  function renderPanel(k: TabId, shown: boolean): ReactNode {
+    switch (k) {
+      case 'terminal':
+        return (
+          <TerminalView
+            sessionId={session?.id ?? null}
+            alive={session?.alive ?? false}
+            theme={termTheme}
+            onSize={onTermSize}
+            onLink={onLink}
+            hostRef={termHost}
+            emptyText="Choisis une session à gauche, ou lance-en une nouvelle."
+          />
+        )
+      case 'conversation':
+        if (!session) return shown ? <p className="empty">Choisis une session pour lire sa conversation.</p> : null
+        if (!shown && convOpened !== session.id) return null
+        return (
+          <ViewBoundary key={session.id} label="Conversation">
+            <ConversationView key={session.id} session={session} onLink={onLink} hidden={!shown} />
+          </ViewBoundary>
+        )
+      case 'diff':
+        if (!shown) return null
+        return session ? (
+          <ViewBoundary key={session.id} label="Diff">
+            <DiffView
+              key={session.id}
+              focusPath={diffFocus}
+              session={session}
+              diff={diff}
+              reviewFiles={reviewFiles}
+              draft={draft}
+              review={review}
+              seen={seenFiles}
+              onSeen={onSeen}
+              onSent={backToTerminal}
+              onOpenFile={(path, line) => {
+                setFilesFocus((f) => ({ sessionId: session.id, path, line, n: (f?.n ?? 0) + 1 }))
+                setTab('files')
+              }}
+              onOpenCommit={openCommit}
+            />
+          </ViewBoundary>
+        ) : (
+          <p className="empty">Choisis une session pour voir ce qu’elle a changé.</p>
+        )
+      case 'commits':
+        if (!shown) return null
+        return session ? (
+          <ViewBoundary key={session.id} label="Commits">
+            <CommitsView
+              key={session.id}
+              session={session}
+              seq={diffSeq}
+              draft={draft}
+              review={review}
+              reviewFiles={reviewFiles}
+              onSent={backToTerminal}
+              focusCommit={commitFocus}
+              onOpenFile={(path, line) => {
+                setFilesFocus((f) => ({ sessionId: session.id, path, line, n: (f?.n ?? 0) + 1 }))
+                setTab('files')
+              }}
+            />
+          </ViewBoundary>
+        ) : (
+          <p className="empty">Choisis une session pour parcourir ses commits.</p>
+        )
+      case 'files':
+        if (!shown) return null
+        return session ? (
+          <ViewBoundary key={session.id} label="Fichiers">
+            <FilesView
+              key={session.id}
+              session={session}
+              diff={diff.summary}
+              reviewFiles={reviewFiles}
+              diffVersion={diff.version}
+              draft={draft}
+              review={review}
+              onSent={backToTerminal}
+              focusFile={filesFocus}
+              onLink={onLink}
+              onShowDiff={(path) => {
+                setDiffFocus((f) => ({ sessionId: session.id, path, n: (f?.n ?? 0) + 1 }))
+                setTab('diff')
+              }}
+              onOpenCommit={openCommit}
+              onMentioned={() => {
+                setTab('terminal')
+                requestAnimationFrame(() => termHost.current?.querySelector<HTMLElement>('.xterm-helper-textarea')?.focus())
+              }}
+            />
+          </ViewBoundary>
+        ) : (
+          <p className="empty">Choisis une session pour parcourir ses fichiers.</p>
+        )
+      case 'agents':
+        if (!shown) return null
+        return session ? (
+          <ViewBoundary key={session.id} label="Agents">
+            <AgentsView
+              key={session.id}
+              session={session}
+              agents={agents}
+              load={agentsLoad}
+              onRetry={() => onRetryAgents(session.id)}
+              selectedId={agentId}
+              onSelect={onSelectAgent}
+              onLink={onLink}
+            />
+          </ViewBoundary>
+        ) : (
+          <p className="empty">Choisis une session pour suivre ses sous-agents.</p>
+        )
+      case 'runners':
+        if (!shown || runnersSupported === false) return null
+        return session ? (
+          <ViewBoundary key={session.id} label="Lancer">
+            <RunnersView
+              key={session.id}
+              session={session}
+              theme={termTheme}
+              onLink={onLink}
+              onRunning={onRunnersRunning}
+              onUnsupported={onRunnersUnsupported}
+              onOpenFile={(path) => {
+                setFilesFocus((f) => ({ sessionId: session.id, path, line: 1, n: (f?.n ?? 0) + 1 }))
+                setTab('files')
+              }}
+            />
+          </ViewBoundary>
+        ) : (
+          <p className="empty">Choisis une session pour lancer les commandes de son dépôt.</p>
+        )
+    }
+  }
   return (
     <section className="panel sess" aria-label={session ? `Session ${sessionDisplayName(session)}` : 'Aucune session'}>
       {session ? (
@@ -599,229 +822,19 @@ export function SessionPane({
           </div>
         </div>
       )}
-      <div className="tabs" role="tablist" aria-label="Vues de la session">
-        {tabs.map(([k, l]) => (
-          <button
-            key={k}
-            role="tab"
-            id={`${tabsId}-${k}`}
-            aria-selected={tab === k}
-            aria-controls={`${tabsId}-${k}-panel`}
-            tabIndex={tab === k ? 0 : -1}
-            onClick={() => setTab(k)}
-            onKeyDown={(e) => {
-              if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
-                e.preventDefault()
-                const order = tabs.map(([t]) => t)
-                const i = order.indexOf(tab)
-                const next = order[(i + (e.key === 'ArrowRight' ? 1 : order.length - 1)) % order.length]!
-                setTab(next)
-                document.getElementById(`${tabsId}-${next}`)?.focus()
-              }
-            }}
-          >
-            {l}
-            {(k === 'terminal' || k === 'conversation') && pending.length > 0 && (
-              <span className="badge wait" aria-label={`${pending.length} à répondre`}>
-                {pending.length}
-              </span>
-            )}
-            {k === 'diff' && fileCount !== null && fileCount > 0 && (
-              <span className="badge" aria-label={`${fileCount} fichier${fileCount > 1 ? 's' : ''} changé${fileCount > 1 ? 's' : ''}`}>
-                {fileCount}
-              </span>
-            )}
-            {k === 'runners' && runnersRunning > 0 && (
-              <span className="badge" aria-label={runnersIndicator(runnersRunning) ?? undefined}>
-                {runnersRunning}
-              </span>
-            )}
-            {k === 'agents' && agentsRunning > 0 && (
-              <span className="badge" aria-label={runningLabel(agentsRunning) ?? undefined}>
-                {agentsRunning}
-              </span>
-            )}
-            {k === 'diff' && pendingComments > 0 && (
-              <span className="badge pend" aria-label={`${pendingComments} commentaire${pendingComments > 1 ? 's' : ''} en attente`}>
-                💬{pendingComments}
-              </span>
-            )}
-            {k === 'commits' && commitNotes > 0 && (
-              <span className="badge pend" aria-label={`${commitNotes} commentaire${commitNotes > 1 ? 's' : ''} de commit dans la revue`}>
-                💬{commitNotes}
-              </span>
-            )}
-            {k === 'files' && fileExtracts > 0 && (
-              <span className="badge pend" aria-label={`${fileExtracts} extrait${fileExtracts > 1 ? 's' : ''} de fichier dans la revue`}>
-                💬{fileExtracts}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
       <div className="term-panel">
-        {/* Le terminal reste monté sous les autres onglets ; seule la zone des demandes change sa taille. */}
-        <div
-          className="term-wrap"
-          role="tabpanel"
-          id={`${tabsId}-terminal-panel`}
-          aria-labelledby={`${tabsId}-terminal`}
-          inert={tab !== 'terminal'}
-        >
-        <TerminalView
-          sessionId={session?.id ?? null}
-          alive={session?.alive ?? false}
-          theme={termTheme}
-          onSize={onTermSize}
-          onLink={onLink}
-          hostRef={termHost}
-          emptyText="Choisis une session à gauche, ou lance-en une nouvelle."
+        <ZoneGrid
+          layout={stored}
+          unavailable={unavailable}
+          tabs={zoneTabs}
+          focused={focusedZone}
+          idPrefix={tabsId}
+          onFocusZone={setFocusedZone}
+          onActivate={setTab}
+          onChange={commitLayout}
+          onReset={resetZones}
+          renderPanel={renderPanel}
         />
-        </div>
-        {session && (tab === 'conversation' || convOpened === session.id) && (
-          <div
-            className="diff-layer conv-layer"
-            role="tabpanel"
-            id={`${tabsId}-conversation-panel`}
-            aria-labelledby={`${tabsId}-conversation`}
-            hidden={tab !== 'conversation'}
-          >
-            <ViewBoundary key={session.id} label="Conversation">
-              <ConversationView key={session.id} session={session} onLink={onLink} hidden={tab !== 'conversation'} />
-            </ViewBoundary>
-          </div>
-        )}
-        {!session && tab === 'conversation' && (
-          <div className="diff-layer" role="tabpanel" id={`${tabsId}-conversation-panel`} aria-labelledby={`${tabsId}-conversation`}>
-            <p className="empty">Choisis une session pour lire sa conversation.</p>
-          </div>
-        )}
-        {tab === 'diff' && (
-          <div className="diff-layer" role="tabpanel" id={`${tabsId}-diff-panel`} aria-labelledby={`${tabsId}-diff`}>
-            {session ? (
-              <ViewBoundary key={session.id} label="Diff">
-                <DiffView
-                  key={session.id}
-                  focusPath={diffFocus}
-                  session={session}
-                  diff={diff}
-                  reviewFiles={reviewFiles}
-                  draft={draft}
-                  review={review}
-                  seen={seenFiles}
-                  onSeen={onSeen}
-                  onSent={backToTerminal}
-                  onOpenFile={(path, line) => {
-                    setFilesFocus((f) => ({ sessionId: session.id, path, line, n: (f?.n ?? 0) + 1 }))
-                    setTab('files')
-                  }}
-                  onOpenCommit={openCommit}
-                />
-              </ViewBoundary>
-            ) : (
-              <p className="empty">Choisis une session pour voir ce qu’elle a changé.</p>
-            )}
-          </div>
-        )}
-        {tab === 'commits' && (
-          <div className="diff-layer" role="tabpanel" id={`${tabsId}-commits-panel`} aria-labelledby={`${tabsId}-commits`}>
-            {session ? (
-              <ViewBoundary key={session.id} label="Commits">
-                <CommitsView
-                  key={session.id}
-                  session={session}
-                  seq={diffSeq}
-                  draft={draft}
-                  review={review}
-                  reviewFiles={reviewFiles}
-                  onSent={backToTerminal}
-                  focusCommit={commitFocus}
-                  onOpenFile={(path, line) => {
-                    setFilesFocus((f) => ({ sessionId: session.id, path, line, n: (f?.n ?? 0) + 1 }))
-                    setTab('files')
-                  }}
-                />
-              </ViewBoundary>
-            ) : (
-              <p className="empty">Choisis une session pour parcourir ses commits.</p>
-            )}
-          </div>
-        )}
-        {tab === 'files' && (
-          <div className="diff-layer" role="tabpanel" id={`${tabsId}-files-panel`} aria-labelledby={`${tabsId}-files`}>
-            {session ? (
-              <ViewBoundary key={session.id} label="Fichiers">
-                <FilesView
-                  key={session.id}
-                  session={session}
-                  diff={diff.summary}
-                  reviewFiles={reviewFiles}
-                  diffVersion={diff.version}
-                  draft={draft}
-                  review={review}
-                  onSent={backToTerminal}
-                  focusFile={filesFocus}
-                  onLink={onLink}
-                  onShowDiff={(path) => {
-                    setDiffFocus((f) => ({ sessionId: session.id, path, n: (f?.n ?? 0) + 1 }))
-                    setTab('diff')
-                  }}
-                  onOpenCommit={openCommit}
-                  onMentioned={() => {
-                    setTab('terminal')
-                    // Le terminal reprend le focus pour continuer le message.
-                    requestAnimationFrame(() => termHost.current?.querySelector<HTMLElement>('.xterm-helper-textarea')?.focus())
-                  }}
-                />
-              </ViewBoundary>
-            ) : (
-              <p className="empty">Choisis une session pour parcourir ses fichiers.</p>
-            )}
-          </div>
-        )}
-        {tab === 'agents' && (
-          <div className="diff-layer" role="tabpanel" id={`${tabsId}-agents-panel`} aria-labelledby={`${tabsId}-agents`}>
-            {session ? (
-              <ViewBoundary key={session.id} label="Agents">
-                <AgentsView
-                  key={session.id}
-                  session={session}
-                  agents={agents}
-                  load={agentsLoad}
-                  onRetry={() => onRetryAgents(session.id)}
-                  selectedId={agentId}
-                  onSelect={onSelectAgent}
-                  onLink={onLink}
-                />
-              </ViewBoundary>
-            ) : (
-              <p className="empty">Choisis une session pour suivre ses sous-agents.</p>
-            )}
-          </div>
-        )}
-        {tab === 'runners' && runnersSupported !== false && (
-          <div className="diff-layer" role="tabpanel" id={`${tabsId}-runners-panel`} aria-labelledby={`${tabsId}-runners`}>
-            {session ? (
-              <ViewBoundary key={session.id} label="Lancer">
-                <RunnersView
-                  key={session.id}
-                  session={session}
-                  theme={termTheme}
-                  onLink={onLink}
-                  onRunning={onRunnersRunning}
-                  onUnsupported={onRunnersUnsupported}
-                  onOpenFile={(path) => {
-                    setFilesFocus((f) => ({ sessionId: session.id, path, line: 1, n: (f?.n ?? 0) + 1 }))
-                    setTab('files')
-                  }}
-                />
-              </ViewBoundary>
-            ) : (
-              <p className="empty">Choisis une session pour lancer les commandes de son dépôt.</p>
-            )}
-          </div>
-        )}
-        {/* Zone réservée au bas du volet, sous l'onglet affiché : le contenu au-dessus rétrécit (terminal réajusté). */}
         <RequestDock
           session={session}
           pending={pending}

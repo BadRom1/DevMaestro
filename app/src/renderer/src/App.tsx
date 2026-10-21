@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type CSSProperties } from 'react'
 
 import type { ConnectionState } from '../../shared/bridge'
 import { validHome } from '../../shared/home'
@@ -19,6 +19,7 @@ import { AccountSwitchDialog, useAccountSwitch, type HeaderSwitch } from './comp
 import { quotaViews } from './state/quotas'
 import { SessionPane } from './components/SessionPane'
 import { Sidebar } from './components/Sidebar'
+import { ColumnGrip, useColumnWidth } from './components/ColumnGrip'
 import { TopBar } from './components/TopBar'
 import { UnsavedConfirm } from './components/UnsavedConfirm'
 import { guardLeave, hasUnsaved, unsavedPath } from './state/unsaved'
@@ -795,6 +796,10 @@ export function App() {
       }
     : undefined
 
+  // Largeur de la barre latérale (lot 16), bornée à la place disponible.
+  const viewARef = useRef<HTMLElement>(null)
+  const sideCol = useColumnWidth('sidebar', viewARef)
+
   const sessionPane = (
     <SessionPane
       session={selected}
@@ -876,7 +881,8 @@ export function App() {
           onOpenIssue={forgeOn ? openSessionIssue : undefined}
         />
       ) : (
-      <main className="viewA">
+      <main className="viewA" ref={viewARef} style={{ '--col-w': `${sideCol.width}px` } as CSSProperties}>
+        <ColumnGrip column="sidebar" label="Largeur de la barre latérale" width={sideCol.width} max={sideCol.max} avail={sideCol.avail} />
         <Sidebar
           groups={groups}
           past={past}

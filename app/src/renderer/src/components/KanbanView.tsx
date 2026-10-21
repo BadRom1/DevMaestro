@@ -8,7 +8,7 @@
 import { runnersIndicator } from '../state/runners'
 import { ciBadge, deliveryBadge } from '../state/delivery'
 import { ForgeBadge } from './PullsPanel'
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 
 import type { PendingRequest, ProjectInfo, Profile, Session, Subagent } from '../../../shared/protocol'
 import { call, errorCode, errorText } from '../api'
@@ -33,6 +33,7 @@ import { ProfileBadge, StatusGlyph } from './common'
 import { ColorBar } from './SessionIdentity'
 import { IssueChip } from './IssueChip'
 import { sessionIssue } from '../state/forge'
+import { ColumnGrip, useColumnWidth } from './ColumnGrip'
 
 const NO_STALE: readonly number[] = []
 
@@ -296,9 +297,19 @@ export function KanbanView({
     }
   }
 
+  // Largeur de la colonne du kanban quand une session est ouverte à côté (lot 16).
+  const mainRef = useRef<HTMLElement>(null)
+  const col = useColumnWidth('kanban', mainRef)
+
   const empty = filter !== null && visible.length === 0
   return (
-    <main className={`kview${showPane ? ' open' : ''}`} onKeyDown={onKeyDown}>
+    <main
+      className={`kview${showPane ? ' open' : ''}`}
+      onKeyDown={onKeyDown}
+      ref={mainRef}
+      style={showPane ? ({ '--col-w': `${col.width}px` } as CSSProperties) : undefined}
+    >
+      {showPane && <ColumnGrip column="kanban" label="Largeur de la colonne du kanban" width={col.width} max={col.max} avail={col.avail} />}
       <div className="kside">
         <div className="khdr">
           <label htmlFor="kanban-project">Projet :</label>

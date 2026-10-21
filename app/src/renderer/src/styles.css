@@ -132,7 +132,13 @@ button { cursor: pointer }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-width: 0 }
 
 /* Vue par projet */
-.viewA { display: grid; grid-template-columns: 268px minmax(0, 1fr); gap: 12px; min-height: 0 }
+.viewA { display: grid; grid-template-columns: var(--col-w, 268px) minmax(0, 1fr); gap: 12px; min-height: 0; position: relative }
+/* Poignée d'une colonne (lot 16) : dans l'espace entre la colonne et la session ; largeur bornée en JS (place de la session gardée). */
+.col-grip { position: absolute; top: 0; bottom: 0; left: calc(var(--col-w, 268px) + 2px); width: 8px; cursor: ew-resize; z-index: 4; touch-action: none }
+.kview .col-grip { left: calc(var(--col-w, 420px) + 2px) }
+.col-grip::after { content: ""; position: absolute; left: 2px; top: 50%; width: 4px; height: 48px; margin-top: -24px; border-radius: 2px; background: var(--line-2) }
+.col-grip:hover::after, .col-grip:focus-visible::after { background: var(--accent); top: 0; height: 100%; margin-top: 0 }
+.col-grip:focus-visible { outline-offset: -2px }
 .side { display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding: 0 }
 .side-projects { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 10px 6px 8px }
 /* Anciennes sessions : ancrées en bas ; repliées, juste leur en-tête ; dépliées, jusqu'à 55 % de la colonne. */
@@ -307,7 +313,7 @@ select.mode { background: var(--panel-2); border: 1px solid var(--line-2); borde
 .mf { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--line) }
 .mf .err { color: var(--err-ink); font-size: 12.5px; margin-right: auto }
 
-@media (max-width: 900px) { .viewA { grid-template-columns: 220px minmax(0, 1fr) } .grid3 { grid-template-columns: minmax(0, 1fr) } }
+@media (max-width: 900px) { .grid3 { grid-template-columns: minmax(0, 1fr) } }
 
 /* Réglages et « Nouvelle session » (maquette) */
 .stabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); padding: 0 12px }
@@ -369,7 +375,48 @@ kbd { font-family: var(--f-mono); font-size: 11px; border: 1px solid var(--line-
 
 /* Onglet Diff (maquette) : lignes ajoutées/supprimées avec fond ET signe + / −. */
 .term-wrap { display: grid; min-height: 0; grid-area: 1 / 1 }
-.term-panel > .term-wrap > .term { min-height: 0 }
+.zones > .term-wrap > .term { min-height: 0 }
+/* Zones d'onglets (lot 16) : volets, barres, séparateurs et cibles de dépôt placés en absolu dans un même conteneur
+   (un volet change de zone sans changer de parent). Le terminal reste rendu sous l'onglet actif de sa zone. */
+.zones { grid-area: 1 / 1; position: relative; min-height: 0; min-width: 0; --zt-h: 37px }
+.zones > .ztabs { position: absolute; box-sizing: border-box; height: var(--zt-h); display: flex; align-items: stretch; border-bottom: 1px solid var(--line); z-index: 2; background: var(--panel); min-width: 0 }
+.zones > .ztabs:has(.zmenu-pop) { z-index: 6 }
+/* Zone étroite : les onglets rétrécissent (libellé coupé, nom complet dans le nom accessible) au lieu de défiler. */
+.ztabs > .tabs { flex: 1 1 auto; min-width: 0; border-bottom: 0; overflow: hidden }
+.ztabs > .tabs [role="tab"] { flex: 0 1 auto; min-width: 0; height: 100%; padding-block: 0; white-space: nowrap; overflow: hidden }
+/* Seul le libellé est tronqué ; les pastilles (compteurs, demandes) restent entières. */
+.ztabs > .tabs [role="tab"] > .tlabel { min-width: 2ch; overflow: hidden; text-overflow: ellipsis }
+.ztabs > .tabs [role="tab"] > .badge { flex: none }
+/* Zone courante (plusieurs zones) : liseré d'accent et onglet actif en gras, pas la couleur seule. */
+.ztabs.cur { box-shadow: inset 0 2px 0 var(--accent) }
+.ztabs.cur [role="tab"][aria-selected="true"] { font-weight: 600 }
+.ztabs.drop { outline: 2px dashed var(--accent); outline-offset: -2px }
+.zones > .zpanel { position: absolute; grid-area: auto; min-width: 0; min-height: 0 }
+.zones > .zpanel.term-wrap { z-index: 0 }
+.zones > .zpanel.diff-layer { z-index: 1 }
+.zones > .zpanel[hidden] { display: none }
+.zsep { position: absolute; z-index: 4; touch-action: none }
+.zsep.v { width: 6px; cursor: ew-resize }
+.zsep.h { height: 6px; cursor: ns-resize }
+.zsep::after { content: ""; position: absolute; background: var(--line-2) }
+.zsep.v::after { left: 2px; top: 0; bottom: 0; width: 2px }
+.zsep.h::after { top: 2px; left: 0; right: 0; height: 2px }
+.zsep:hover::after, .zsep:focus-visible::after { background: var(--accent) }
+.zsep:focus-visible { outline-offset: -1px }
+.zdrop { position: absolute; z-index: 5 }
+.zdrop-hint { position: absolute; display: grid; place-items: center; border: 2px dashed var(--accent); border-radius: var(--r); background: color-mix(in srgb, var(--accent) 12%, transparent); pointer-events: none }
+.zdrop-hint.center { inset: 4px }
+.zdrop-hint.right { top: 4px; right: 4px; bottom: 4px; width: 50% }
+.zdrop-hint.bottom { left: 4px; right: 4px; bottom: 4px; height: 50% }
+.zdrop-label { background: var(--panel); color: var(--fg); border: 1px solid var(--accent); border-radius: 99px; padding: 2px 10px; font-size: 12px; font-weight: 600; white-space: nowrap }
+.zdrop-label.in-bar { align-self: center; flex: none; margin: 0 4px; pointer-events: none }
+.zmenu { position: relative; flex: none; display: flex; align-items: center; padding: 0 4px }
+.zmenu-btn { min-width: 28px; padding-inline: 6px; line-height: 1 }
+.zmenu-pop { position: absolute; right: 4px; top: calc(100% + 2px); z-index: 10; display: grid; min-width: 220px; padding: 4px; background: var(--panel); border: 1px solid var(--line-2); border-radius: var(--r); box-shadow: 0 8px 24px rgba(0, 0, 0, .25) }
+.zmenu-pop [role="menuitem"] { border: 0; background: transparent; text-align: left; padding: 6px 10px; border-radius: 5px; color: var(--fg); font-size: 13px; white-space: nowrap }
+.zmenu-pop [role="menuitem"]:hover, .zmenu-pop [role="menuitem"]:focus-visible { background: var(--panel-2) }
+.zmenu-pop [role="menuitem"][aria-disabled="true"] { color: var(--muted); cursor: not-allowed }
+.zmenu-pop [role="menuitem"].sep { margin-top: 4px; border-top: 1px solid var(--line); border-radius: 0 0 5px 5px }
 .diff-layer { grid-area: 1 / 1; position: relative; z-index: 1; background: var(--panel); display: grid; min-height: 0 }
 .diffpane { display: grid; grid-template-columns: 260px minmax(0, 1fr); min-height: 0; height: 100% }
 .diffpane.empty { display: grid; place-content: center; gap: 10px; justify-items: center; color: var(--muted); grid-template-columns: none }
@@ -719,7 +766,7 @@ tr.cm td { padding: 6px 12px 8px 60px; white-space: normal }
 .kcard { cursor: pointer }
 .kcard.sel { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent) }
 /* Volet ouvert : le kanban se replie en une colonne (statuts empilés) à gauche, la session à droite. */
-.kview.open { grid-template-columns: minmax(260px, 1fr) minmax(0, 2.6fr) }
+.kview.open { grid-template-columns: var(--col-w, 420px) minmax(0, 1fr); position: relative }
 .kview.open .kanban { grid-template-columns: minmax(0, 1fr); align-content: start; overflow: auto }
 .kview.open .kcol { min-height: auto }
 .kview.open .kcards { overflow: visible }
@@ -729,7 +776,6 @@ tr.cm td { padding: 6px 12px 8px 60px; white-space: normal }
 .kpane-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding-right: 3px }
 .kpane-bar .btn { flex: none }
 .kpane-bar .hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0 }
-@media (max-width: 1100px) { .kview.open { grid-template-columns: minmax(220px, 1fr) minmax(0, 2fr) } }
 
 /* ---------- Finitions d'interface (v0.3, lot 8) ---------- */
 /* Taille du texte : − [liste] + 100 %. */
