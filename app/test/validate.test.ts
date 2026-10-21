@@ -53,6 +53,8 @@ describe('validation des paramètres de la page', () => {
       cwd: '/p',
       profile: 'work',
     })
+    // Reprise d'une session du démon sous un autre profil.
+    expect(validateParams('sessions.resume', { id: ID, profile: 'perso' })).toEqual({ id: ID, profile: 'perso' })
   })
 
   it('sessions.update : titre et couleur, null pour effacer', () => {

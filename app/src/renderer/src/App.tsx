@@ -19,7 +19,7 @@ import { Sidebar } from './components/Sidebar'
 import { TopBar } from './components/TopBar'
 import { UnsavedConfirm } from './components/UnsavedConfirm'
 import { guardLeave, hasUnsaved, unsavedPath } from './state/unsaved'
-import { ancestorToResolve, fallbackProject, groupByProject, groupPast, pastToOffer, sidebarOrder, type PastEntry } from './state/projects'
+import { ancestorToResolve, fallbackProject, groupByProject, groupPast, hideForProfiles, pastToOffer, sidebarOrder, type PastEntry } from './state/projects'
 import { daemonSaysFolderExists } from './state/format'
 import { initialState, needsResolve, reducer } from './state/store'
 import { KanbanView } from './components/KanbanView'
@@ -28,7 +28,7 @@ import { loadPaneOpen, paneVisible, savePaneOpen } from './state/kanbanFilter'
 import { SettingsDialog } from './components/SettingsDialog'
 import { WheelZoom } from './state/wheelZoom'
 import { useSettings } from './settings'
-import { buildProjectChoices, resolveDefaultProfile, sessionProjectKey } from './state/newSession'
+import { buildProjectChoices, pastResumeProfile, resolveDefaultProfile, sessionProjectKey } from './state/newSession'
 import { initialOf, sessionIssue, supportsInitialPrompt, type IssuePrefill } from './state/forge'
 import { projectWorktreeLocation } from '../../shared/settings'
 import { LOCATION_LABELS } from '../../shared/worktrees'
@@ -350,7 +350,10 @@ export function App() {
   const retryAgents = useCallback((id: string) => setAgentsLoad(retryNow(agentsLoad.current, id)), [setAgentsLoad])
 
 
-  const past = useMemo(() => pastToOffer(state.past, sessions, PAST_LIMIT), [state.past, sessions])
+  const past = useMemo(
+    () => pastToOffer(state.past, sessions, PAST_LIMIT, state.profiles.map((p) => p.name)),
+    [state.past, sessions, state.profiles],
+  )
 
   // Nouvelle connexion : les désaccords pourront être redemandés.
   useEffect(() => {
@@ -493,30 +496,54 @@ export function App() {
     return () => window.removeEventListener('beforeunload', onUnload)
   }, [])
 
-  const resumePast = useCallback(
-    async (p: PastEntry) => {
-      const r = await call('sessions.resume', {
-        claude_session_id: p.claude_session_id,
-        ...(p.cwd ? { cwd: p.cwd } : {}),
-        profile: p.profile,
-        ...(termSize ?? {}),
-      })
-      dispatch({ type: 'session.updated', session: r.session })
-      select(r.session.id)
-    },
-    [termSize, select],
-  )
-
   const projectChoices = useMemo(
     () => buildProjectChoices({ sessions, past, projects: state.projects, home }),
     [sessions, past, state.projects, home],
   )
 
+  // Reprise directe (barre latérale) : le profil du projet s'il voit la conversation, comme « Nouvelle session ».
+  const resumePast = useCallback(
+    async (p: PastEntry) => {
+      const choice = p.cwd ? projectChoices.find((c) => c.dirs.some((d) => d.path === p.cwd)) : undefined
+      const names = state.profiles.map((x) => x.name)
+      const preferred = choice
+        ? resolveDefaultProfile({
+            projectRoot: choice.profileKey,
+            projectProfiles: settings.projectProfiles,
+            profiles: names.length ? names : ['default'],
+            recent: choice.recentProfile,
+          }).profile
+        : null
+      const r = await call('sessions.resume', {
+        claude_session_id: p.claude_session_id,
+        ...(p.cwd ? { cwd: p.cwd } : {}),
+        profile: pastResumeProfile(p, preferred),
+        ...(termSize ?? {}),
+      })
+      dispatch({ type: 'session.updated', session: r.session })
+      select(r.session.id)
+    },
+    [termSize, select, projectChoices, state.profiles, settings.projectProfiles],
+  )
+
   /** Masque une ancienne session (`transcripts.hide`) ; retirée aussitôt de la liste. */
-  const hidePast = useCallback(async (p: PastEntry) => {
-    await call('transcripts.hide', { profile: p.profile, claude_session_id: p.claude_session_id })
-    dispatch({ type: 'past.hidden', profile: p.profile, claude_session_id: p.claude_session_id })
-  }, [])
+  // Une seule ligne par conversation : masquée pour tous les profils connus, y compris ceux dont
+  // `transcripts.list` a échoué (elle y reviendrait au prochain chargement) ; sans effet ailleurs.
+  // Échec partiel : seuls les profils masqués côté démon sont retirés du store (la ligne reste,
+  // vue par les profils restants), puis l'erreur est affichée.
+  const hidePast = useCallback(
+    async (p: PastEntry) => {
+      const targets = [...new Set([...p.profiles, ...state.profiles.map((x) => x.name)])]
+      const { hidden, failed } = await hideForProfiles(targets, (profile) =>
+        call('transcripts.hide', { profile, claude_session_id: p.claude_session_id }),
+      )
+      for (const profile of hidden) dispatch({ type: 'past.hidden', profile, claude_session_id: p.claude_session_id })
+      if (failed.length) {
+        throw new Error(failed.map((f) => `profil ${profileLabelOf(f.profile).long} : ${errorText(f.error)}`).join(' ; '))
+      }
+    },
+    [state.profiles, profileLabelOf],
+  )
 
   /** Retire une session arrêtée de la liste du démon ; la page la retire aussitôt. */
   const forget = useCallback(async (id: string) => {

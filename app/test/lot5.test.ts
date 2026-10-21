@@ -260,6 +260,7 @@ function past(id: string, cwd: string | null, last: string, over: Partial<PastSe
     last_timestamp: last,
     message_count: 1,
     profile: 'default',
+    profiles: ['default'],
     ...over,
   }
 }
@@ -324,7 +325,7 @@ describe('nouvelle session : projets proposés', () => {
       projects,
       label: (x) => ('id' in x ? x.id.slice(0, 4) : x.claude_session_id),
     })
-    expect(list.map((c) => c.key)).toEqual([`s:${stopped.id}`, 'p:default:p1'])
+    expect(list.map((c) => c.key)).toEqual([`s:${stopped.id}`, 'p:p1'])
   })
 })
 

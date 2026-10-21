@@ -479,8 +479,9 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       } else {
         out.claude_session_id = uuid(o, 'claude_session_id')
         optional(o, out, 'cwd', absPath)
-        optional(o, out, 'profile', (x, k) => str(x, k, MAX_SHORT, { nonEmpty: true }))
       }
+      // Profil : aussi avec `id` (reprendre sous un autre compte que celui de la session).
+      optional(o, out, 'profile', (x, k) => str(x, k, MAX_SHORT, { nonEmpty: true }))
       optional(o, out, 'model', (x, k) => str(x, k, MAX_SHORT, { nonEmpty: true }))
       optional(o, out, 'mode', (x, k) => oneOf(x, k, LAUNCH_MODES))
       optional(o, out, 'prompt', (x, k) => str(x, k, MAX_TEXT))

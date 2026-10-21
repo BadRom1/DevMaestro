@@ -29,6 +29,7 @@ import {
   profileKeyOf,
   projectKeyOf,
   resolveDefaultProfile,
+  pastResumeProfile,
   resumeCandidates,
   type ProjectChoice,
   type ResumeCandidate,
@@ -38,7 +39,7 @@ import type { PastEntry } from '../state/projects'
 import { folderName } from '../state/projects'
 import type { WorktreeLists } from '../state/worktrees'
 import { useSettings } from '../settings'
-import { ProfileBadge } from './common'
+import { AnyProfileBadge, ProfileBadge } from './common'
 import { Modal } from './Modal'
 
 const OTHER = '__autre__'
@@ -240,6 +241,21 @@ export function NewSessionDialog({
     [project, sessions, past, projects],
   )
   const chosen = candidates.find((c) => c.key === resumeKey) ?? null
+  /**
+   * Profil de reprise choisi à la main (`null` : celui de la session choisie).
+   * Un choix explicite est gardé quand on change de session dans la liste
+   * (le choix porte sur le compte, pas sur la session : « tout reprendre sous
+   * Perso ») ; il n'est oublié qu'au changement de projet. Sans choix, chaque
+   * session reprend sous son profil par défaut (`resumeDefault`).
+   */
+  const [resumeProfile, setResumeProfile] = useState<string | null>(null)
+  // Défaut : celui de la session du démon ; pour une ancienne session, le profil du projet s'il la voit.
+  const resumeDefault = !chosen ? effectiveProfile : chosen.kind === 'past' ? pastResumeProfile(chosen.past, effectiveProfile) : chosen.profile
+  const effectiveResumeProfile = resumeProfile ?? resumeDefault
+  /** Profil d'origine connu : session du démon, ou ancienne session vue par un seul profil. */
+  const chosenOrigin = !chosen ? null : chosen.kind === 'session' ? chosen.profile : chosen.profiles.length === 1 ? chosen.profiles[0]! : null
+  /** Le profil choisi ne voit pas le transcript (dossiers `projects/` distincts) : Claude Code ne la retrouvera pas. */
+  const resumeBlind = chosen?.kind === 'past' && !chosen.profiles.includes(effectiveResumeProfile)
 
   // Projet changé : dossier et profil reviennent à ceux du projet.
   function pickProject(key: string) {
@@ -248,6 +264,7 @@ export function NewSessionDialog({
     setDir(c?.dirs[0]?.path ?? '')
     setProfile(null)
     setResumeKey(null)
+    setResumeProfile(null)
     setBase(null)
     setLocation(null)
     setCustomParent(null)
@@ -288,6 +305,7 @@ export function NewSessionDialog({
       setDir(path)
       setProfile(null)
       setResumeKey(null)
+      setResumeProfile(null)
       setBase(null)
       setLocation(null)
       setCustomParent(null)
@@ -352,13 +370,19 @@ export function NewSessionDialog({
         }
         onLaunched(session, warnings)
       } else if (chosen?.kind === 'session') {
-        const r = await call('sessions.resume', { id: chosen.session.id, ...common, ...first })
+        // Profil envoyé seulement s'il change : sinon le démon garde celui de la session.
+        const r = await call('sessions.resume', {
+          id: chosen.session.id,
+          ...(effectiveResumeProfile !== chosen.session.profile ? { profile: effectiveResumeProfile } : {}),
+          ...common,
+          ...first,
+        })
         onLaunched(r.session, r.warnings ?? [])
       } else if (chosen?.kind === 'past') {
         const r = await call('sessions.resume', {
           claude_session_id: chosen.past.claude_session_id,
           ...(chosen.past.cwd ? { cwd: chosen.past.cwd } : {}),
-          profile: chosen.past.profile,
+          profile: effectiveResumeProfile,
           ...common,
           ...first,
         })
@@ -395,9 +419,20 @@ export function NewSessionDialog({
     }
   }
 
+  const shownProfile = tab === 'resume' ? effectiveResumeProfile : effectiveProfile
   const profileHint =
     tab === 'resume'
-      ? 'la reprise garde le profil de la session'
+      ? !chosen
+        ? resumeProfile === null
+          ? 'profil par défaut du projet'
+          : 'profil choisi pour la reprise'
+        : resumeBlind
+        ? 'ce profil ne voit pas cette conversation : la reprise échouera probablement'
+        : chosenOrigin && effectiveResumeProfile !== chosenOrigin
+          ? `reprise sous ${label(effectiveResumeProfile).long} (session lancée sous ${label(chosenOrigin).long})`
+          : chosen?.kind === 'past' && !chosenOrigin
+            ? 'conversation visible par plusieurs profils : au choix'
+            : 'profil de la session'
       : profile !== null && profile !== resolved.profile
         ? `remplace le défaut (${label(resolved.profile).long})`
         : resolved.source === 'project'
@@ -474,15 +509,22 @@ export function NewSessionDialog({
           <div className="grid3">
             <label className="field">
               <span className="lbl">Profil</span>
-              <select value={effectiveProfile} onChange={(e) => setProfile(e.target.value)} disabled={tab === 'resume'}>
-                {names.length === 0 && <option value="default">default</option>}
+              <select
+                value={shownProfile}
+                onChange={(e) => (tab === 'resume' ? setResumeProfile(e.target.value) : setProfile(e.target.value))}
+              >
+                {names.length === 0 && shownProfile !== 'default' && <option value="default">default</option>}
+                {/* Profil d'une session absent de la liste des profils : affiché tel quel. */}
+                {!names.includes(shownProfile) && <option value={shownProfile}>{label(shownProfile).long}</option>}
                 {names.map((n) => (
                   <option key={n} value={n}>
                     {label(n).long}
                   </option>
                 ))}
               </select>
-              <span className="hint">{profileHint}</span>
+              <span className={resumeBlind && tab === 'resume' ? 'hint warn' : 'hint'}>
+                {profileHint}
+              </span>
             </label>
             <label className="field">
               <span className="lbl">Modèle</span>
@@ -549,9 +591,12 @@ export function NewSessionDialog({
                       checked={resumeKey === c.key}
                       onChange={() => setResumeKey(c.key)}
                     />
-                    <ProfileBadge profile={c.profile} profiles={profiles} />
+                    {/* Badge seulement si le profil d'origine est connu (pas pour une conversation vue par plusieurs profils). */}
+                    {c.kind === 'session' || c.profiles.length === 1 ? <ProfileBadge profile={c.profile} profiles={profiles} /> : <AnyProfileBadge />}
                     <span className="rname">{c.label}</span>
-                    <span className="sr-only">profil {label(c.profile).long}</span>
+                    <span className="sr-only">
+                      {c.kind === 'session' || c.profiles.length === 1 ? `profil ${label(c.profile).long}` : 'visible par plusieurs profils'}
+                    </span>
                     <span className="hint">
                       {c.branch ? `${c.branch} · ` : ''}
                       {shortAgo(c.at ? new Date(c.at).toISOString() : null)}

@@ -15,11 +15,11 @@ import {
   shortAgo,
   tildify,
 } from '../state/format'
-import { RESOLVING_GROUP, pastFolderMissing, type PastEntry, type PastGroup, type ProjectGroup } from '../state/projects'
+import { RESOLVING_GROUP, pastFolderMissing, pastOrigin, type PastEntry, type PastGroup, type ProjectGroup } from '../state/projects'
 import { sessionIssue } from '../state/forge'
 import { glyphFor } from '../state/status'
 import { candidate, cleanupCount, worktreeOf, type WorktreeLists } from '../state/worktrees'
-import { PathLabel, ProfileBadge, StatusGlyph } from './common'
+import { AnyProfileBadge, PathLabel, ProfileBadge, StatusGlyph } from './common'
 import { useSettings } from '../settings'
 import { ForgetConfirm, HideConfirm } from './ForgetConfirm'
 import { ColorBar } from './SessionIdentity'
@@ -278,8 +278,11 @@ export function Sidebar(props: {
   function pastRow(p: PastEntry) {
     const label = pastDisplayName(p)
     const last = p.last_activity ?? p.last_timestamp
-    const key = `${p.profile}:${p.claude_session_id}`
+    // Une conversation vue par plusieurs profils n'apparaît qu'une fois (voir `pastToOffer`).
+    const key = `past:${p.claude_session_id}`
     const missing = pastFolderMissing(p, props.projects)
+    const origin = pastOrigin(p)
+    const seenBy = origin ? `profil ${labelOf(origin).long}` : `visible par les profils ${p.profiles.map((n) => labelOf(n).long).join(', ')}`
     return (
       <li key={key} className="srow-wrap">
         <button
@@ -293,13 +296,14 @@ export function Sidebar(props: {
           title={
             missing
               ? `Le dossier ${p.cwd} n’existe plus (worktree supprimé ?) : reprise impossible`
-              : `${p.cwd ?? 'dossier inconnu'} · profil ${labelOf(p.profile).long} (${p.profile})${p.first_prompt ? `\n${p.first_prompt}` : ''}`
+              : `${p.cwd ?? 'dossier inconnu'} · ${origin ? `${seenBy} (${origin})` : seenBy}${p.first_prompt ? `\n${p.first_prompt}` : ''}`
           }
-          aria-label={`${missing ? '' : 'Reprendre '}${label}${p.git_branch ? `, branche ${p.git_branch}` : ''}${missing ? ', dossier supprimé, reprise impossible' : ''}, profil ${labelOf(p.profile).long}, ${relativeTime(last)}`}
+          aria-label={`${missing ? '' : 'Reprendre '}${label}${p.git_branch ? `, branche ${p.git_branch}` : ''}${missing ? ', dossier supprimé, reprise impossible' : ''}, ${seenBy}, ${relativeTime(last)}`}
           onClick={() => void resume(p)}
         >
           <span className="st past" aria-hidden="true" />
-          <ProfileBadge profile={p.profile} profiles={props.profiles} />
+          {/* Badge seulement si le profil d'origine est connu (un seul profil voit la conversation). */}
+          {origin ? <ProfileBadge profile={origin} profiles={props.profiles} /> : <AnyProfileBadge />}
           <span className="names">
             <span className="nm-t">{label}</span>
             {(p.git_branch || missing) && (

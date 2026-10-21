@@ -60,6 +60,7 @@ function past(id: string, cwd: string, over: Partial<PastEntry> = {}): PastEntry
     last_timestamp: '2026-10-19T10:00:00Z',
     message_count: 1,
     profile: 'default',
+    profiles: ['default'],
     ...over,
   }
 }

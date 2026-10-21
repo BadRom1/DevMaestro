@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import type { PastSession, ProjectInfo } from '../src/shared/protocol'
 import { COLLAPSE_KEY, loadCollapsed, saveCollapsed, toggleCollapsed, type KeyValueStorage } from '../src/renderer/src/state/collapse'
@@ -8,6 +8,8 @@ import {
   folderName,
   groupByProject,
   groupPast,
+  hideForProfiles,
+  pastOrigin,
   pastToOffer,
   type PastEntry,
 } from '../src/renderer/src/state/projects'
@@ -29,6 +31,7 @@ function past(id: string, cwd: string | null, last: string, over: Partial<PastSe
     last_timestamp: last,
     message_count: 1,
     profile: 'default',
+    profiles: ['default'],
     ...over,
   }
 }
@@ -127,6 +130,56 @@ describe('anciennes sessions groupées par origine', () => {
       ['b', 'work'],
       ['a', 'default'],
     ])
+  })
+
+  it('`projects/` partagé : une conversation vue par deux profils n’apparaît qu’une fois, métadonnées fusionnées', () => {
+    const offer = pastToOffer(
+      {
+        default: [past('x', '/p', '2026-10-19T10:00:00Z', { title: null, message_count: 3 }), past('seul', '/p', '2026-10-18T10:00:00Z')],
+        work: [past('x', '/p', '2026-10-19T11:00:00Z', { title: 'Refonte', git_branch: null, message_count: 5 })],
+      },
+      [],
+    )
+    expect(offer.map((p) => p.claude_session_id)).toEqual(['x', 'seul'])
+    const x = offer[0]!
+    expect(x.profiles).toEqual(['default', 'work'])
+    expect(pastOrigin(x)).toBeNull()
+    expect(x).toMatchObject({ title: 'Refonte', last_timestamp: '2026-10-19T11:00:00Z', message_count: 5 })
+    expect(pastOrigin(offer[1]!)).toBe('default')
+    // Ordre des profils imposé (`profiles.list`) : `profile` est le premier de cet ordre.
+    const ordered = pastToOffer({ work: [past('x', '/p', '2026-10-19T10:00:00Z')], default: [past('x', '/p', '2026-10-19T10:00:00Z')] }, [], 20, ['default', 'work'])
+    expect(ordered[0]).toMatchObject({ profile: 'default', profiles: ['default', 'work'] })
+    expect(pastToOffer({ work: [past('x', '/p', '2026-10-19T10:00:00Z')], default: [past('x', '/p', '2026-10-19T10:00:00Z')] }, [], 20, ['work', 'default'])[0]!.profile).toBe('work')
+    // Compté après dédoublonnage (la limite aussi).
+    expect(pastToOffer({ default: [past('x', '/p', '2026-10-19T10:00:00Z')], work: [past('x', '/p', '2026-10-19T10:00:00Z')] }, [], 1)).toHaveLength(1)
+  })
+})
+
+describe('masquage d’une conversation vue par plusieurs profils', () => {
+  it('tous les profils masqués : la ligne disparaît', async () => {
+    const hide = vi.fn(async () => ({ hidden: true }))
+    expect(await hideForProfiles(['default', 'work'], hide)).toEqual({ hidden: ['default', 'work'], failed: [] })
+    expect(hide).toHaveBeenCalledTimes(2)
+    let st = reducer(initialState, { type: 'past', profile: 'default', sessions: [past('x', '/p', '2026-10-19T10:00:00Z')] })
+    st = reducer(st, { type: 'past', profile: 'work', sessions: [past('x', '/p', '2026-10-19T10:00:00Z')] })
+    for (const profile of ['default', 'work']) st = reducer(st, { type: 'past.hidden', profile, claude_session_id: 'x' })
+    expect(pastToOffer(st.past, [])).toEqual([])
+  })
+
+  it('échec partiel : tous tentés, seuls les profils masqués retirés, la ligne reste pour les autres', async () => {
+    const hide = vi.fn(async (profile: string) => {
+      if (profile === 'default') throw new Error('démon injoignable')
+      return { hidden: true }
+    })
+    const r = await hideForProfiles(['default', 'work'], hide)
+    expect(hide).toHaveBeenCalledTimes(2)
+    expect(r.hidden).toEqual(['work'])
+    expect(r.failed.map((f) => f.profile)).toEqual(['default'])
+    let st = reducer(initialState, { type: 'past', profile: 'default', sessions: [past('x', '/p', '2026-10-19T10:00:00Z')] })
+    st = reducer(st, { type: 'past', profile: 'work', sessions: [past('x', '/p', '2026-10-19T10:00:00Z')] })
+    for (const profile of r.hidden) st = reducer(st, { type: 'past.hidden', profile, claude_session_id: 'x' })
+    // Affichage conforme au démon : encore visible, par le seul profil où le masquage a échoué.
+    expect(pastToOffer(st.past, []).map((p) => p.profiles)).toEqual([['default']])
   })
 })
 

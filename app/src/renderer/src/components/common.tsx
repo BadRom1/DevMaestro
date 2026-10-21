@@ -49,6 +49,19 @@ export function ProfileBadge({ profile, profiles }: { profile: string; profiles:
   )
 }
 
+/**
+ * À la place du badge de profil, pour une ancienne session vue par plusieurs
+ * profils (`projects/` partagé) : son profil d'origine est inconnu. Garde
+ * l'alignement des lignes.
+ */
+export function AnyProfileBadge() {
+  return (
+    <span className="pbadge pany" title="Visible par plusieurs profils : profil d’origine inconnu" aria-hidden="true">
+      ·
+    </span>
+  )
+}
+
 /** Libellé long d'un profil (sans le badge court : jamais les deux côte à côte), nom technique en infobulle. */
 export function ProfileChip({ profile, profiles, className = '' }: { profile: string; profiles: { name: string }[]; className?: string }) {
   const { label } = useSettings()

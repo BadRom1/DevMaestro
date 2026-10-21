@@ -87,14 +87,23 @@ interface Seen {
   /** Identité de projet enregistrée par le démon (sessions seulement). */
   commonDir: string | null
   at: number
-  profile: string
+  /** `null` : profil d'origine inconnu (ancienne session vue par plusieurs profils). */
+  profile: string | null
   branch: string | null
   missing: boolean
 }
 
+/** Ancienne session telle que proposée (`PastEntry`) ; `profiles` absent : seul `profile` la voit. */
+export type PastLike = PastSession & { profile: string; profiles?: string[] }
+
+/** Profils qui voient une ancienne session. */
+export function pastProfiles(p: PastLike): string[] {
+  return p.profiles?.length ? p.profiles : [p.profile]
+}
+
 export function buildProjectChoices(args: {
   sessions: Session[]
-  past: (PastSession & { profile: string })[]
+  past: PastLike[]
   projects: Record<string, ProjectInfo>
   home: string | null
 }): ProjectChoice[] {
@@ -115,7 +124,8 @@ export function buildProjectChoices(args: {
               cwd: p.cwd,
               commonDir: null,
               at: pastTime(p),
-              profile: p.profile,
+              // Vue par plusieurs profils (`projects/` partagé) : profil d'origine inconnu.
+              profile: pastProfiles(p).length > 1 ? null : p.profile,
               branch: p.git_branch,
               missing: typeof p.cwd_exists === 'boolean' ? !p.cwd_exists : projects[p.cwd]?.exists === false,
             },
@@ -148,7 +158,7 @@ export function buildProjectChoices(args: {
     }
     if (x.at >= c.latest) {
       c.latest = x.at
-      c.recentProfile = x.profile
+      if (x.profile) c.recentProfile = x.profile
     }
     // Un dossier disparu (worktree supprimé) n'est pas proposé pour lancer.
     if (x.missing) continue
@@ -193,9 +203,29 @@ export function resolveDefaultProfile(args: {
   return { profile: profiles.includes('default') ? 'default' : (profiles[0] ?? 'default'), source: 'global' }
 }
 
+/**
+ * Profil par défaut pour reprendre une ancienne session : `preferred` (profil
+ * du projet) s'il voit la conversation, sinon le premier profil qui la voit.
+ */
+export function pastResumeProfile(p: PastLike, preferred: string | null): string {
+  const seen = pastProfiles(p)
+  return preferred && seen.includes(preferred) ? preferred : (seen[0] ?? p.profile)
+}
+
 export type ResumeCandidate =
   | { kind: 'session'; key: string; session: Session; label: string; at: number; branch: string | null; profile: string }
-  | { kind: 'past'; key: string; past: PastSession & { profile: string }; label: string; at: number; branch: string | null; profile: string }
+  | {
+      kind: 'past'
+      key: string
+      past: PastLike
+      label: string
+      at: number
+      branch: string | null
+      /** Profil proposé par défaut (voir `pastResumeProfile`). */
+      profile: string
+      /** Profils qui voient la conversation : un seul, c'est son origine ; plusieurs, origine inconnue. */
+      profiles: string[]
+    }
 
 /**
  * Sessions d'un projet qu'on peut reprendre : sessions arrêtées du démon
@@ -204,7 +234,7 @@ export type ResumeCandidate =
 export function resumeCandidates(args: {
   projectKey: string
   sessions: Session[]
-  past: (PastSession & { profile: string })[]
+  past: PastLike[]
   projects: Record<string, ProjectInfo>
   label: (x: Session | PastSession) => string
 }): ResumeCandidate[] {
@@ -228,12 +258,13 @@ export function resumeCandidates(args: {
     if (p.cwd_exists === false || (p.cwd_exists === undefined && projects[p.cwd]?.exists === false)) continue
     out.push({
       kind: 'past',
-      key: `p:${p.profile}:${p.claude_session_id}`,
+      key: `p:${p.claude_session_id}`,
       past: p,
       label: args.label(p),
       at: pastTime(p),
       branch: p.git_branch,
       profile: p.profile,
+      profiles: pastProfiles(p),
     })
   }
   return out.sort((a, b) => b.at - a.at)

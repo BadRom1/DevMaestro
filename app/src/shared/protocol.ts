@@ -152,6 +152,79 @@ export interface Session {
   issue?: IssueRef | null
   /** Runners vivants de la session (v0.3, lot 14a) ; absent avec un démon plus ancien. */
   runners_running?: number
+  /**
+   * Livraison et CI suivies par le démon (v0.3, lot 14b) : `null` tant que
+   * `forge.sessionCi` ne l'a pas calculée ; absent avec un démon plus ancien.
+   */
+  delivery?: SessionDelivery | null
+}
+
+/* ---------- Livraison et CI (v0.3, lot 14b) ---------- */
+
+/** Mode de livraison d'un projet : demande de fusion par l'agent, ou fusion directe (trunk-based). */
+export type DeliveryMode = 'pr' | 'trunk'
+export const DELIVERY_MODES: readonly DeliveryMode[] = ['pr', 'trunk']
+
+/** `none` → `pr_open` → `merged`. */
+export type DeliveryState = 'none' | 'pr_open' | 'merged'
+
+/** Résumé gardé avec la session (`Session.delivery`). */
+export interface SessionDelivery {
+  mode: DeliveryMode
+  state: DeliveryState
+  pull: { number: number; url: string } | null
+  ci: ChecksState
+}
+
+export type RunStatus = 'queued' | 'in_progress' | 'completed'
+
+/** Exécution d'un workflow de CI (`forge.runs`). */
+export interface Run {
+  id: number
+  name: string
+  workflow: string | null
+  status: RunStatus
+  conclusion: string | null
+  state: CheckRunState
+  /** Page de l'exécution (non fiable : ouverte par la confirmation des liens). */
+  url: string | null
+  head_sha: string
+  branch: string | null
+  event: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+/** Livraison et CI d'une session (`forge.sessionCi`). */
+export interface SessionCi {
+  mode: DeliveryMode
+  delivery: DeliveryState
+  pull: Pull | null
+  /** Branche par défaut (« main »), si connue. */
+  base_branch: string | null
+  ci: ChecksSummary & { sha: string | null; runs: Run[]; truncated: boolean }
+}
+
+/** Job en échec d'une exécution. */
+export interface RunFailedJob {
+  name: string
+  state: CheckRunState
+  conclusion: string | null
+  url: string | null
+  failed_steps: string[]
+}
+
+/** Échec d'une exécution (`forge.runFailure`) : journaux nettoyés et bornés par le démon. */
+export interface RunFailure {
+  run: Run
+  failed_jobs: RunFailedJob[]
+  logs: { job: string; text: string; truncated: boolean }[]
+  truncated: boolean
+  in_progress: boolean
+  /** Consigne tapée devant l'extrait (fixée par le démon). */
+  instruction: string
+  /** Texte collé à Claude, comme donnée ; `null` tant que l'exécution tourne. */
+  excerpt: string | null
 }
 
 /* ---------- Forge (v0.3, lot 13a, ADR 0006) ---------- */
@@ -1030,7 +1103,7 @@ export interface Methods {
   }
   'sessions.resume': {
     params:
-      | { id: string; mode?: string; model?: string; prompt?: string; cols?: number; rows?: number }
+      | { id: string; profile?: string; mode?: string; model?: string; prompt?: string; cols?: number; rows?: number }
       | {
           claude_session_id: string
           cwd?: string
@@ -1101,8 +1174,14 @@ export interface Methods {
   }
   /** Contenu entier d'une entrée tronquée (4 Mio au plus). */
   'conversation.full': { params: { id: string; uid: string; part: FullPart }; result: { text: string; truncated?: boolean } }
-  /** Prompt envoyé à la session (lot 12) : tapé ou collé, puis Entrée. */
-  'sessions.sendPrompt': { params: { id: string; text: string }; result: unknown }
+  /**
+   * Prompt envoyé à la session (lot 12) : tapé ou collé, puis Entrée. Ou, en
+   * deux temps (lot 14b) : `instruction` tapée, `pasted` collé comme donnée.
+   */
+  'sessions.sendPrompt': {
+    params: { id: string; text: string } | { id: string; instruction: string; pasted?: string }
+    result: unknown
+  }
   'worktrees.remove': {
     params: { root: string; path: string; delete_branch: boolean; force: boolean }
     result: WorktreeRemoved
@@ -1126,6 +1205,15 @@ export interface Methods {
   'forge.pullFile': { params: { root: string; number: number; path: string; refresh?: boolean }; result: FileDiff }
   /** Demande ouverte dont la tête est cette branche, ou `null`. */
   'forge.pullForBranch': { params: { root: string; branch: string; refresh?: boolean }; result: Pull | null }
+  /** Exécutions de CI du dépôt (lot 14b) ; `limit` 20 par défaut, 100 au plus. */
+  'forge.runs': {
+    params: { root: string; branch?: string; sha?: string; limit?: number; refresh?: boolean }
+    result: { runs: Run[]; truncated: boolean }
+  }
+  /** Jobs en échec d'une exécution et extrait borné de leurs journaux (lecture seule). */
+  'forge.runFailure': { params: { root: string; run_id: number; refresh?: boolean }; result: RunFailure }
+  /** Livraison et CI d'une session ; démarre son suivi (`forge.ci_changed`). */
+  'forge.sessionCi': { params: { id: string; mode?: DeliveryMode; refresh?: boolean }; result: SessionCi }
   /**
    * Publie une revue sur la forge (seule écriture). Appelée **uniquement**
    * depuis le bouton « Publier » du dialogue de confirmation (ADR 0006, point 5).
@@ -1154,6 +1242,9 @@ export const FORGE_METHODS: readonly MethodName[] = [
   'forge.pull',
   'forge.pullFile',
   'forge.pullForBranch',
+  'forge.runs',
+  'forge.runFailure',
+  'forge.sessionCi',
   'forge.submitReview',
 ]
 
@@ -1204,6 +1295,9 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'forge.pull',
   'forge.pullFile',
   'forge.pullForBranch',
+  'forge.runs',
+  'forge.runFailure',
+  'forge.sessionCi',
   'forge.submitReview',
   'runners.list',
   'runners.start',
@@ -1272,3 +1366,5 @@ export type Notification =
     }
   /** Runners d'une session changés (lancement, fin, URL repérée) : `running`, la liste à jour. */
   | { method: 'runners.changed'; params: { id: string; running: RunnerProcess[] } }
+  /** L'état de la CI d'une session suivie a changé (lot 14b). */
+  | { method: 'forge.ci_changed'; params: { id: string; state: ChecksState } }

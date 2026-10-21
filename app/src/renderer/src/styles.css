@@ -51,6 +51,7 @@ button { cursor: pointer }
 .mono { font-family: var(--f-mono); font-size: 12.5px; font-variant-ligatures: none; font-feature-settings: "calt" 0, "liga" 0 }
 .muted { color: var(--muted) }
 .hint { font-size: 11.5px; color: var(--faint) }
+.hint.warn { color: var(--wait-ink) }
 .lbl { font-family: var(--f-label); text-transform: uppercase; letter-spacing: .06em; font-size: 11px; color: var(--muted); font-weight: 600 }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0 }
 
@@ -124,6 +125,7 @@ button { cursor: pointer }
 .chip.p0, .chip.p1, .chip.p2, .chip.p3 { border-color: color-mix(in srgb, var(--pt) 55%, var(--line)) }
 .pbadge { display: inline-grid; place-items: center; flex: none; min-width: 16px; height: 16px; padding: 0 3px; border-radius: 4px; font-family: var(--f-label); font-size: 10.5px; font-weight: 600; line-height: 1; color: var(--fg); background: color-mix(in srgb, var(--pt, var(--muted)) 22%, transparent); border: 1px solid color-mix(in srgb, var(--pt, var(--muted)) 70%, transparent) }
 .chip .pbadge { margin-left: -4px }
+.pbadge.pany { color: var(--faint); background: transparent; border-style: dashed }
 .chip.pend { color: var(--wait-ink); border-color: var(--wait) }
 .chip.bad { color: var(--err-ink); border-color: var(--err) }
 

@@ -156,7 +156,55 @@ export function sidebarOrder(groups: ProjectGroup[]): Session[] {
 }
 
 export interface PastEntry extends PastSession {
+  /**
+   * Profil proposé par défaut pour la reprendre : le premier (dans l'ordre des
+   * profils) dont `transcripts.list` la renvoie. Ce n'est pas son profil
+   * d'origine quand plusieurs profils la voient (`projects/` partagé).
+   */
   profile: string
+  /** Profils dont `transcripts.list` renvoie cette conversation (au moins un). */
+  profiles: string[]
+}
+
+/**
+ * Masque une ancienne session pour chaque profil donné (tous tentés, même si
+ * l'un échoue) : `hidden` liste ceux où le démon l'a masquée, `failed` les
+ * autres avec l'erreur. Le store ne doit retirer la conversation que des
+ * profils de `hidden`, pour refléter exactement l'état du démon.
+ */
+export async function hideForProfiles(
+  profiles: readonly string[],
+  hide: (profile: string) => Promise<unknown>,
+): Promise<{ hidden: string[]; failed: { profile: string; error: unknown }[] }> {
+  const results = await Promise.allSettled(profiles.map((profile) => hide(profile)))
+  const hidden: string[] = []
+  const failed: { profile: string; error: unknown }[] = []
+  results.forEach((r, i) => {
+    const profile = profiles[i]!
+    if (r.status === 'fulfilled') hidden.push(profile)
+    else failed.push({ profile, error: r.reason })
+  })
+  return { hidden, failed }
+}
+
+/** Profil d'origine connu : un seul profil voit la conversation (sinon `null`, origine inconnue). */
+export function pastOrigin(p: Pick<PastEntry, 'profile' | 'profiles'>): string | null {
+  return p.profiles.length <= 1 ? p.profile : null
+}
+
+/**
+ * Fusion des entrées d'une même conversation vues par plusieurs profils : la
+ * plus récente sert de base, les champs qui lui manquent sont pris aux autres.
+ */
+function mergePast(entries: PastSession[]): PastSession {
+  const [base, ...rest] = [...entries].sort((a, b) => pastTime(b) - pastTime(a))
+  const out: Record<string, unknown> = { ...base }
+  for (const e of rest) {
+    for (const [k, v] of Object.entries(e)) if ((out[k] === null || out[k] === undefined) && v !== null && v !== undefined) out[k] = v
+  }
+  const counts = entries.map((e) => e.message_count).filter((n): n is number => typeof n === 'number')
+  if (counts.length) out.message_count = Math.max(...counts)
+  return out as unknown as PastSession
 }
 
 /** Dernière activité d'une ancienne session (ms depuis l'époque, 0 si inconnue). */
@@ -245,14 +293,39 @@ export function groupPast(entries: PastEntry[], projects: Record<string, Project
 
 /**
  * Anciennes sessions à proposer : celles des transcripts que le démon ne
- * connaît pas déjà, de la plus récente à la plus ancienne.
+ * connaît pas déjà, de la plus récente à la plus ancienne, chaque
+ * conversation une seule fois (par `claude_session_id`) même quand plusieurs
+ * profils la voient (dossier `projects/` partagé entre les profils).
  */
-export function pastToOffer(past: Record<string, PastSession[]>, sessions: Session[], limit = 20): PastEntry[] {
+export function pastToOffer(
+  past: Record<string, PastSession[]>,
+  sessions: Session[],
+  limit = 20,
+  /** Ordre des profils (`profiles.list`) : `profiles` y est trié, `profile` (le premier) est donc déterministe. */
+  order: readonly string[] = [],
+): PastEntry[] {
   const known = new Set(sessions.map((s) => s.claude_session_id).filter(Boolean))
-  const all: PastEntry[] = []
+  const byId = new Map<string, { profiles: string[]; entries: PastSession[] }>()
   for (const [profile, list] of Object.entries(past)) {
-    for (const p of list) if (!known.has(p.claude_session_id)) all.push({ ...p, profile })
+    for (const p of list) {
+      if (known.has(p.claude_session_id)) continue
+      let g = byId.get(p.claude_session_id)
+      if (!g) {
+        g = { profiles: [], entries: [] }
+        byId.set(p.claude_session_id, g)
+      }
+      if (!g.profiles.includes(profile)) g.profiles.push(profile)
+      g.entries.push(p)
+    }
   }
+  const rank = (n: string) => {
+    const i = order.indexOf(n)
+    return i < 0 ? order.length : i
+  }
+  const all: PastEntry[] = [...byId.values()].map((g) => {
+    const profiles = [...g.profiles].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+    return { ...mergePast(g.entries), profile: profiles[0]!, profiles }
+  })
   all.sort((a, b) => pastTime(b) - pastTime(a))
   return all.slice(0, limit)
 }

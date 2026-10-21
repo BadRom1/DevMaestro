@@ -43,7 +43,7 @@ function past(id: string, cwd: string, last: string, branch: string | null = 'ma
     last_timestamp: last,
     message_count: 1,
   }
-  return { ...p, profile: 'default' }
+  return { ...p, profile: 'default', profiles: ['default'] }
 }
 
 describe('projet déplacé : groupe disparu fusionné avec le dépôt du même nom', () => {
