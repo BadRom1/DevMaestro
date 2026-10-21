@@ -38,4 +38,17 @@ describe('binaire orchd', () => {
       }),
     ).toBe('/opt/app/resources/bin/orchd')
   })
+  it('disposition /opt/devmaestro (paquet .deb)', () => {
+    expect(
+      resolveOrchdBin({
+        env: {},
+        appPath: '/opt/devmaestro/resources/app',
+        packaged: true,
+        resourcesPath: '/opt/devmaestro/resources',
+      }),
+    ).toBe('/opt/devmaestro/resources/bin/orchd')
+  })
+  it('empaqueté sans dossier des ressources : erreur, pas de repli sur le PATH', () => {
+    expect(() => resolveOrchdBin({ env: {}, appPath: '/opt/devmaestro/resources/app', packaged: true })).toThrow()
+  })
 })

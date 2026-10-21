@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Icône provisoire de DevMaestro : trois sessions suivies par une baguette. -->
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="#1f2430"/>
+  <rect x="28" y="36" width="52" height="10" rx="5" fill="#7aa2f7"/>
+  <rect x="28" y="59" width="40" height="10" rx="5" fill="#9ece6a"/>
+  <rect x="28" y="82" width="58" height="10" rx="5" fill="#e0af68"/>
+  <path d="M84 98 L104 30" stroke="#e6e6e6" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="104" cy="30" r="6" fill="#e6e6e6"/>
+</svg>

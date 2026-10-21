@@ -81,7 +81,7 @@ Prochaines étapes proposées (dans l'ordre) : décider l'accès réseau pour Gi
 | **14. Lancer et livrer** (14a runners et aperçu web ; 14b livraison et CI) | Runners (dev, test) avec aperçu web, livraison (PR par l'agent ou merge sur main, consignes typées modifiables par projet), suivi de CI (état sur la session, notification d'échec, « Envoyer l'échec à Claude » avec le journal collé comme donnée) | Fin du cycle d'une tâche | ✅ livré, à essayer (14b : sur un projet avec GitHub Actions) |
 | **21. Dictée** | Push-to-talk et enregistrement avec Parakeet en local, notes vocales en Opus | Prototypes n° 3 et 4 faits, branches non fusionnées | ⏳ |
 | **22. Plugins** | Graphify, CodeGraph, API NLP de l'équipe | Architecture § 19 | ⏳ |
-| **Paquet** | Paquet `.deb` avec profil AppArmor, lancement depuis le menu (le script `scripts/installer-lanceur-dev.sh` couvre le développement) | Utilisation sans session Claude Code, collègues | ⏳ |
+| **Paquet** | Paquet `.deb` avec profil AppArmor, lancement depuis le menu (le script `scripts/installer-lanceur-dev.sh` couvre le développement) | Utilisation sans session Claude Code, collègues | ✅ livré, à essayer : `scripts/paquet-deb.sh` puis `sudo apt install ./dist/devmaestro_0.1.0_amd64.deb` (menu « DevMaestro » ; arrêter d'abord un `orchd` de développement en service pour passer au démon installé ; `claude` doit être dans le `PATH` de la session graphique, sinon `DEVMAESTRO_CLAUDE_BIN`) |
 
 ## Questions ouvertes
 
