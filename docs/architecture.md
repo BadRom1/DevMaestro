@@ -225,7 +225,7 @@ Le domaine ne dépend d'aucun adaptateur. Les tests du domaine rejouent des év�
 | v0.4 | Livraison : PR, merge dans main, suivi de la CI |
 | v0.5 | Dictée vocale |
 
-## 19. Extensibilité par plugins (voir ADR 0007, proposé)
+## 19. Extensibilité par plugins (voir ADR 0007)
 
 Besoin exprimé le 2026-10-19 : que chacun puisse ajouter ses outils. Premiers cas :
 

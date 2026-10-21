@@ -1,6 +1,6 @@
 # ADR 0007 : les plugins sont des processus séparés, à interface déclarative
 
-- Statut : proposé (2026-10-21) ; le premier cas du lot 22a reste à choisir avec l'utilisateur
+- Statut : accepté (2026-10-21) ; premier cas du lot 22a : impact du diff par CodeGraph
 - Précise : [architecture § 19](../architecture.md) (piste « à concevoir ») ; s'appuie sur l'[ADR 0006](0006-port-forge.md) (port forge, injection de prompt) et le lot 14a (runners : lancement sans shell, scope, environnement filtré, empreinte acceptée)
 - Prototype : [n° 6](../spikes/06-plugins.md)
 
