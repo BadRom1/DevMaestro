@@ -48,10 +48,13 @@ export function quotasByProfile(sessions: Iterable<Session>, profiles: Profile[]
   })
 }
 
-/** Niveau de la jauge : normal, chaud (≥ 75 %), critique (≥ 90 %). */
+/** Seuil « critique » de la jauge (rouge) : aussi celui du « compte au plafond » (lot 15 ter). */
+export const QUOTA_CRIT_PCT = 90
+
+/** Niveau de la jauge : normal, chaud (≥ 75 %), critique (≥ `QUOTA_CRIT_PCT`). */
 export function meterLevel(pct: number | null | undefined): '' | 'hot' | 'crit' {
   if (typeof pct !== 'number') return ''
-  return pct >= 90 ? 'crit' : pct >= 75 ? 'hot' : ''
+  return pct >= QUOTA_CRIT_PCT ? 'crit' : pct >= 75 ? 'hot' : ''
 }
 
 /** Origine et date d'une fenêtre affichée (pour l'infobulle). */

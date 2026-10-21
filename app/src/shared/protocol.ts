@@ -118,6 +118,8 @@ export interface Session {
   size: { cols: number; rows: number } | null
   /** Titre choisi par l'utilisateur (`sessions.update`) ; absent avec un démon plus ancien. */
   title?: string | null
+  /** Premier prompt connu de la conversation (`null` : aucun encore) ; absent avec un démon plus ancien. */
+  first_prompt?: string | null
   /** Couleur décorative choisie par l'utilisateur. */
   color?: SessionColor | null
   /**
@@ -1138,7 +1140,8 @@ export interface Methods {
     result: unknown
   }
   'transcripts.list': {
-    params: { profile?: string; limit?: number; include_hidden?: boolean }
+    /** `exclude_known` (`true` par défaut) : `false` garde les conversations des sessions du démon (lot 15 ter). */
+    params: { profile?: string; limit?: number; include_hidden?: boolean; exclude_known?: boolean }
     result: { profile: string; sessions: PastSession[] }
   }
   'sessions.diff': { params: { id: string }; result: DiffSummary }

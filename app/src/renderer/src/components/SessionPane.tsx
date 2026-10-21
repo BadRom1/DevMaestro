@@ -50,6 +50,8 @@ import { ConversationView } from './ConversationView'
 import { runningCount, runningLabel } from '../state/subagents'
 import { ForgetConfirm } from './ForgetConfirm'
 import { ColorBar, ColorPicker, RenameField } from './SessionIdentity'
+import { CeilingHint, SwitchAccountButton, SwitchArea, SwitchStatus, type HeaderSwitch } from './AccountSwitch'
+import { switchInFlight } from '../state/accountSwitch'
 import { sortFiles } from '../state/diff'
 import { guardLeave } from '../state/unsaved'
 import type { DiffFile } from '../../../shared/protocol'
@@ -118,8 +120,11 @@ function Header({
   onOpenIssue,
   onOpenPull,
   integrated,
+  accountSwitch,
 }: {
   session: Session
+  /** Changer de compte (lot 15 ter) ; absent : action masquée. */
+  accountSwitch?: HeaderSwitch
   onOpenIssue?: (s: Session) => void
   onOpenPull?: (s: Session, number: number) => void
   /** Branche de la session intégrée dans la référence (lot 6) : « Livrée ». */
@@ -154,6 +159,9 @@ function Header({
   const agentsRunning = runningLabel(runningCount(session, agents))
   const iss = sessionIssue(session)
   // Demande de fusion de la branche (lot 13b) : relue toutes les 60 s tant que la session est affichée.
+  const sw15 = accountSwitch?.state ?? null
+  // Arrêt ou reprise de la bascule en cours : « Arrêter » et « Reprendre » attendent.
+  const switching = switchInFlight(sw15)
   const pull = useBranchPull(project?.root ?? session.project_root ?? null, session.branch ?? project?.branch ?? null, !!onOpenPull && project?.is_git !== false && project?.exists !== false)
 
   async function run(kind: 'stop' | 'resume', f: () => Promise<unknown>, what: string) {
@@ -264,11 +272,18 @@ function Header({
             Renommer
           </button>
           <ColorPicker value={color} disabled={!naming} disabledReason={OLD_DAEMON} onPick={pickColor} />
+          {accountSwitch && (
+            <SwitchAccountButton session={session} profiles={profiles} state={sw15} onOpen={accountSwitch.open} />
+          )}
           {session.alive ? (
             <button
               className="btn sm ghost"
-              disabled={busy !== null}
-              onClick={() => void run('stop', () => call('sessions.stop', { id: session.id }), 'Arrêt impossible')}
+              disabled={busy !== null || switching}
+              onClick={() => {
+                // Arrêt demandé pendant « Attendre la fin » : la bascule est annulée (sinon elle reprendrait la session).
+                if (sw15?.kind === 'waiting') accountSwitch?.cancel()
+                void run('stop', () => call('sessions.stop', { id: session.id }), 'Arrêt impossible')
+              }}
             >
               {busy === 'stop' ? 'Arrêt…' : 'Arrêter'}
             </button>
@@ -276,7 +291,7 @@ function Header({
             <>
               <button
                 className="btn sm"
-                disabled={busy !== null || block !== null}
+                disabled={busy !== null || block !== null || switching}
                 title={block ? block.long : 'Relancer Claude Code sur cette conversation'}
                 onClick={() =>
                   void run(
@@ -320,6 +335,20 @@ function Header({
           enabled={settings.forges.enabled}
           hidePullCi={!!pull}
         />
+      )}
+      {accountSwitch && (
+        <SwitchArea state={sw15}>
+          <SwitchStatus session={session} state={sw15} onCancel={accountSwitch.cancel} onResumeAs={accountSwitch.resumeAs} />
+          <CeilingHint
+            session={session}
+            profiles={profiles}
+            quotas={accountSwitch.quotas}
+            state={sw15}
+            dismissed={accountSwitch.ceilingDismissed}
+            onDismiss={accountSwitch.dismissCeiling}
+            onOpen={accountSwitch.open}
+          />
+        </SwitchArea>
       )}
       <div className="sh-2">
         <span>{glyph.label}</span>
@@ -409,7 +438,10 @@ export function SessionPane({
   onRunnersRunning,
   onRunnersUnsupported,
   integrated = false,
+  accountSwitch,
 }: {
+  /** Changer de compte de la session affichée (lot 15 ter) ; absent : action masquée. */
+  accountSwitch?: HeaderSwitch
   /** Branche de la session affichée intégrée dans la référence (lot 6). */
   integrated?: boolean
   /** Le démon connaît les runners (lot 14a) ; `false` : onglet « Lancer » masqué. */
@@ -558,6 +590,7 @@ export function SessionPane({
           onOpenIssue={onOpenIssue}
           onOpenPull={onOpenPull}
           integrated={integrated}
+          accountSwitch={accountSwitch}
         />
       ) : (
         <div className="sh">

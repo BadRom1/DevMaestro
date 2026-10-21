@@ -15,6 +15,8 @@ import { ForgePanel, type EpicLaunchContext, type ForgeTab } from './components/
 import { resetBranchPullSupport } from './components/PullChip'
 import { resetSessionCiSupport } from './components/DeliveryBar'
 import { NewSessionDialog } from './components/NewSessionDialog'
+import { AccountSwitchDialog, useAccountSwitch, type HeaderSwitch } from './components/AccountSwitch'
+import { quotaViews } from './state/quotas'
 import { SessionPane } from './components/SessionPane'
 import { Sidebar } from './components/Sidebar'
 import { TopBar } from './components/TopBar'
@@ -770,6 +772,29 @@ export function App() {
     return false
   }, [selected, worktreeLists, worktreesSupported])
 
+  // Changer de compte (lot 15 ter) : bascules tenues ici, l'en-tête est démonté quand on change de session.
+  const switcher = useAccountSwitch({
+    sessions: state.sessions,
+    termSize,
+    onSession: onSessionUpdated,
+  })
+  const [switchFor, setSwitchFor] = useState<string | null>(null)
+  /** Invites de plafond fermées (clé `ceilingKey` : elles reviennent quand le quota change). */
+  const [ceilingOff, setCeilingOff] = useState<ReadonlySet<string>>(() => new Set())
+  const switchSession = switchFor ? (state.sessions[switchFor] ?? null) : null
+  const quotas = useMemo(() => quotaViews(sessions, state.profiles, state.quotas), [sessions, state.profiles, state.quotas])
+  const selectedSwitch: HeaderSwitch | undefined = selected
+    ? {
+        state: switcher.states[selected.id] ?? null,
+        quotas,
+        open: () => setSwitchFor(selected.id),
+        cancel: () => switcher.cancel(selected.id),
+        resumeAs: (profile) => switcher.resumeAs(selected.id, profile),
+        ceilingDismissed: (key) => ceilingOff.has(key),
+        dismissCeiling: (key) => setCeilingOff((s) => new Set(s).add(key)),
+      }
+    : undefined
+
   const sessionPane = (
     <SessionPane
       session={selected}
@@ -800,6 +825,7 @@ export function App() {
       onOpenIssue={forgeOn ? openSessionIssue : undefined}
       onOpenPull={forgeOn ? openSessionPull : undefined}
       integrated={selectedIntegrated}
+      accountSwitch={selectedSwitch}
     />
   )
 
@@ -940,6 +966,19 @@ export function App() {
           onLaunchIssue={launchFromIssue}
           onUnsupported={forgeUnsupported}
           onSupported={forgeSupportedNow}
+        />
+      )}
+      {switchSession && (
+        <AccountSwitchDialog
+          key={switchSession.id}
+          session={switchSession}
+          profiles={state.profiles}
+          quotas={quotas}
+          onStart={(target, wait) => {
+            switcher.start(switchSession, target, wait)
+            setSwitchFor(null)
+          }}
+          onClose={() => setSwitchFor(null)}
         />
       )}
       {link && <LinkDialog url={link} onClose={closeLink} />}

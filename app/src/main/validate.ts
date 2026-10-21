@@ -531,6 +531,7 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       optional(o, out, 'profile', (x, k) => str(x, k, MAX_SHORT, { nonEmpty: true }))
       optional(o, out, 'limit', (x, k) => int(x, k, 1, 1000))
       optional(o, out, 'include_hidden', (x, k) => bool(x, k))
+      optional(o, out, 'exclude_known', (x, k) => bool(x, k))
       return out
     case 'sessions.diff':
     case 'sessions.subagents':

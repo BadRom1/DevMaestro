@@ -95,6 +95,9 @@ describe('validation des paramètres de la page', () => {
       include_hidden: true,
     })
     expect(() => validateParams('transcripts.list', { include_hidden: 'oui' })).toThrow(ValidationError)
+    // Lot 15 ter : conversations des sessions du démon gardées (visibilité sous un autre profil).
+    expect(validateParams('transcripts.list', { profile: 'work', exclude_known: false })).toEqual({ profile: 'work', exclude_known: false })
+    expect(() => validateParams('transcripts.list', { exclude_known: 'non' })).toThrow(ValidationError)
   })
 
   it('quotas.get : refresh booléen facultatif', () => {
