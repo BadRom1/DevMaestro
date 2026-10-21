@@ -24,6 +24,7 @@
  * Aucune dépendance à Electron : le canal vers la page est une interface.
  */
 import type { PortDown } from '../../shared/bridge'
+import { t } from '../../shared/i18n'
 import { ErrorCode, type Snapshot } from '../../shared/protocol'
 import { RpcError, type RpcNotification } from './rpc'
 
@@ -185,11 +186,10 @@ export class TerminalRelay {
         const timeout = e instanceof RpcError && e.code === ErrorCode.Timeout
         if (!timeout || this.target !== target) throw e
         if (attempt >= this.o.subscribeRetries) {
-          throw new RpcError(
-            ErrorCode.Timeout,
-            `le terminal ne répond pas : abonnement sans réponse après ${attempt + 1} essais`,
-          )
+          // Erreur de l'app (lot 20) : traduite ici, marquée `origin: "app"`.
+          throw new RpcError(ErrorCode.Timeout, t('main.error.terminalTimeout', { attempts: attempt + 1 }), { origin: 'app' })
         }
+        // i18n-exempt: journal technique (relais du terminal)
         this.o.log(`abonnement à ${req.id} sans réponse, nouvel essai`)
         await new Promise((r) => setTimeout(r, this.o.subscribeBackoffMs * 2 ** attempt))
         if (this.target !== target) return
@@ -233,6 +233,7 @@ export class TerminalRelay {
     if (!this.target || gen !== this.target.gen || !Number.isFinite(bytes) || bytes < 0) return
     this.unacked = Math.max(0, this.unacked - bytes)
     if (this.paused && this.unacked <= this.o.resumeBelowBytes) {
+      // i18n-exempt: journal technique (relais du terminal)
       this.resubscribe('la page a rattrapé son retard')
     }
   }
@@ -270,6 +271,7 @@ export class TerminalRelay {
     if (!t || this.batchBytes === 0) return
     if (this.unacked + this.batchBytes > this.o.highWaterBytes) {
       // La page ne suit plus : on abandonne et on attend qu'elle rattrape.
+      // i18n-exempt: journal technique (relais du terminal)
       this.o.log(`page en retard (${this.unacked} octets non acquittés) : flux suspendu`)
       this.dropBatch()
       this.paused = true
@@ -293,8 +295,10 @@ export class TerminalRelay {
   private resubscribe(why: string): void {
     const t = this.target
     if (!t) return
+    // i18n-exempt: journal technique (relais du terminal)
     this.o.log(`nouvel instantané de ${t.id} (${why})`)
     this.view({ id: t.id, owner: t.owner, cols: t.cols, rows: t.rows }).catch((e: Error) =>
+      // i18n-exempt: journal technique (relais du terminal)
       this.o.log(`réabonnement impossible : ${e.message}`),
     )
   }

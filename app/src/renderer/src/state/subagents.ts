@@ -5,6 +5,7 @@
  *
  * Démon plus ancien : champs `subagents_*` absents → 0, liste vide.
  */
+import { t, type PlainKey } from '../../../shared/i18n'
 import type { Session, Subagent, SubagentStatus } from '../../../shared/protocol'
 
 const STATUSES: readonly SubagentStatus[] = ['running', 'done', 'failed', 'interrupted']
@@ -163,31 +164,33 @@ export interface AgentGlyph {
   label: string
 }
 
-const GLYPHS: Record<SubagentStatus, AgentGlyph> = {
-  running: { kind: 'running', label: 'en cours' },
-  done: { kind: 'stopped', label: 'terminé' },
-  failed: { kind: 'error', label: 'échec' },
-  interrupted: { kind: 'interrupted', label: 'interrompu' },
+/** Glyphes par statut ; libellés traduits à l'usage (langue courante). */
+const GLYPHS: Record<SubagentStatus, { kind: AgentGlyph['kind']; label: PlainKey }> = {
+  running: { kind: 'running', label: 'conversation.status.running' },
+  done: { kind: 'stopped', label: 'conversation.agentStatus.done' },
+  failed: { kind: 'error', label: 'conversation.agentGlyph.failed' },
+  interrupted: { kind: 'interrupted', label: 'conversation.status.interrupted' },
 }
 
 export function agentGlyph(status: SubagentStatus): AgentGlyph {
-  return GLYPHS[status] ?? GLYPHS.done
+  const g = GLYPHS[status] ?? GLYPHS.done
+  return { kind: g.kind, label: t(g.label) }
 }
 
 /** Nom à afficher : description, sinon type, sinon « sous-agent ». */
 export function agentTitle(a: Pick<Subagent, 'description' | 'agent_type'>): string {
-  return a.description?.trim() || a.agent_type?.trim() || 'sous-agent'
+  return a.description?.trim() || a.agent_type?.trim() || t('conversation.agent.fallbackTitle')
 }
 
 /** Type affiché (« general-purpose »), « type inconnu » sinon. */
 export function agentType(a: Pick<Subagent, 'agent_type'>): string {
-  return a.agent_type?.trim() || 'type inconnu'
+  return a.agent_type?.trim() || t('conversation.agents.unknownType')
 }
 
 /** Nombre d'outils : « 1 outil », « 12 outils », « outils : inconnu ». */
 export function toolCountLabel(n: number | null | undefined): string {
-  if (typeof n !== 'number') return 'outils : inconnu'
-  return `${n} outil${n > 1 ? 's' : ''}`
+  if (typeof n !== 'number') return t('conversation.agents.toolsUnknown')
+  return t('conversation.agents.tools', { count: n })
 }
 
 /**

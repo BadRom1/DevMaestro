@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 
+import { t as tr, type PlainKey, type Translate } from '../../../shared/i18n'
 import type { DaemonProfileQuota, Profile, Session } from '../../../shared/protocol'
 import { errorText } from '../api'
+import { useT } from '../i18n'
 import { useSettings } from '../settings'
+import { daemonText } from '../state/errors'
 import { formatReset, relativeTime } from '../state/format'
 import {
   QUOTA_REFRESH_MS,
@@ -16,19 +19,31 @@ import type { MainView } from '../../../shared/settings'
 import type { ThemeMode } from '../theme'
 import { Meter, ProfileChip, StatusGlyph } from './common'
 
-/** Mêmes libellés que dans les Réglages (`SettingsDialog`). */
-export const THEMES: [ThemeMode, string][] = [
-  ['light', 'Clair'],
-  ['dark', 'Sombre'],
-  ['system', 'Auto'],
-]
-export const AUTO_TITLE = 'Auto : suit le mode clair ou sombre du système'
+/** Couple (mode, libellé) dont le libellé est lu dans la langue courante à chaque accès. */
+function themeEntry(mode: ThemeMode, key: PlainKey): [ThemeMode, string] {
+  const entry: [ThemeMode, string] = [mode, '']
+  Object.defineProperty(entry, 1, { get: () => tr(key), enumerable: true })
+  return entry
+}
 
-function metaText(meta: WindowMeta | null): string | undefined {
+/** Mêmes libellés que dans les Réglages (`SettingsDialog`) ; libellés calculés à l'accès. */
+export const THEMES: [ThemeMode, string][] = [
+  themeEntry('light', 'shell.theme.light'),
+  themeEntry('dark', 'shell.theme.dark'),
+  themeEntry('system', 'shell.theme.system'),
+]
+
+/** Titre du mode « Auto », dans la langue courante. */
+export function autoTitle(): string {
+  return tr('shell.theme.autoTitle')
+}
+
+function metaText(meta: WindowMeta | null, t: Translate): string | undefined {
   if (!meta) return undefined
-  const parts = [sourceLabel(meta.source) && `source : ${sourceLabel(meta.source)}`, meta.fetchedAt && `relevé ${relativeTime(meta.fetchedAt)}`]
-  const t = parts.filter(Boolean).join(' · ')
-  return t || undefined
+  const source = sourceLabel(meta.source)
+  const parts = [source && t('shell.quota.source', { source }), meta.fetchedAt && t('shell.quota.fetched', { when: relativeTime(meta.fetchedAt) })]
+  const text = parts.filter(Boolean).join(' · ')
+  return text || undefined
 }
 
 function QuotaLine({
@@ -44,17 +59,23 @@ function QuotaLine({
   error: string | null
   meta: WindowMeta | null
 }) {
+  const t = useT()
   return (
     <>
       <span className="k">{k}</span>
-      <span className="v" title={pct === null ? undefined : [reset && `reset ${reset}`, metaText(meta)].filter(Boolean).join(' · ') || undefined}>
+      <span
+        className="v"
+        title={pct === null ? undefined : [reset && t('shell.quota.reset', { reset }), metaText(meta, t)].filter(Boolean).join(' · ') || undefined}
+      >
         {pct === null ? (
-          <span title={error ? `Inconnu : ${error}` : 'Aucune mesure pour l’instant'}>
-            inconnu{error && <span className="sr-only"> ({error})</span>}
+          <span title={error ? t('shell.quota.unknownError', { error }) : t('shell.quota.noMeasure')}>
+            {t('shell.quota.unknown')}
+            {error && <span className="sr-only"> ({error})</span>}
           </span>
         ) : (
           <>
-            <Meter pct={pct} label={`Quota ${k}`} /> {Math.round(pct)} %{reset && <span className="q-reset"> · reset {reset}</span>}
+            <Meter pct={pct} label={t('shell.quota.meter', { k })} /> {t('shell.quota.pct', { n: Math.round(pct) })}
+            {reset && <span className="q-reset"> · {t('shell.quota.reset', { reset })}</span>}
           </>
         )}
       </span>
@@ -62,11 +83,11 @@ function QuotaLine({
   )
 }
 
-function quotaTitle(q: QuotaView, label: string): string {
-  const parts = [`Forfait du profil ${label} (${q.profile})`]
-  if (q.source) parts.push(`source : ${sourceLabel(q.source)}`)
-  if (q.fetchedAt) parts.push(`relevé ${relativeTime(q.fetchedAt)}`)
-  if (q.error) parts.push(`erreur : ${q.error}`)
+function quotaTitle(q: QuotaView, label: string, t: Translate): string {
+  const parts = [t('shell.quota.plan', { label, profile: q.profile })]
+  if (q.source) parts.push(t('shell.quota.source', { source: sourceLabel(q.source) }))
+  if (q.fetchedAt) parts.push(t('shell.quota.fetched', { when: relativeTime(q.fetchedAt) }))
+  if (q.error) parts.push(t('shell.quota.error', { error: daemonText(q.error) }))
   return parts.join(' · ')
 }
 
@@ -84,6 +105,7 @@ function RefreshQuotas({
   seq: Record<string, number>
   profiles: string[]
 }) {
+  const t = useT()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const before = useRef<Record<string, number> | null>(null)
@@ -96,16 +118,16 @@ function RefreshQuotas({
 
   useEffect(() => {
     if (!busy) return
-    const t = setTimeout(() => setBusy(false), QUOTA_REFRESH_MS)
-    return () => clearTimeout(t)
+    const timer = setTimeout(() => setBusy(false), QUOTA_REFRESH_MS)
+    return () => clearTimeout(timer)
   }, [busy])
 
   return (
     <span className="qrefresh">
       <button
         className="btn sm ghost"
-        aria-label="Actualiser les quotas"
-        title={error ? `Actualisation impossible : ${error}` : 'Actualiser les quotas'}
+        aria-label={t('shell.quota.refresh')}
+        title={error ? t('shell.quota.refreshFailedDetail', { error }) : t('shell.quota.refresh')}
         aria-busy={busy}
         disabled={busy}
         onClick={() => {
@@ -125,7 +147,7 @@ function RefreshQuotas({
       </button>
       {error && (
         <span className="inline-err" role="alert">
-          Actualisation impossible
+          {t('shell.quota.refreshFailed')}
         </span>
       )}
     </span>
@@ -150,6 +172,7 @@ export function TopBar(props: {
   view: MainView
   onView: (v: MainView) => void
 }) {
+  const t = useT()
   const { label: labelOf } = useSettings()
   const quotas = quotaViews(props.sessions, props.profiles, props.daemonQuotas)
   return (
@@ -157,15 +180,16 @@ export function TopBar(props: {
       {/* Trois groupes qui passent à la ligne d'un bloc (zoom, fenêtre étroite) : marque et quotas, vue, actions. */}
       <div className="top-g top-main">
         <div className="brand">
+          {/* i18n-exempt: nom propre du produit */}
           <b>DevMaestro</b>
           <span className="ver">v0.1</span>
         </div>
-        <div className="quotas" aria-label="Quotas par profil">
+        <div className="quotas" aria-label={t('shell.quota.byProfile')}>
           {quotas.map((q) => (
-            <div className="quota" key={q.profile} title={quotaTitle(q, labelOf(q.profile).long)}>
+            <div className="quota" key={q.profile} title={quotaTitle(q, labelOf(q.profile).long, t)}>
               <ProfileChip profile={q.profile} profiles={props.profiles} className="who" />
-              <QuotaLine k="5 h" pct={q.fiveHour?.used_pct ?? null} reset={formatReset(q.fiveHour?.resets_at)} error={q.error} meta={q.fiveHourMeta} />
-              <QuotaLine k="hebdo" pct={q.sevenDay?.used_pct ?? null} reset={formatReset(q.sevenDay?.resets_at)} error={q.error} meta={q.sevenDayMeta} />
+              <QuotaLine k={t('shell.quota.fiveHour')} pct={q.fiveHour?.used_pct ?? null} reset={formatReset(q.fiveHour?.resets_at)} error={q.error && daemonText(q.error)} meta={q.fiveHourMeta} />
+              <QuotaLine k={t('shell.quota.weekly')} pct={q.sevenDay?.used_pct ?? null} reset={formatReset(q.sevenDay?.resets_at)} error={q.error && daemonText(q.error)} meta={q.sevenDayMeta} />
             </div>
           ))}
           {props.onRefreshQuotas && quotas.length > 0 && (
@@ -177,12 +201,12 @@ export function TopBar(props: {
           )}
         </div>
       </div>
-      <div className="seg" role="group" aria-label="Vue">
+      <div className="seg" role="group" aria-label={t('shell.topbar.view')}>
         <button aria-pressed={props.view === 'projet'} onClick={() => props.onView('projet')}>
-          Par projet
+          {t('shell.topbar.byProject')}
         </button>
         <button aria-pressed={props.view === 'statut'} onClick={() => props.onView('statut')}>
-          Par statut
+          {t('shell.topbar.byStatus')}
         </button>
       </div>
       <span className="spacer" />
@@ -191,17 +215,18 @@ export function TopBar(props: {
           <button
             className="pill-wait"
             onClick={props.onNextWaiting}
-            title="Aller à la première session qui attend une réponse"
+            title={t('shell.topbar.nextWaitingTitle')}
           >
-            <StatusGlyph glyph={{ kind: 'waiting', label: 'À répondre' }} /> {props.waitingCount} à répondre
+            <StatusGlyph glyph={{ kind: 'waiting', label: t('shell.kanban.column.waiting') }} />{' '}
+            {t('shell.topbar.waitingCount', { count: props.waitingCount })}
           </button>
         )}
-        <div className="seg" role="group" aria-label="Thème">
+        <div className="seg" role="group" aria-label={t('shell.theme.label')}>
           {THEMES.map(([m, label]) => (
             <button
               key={m}
               aria-pressed={props.themeMode === m}
-              title={m === 'system' ? AUTO_TITLE : undefined}
+              title={m === 'system' ? autoTitle() : undefined}
               onClick={() => props.onTheme(m)}
             >
               {label}
@@ -209,10 +234,10 @@ export function TopBar(props: {
           ))}
         </div>
         <button className="btn" onClick={props.onSettings}>
-          Réglages
+          {t('shell.topbar.settings')}
         </button>
         <button className="btn pri" onClick={props.onNew}>
-          + Nouvelle session
+          {t('shell.topbar.newSession')}
         </button>
       </div>
     </header>

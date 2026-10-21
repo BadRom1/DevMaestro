@@ -116,7 +116,7 @@ describe('projets et format', () => {
 
   it('format français', () => {
     const now = Date.parse('2026-10-19T12:00:00Z')
-    expect(relativeTime('2026-10-19T11:59:40Z', now)).toBe("à l'instant")
+    expect(relativeTime('2026-10-19T11:59:40Z', now)).toBe('à l’instant')
     expect(relativeTime('2026-10-19T11:55:00Z', now)).toBe('il y a 5 min')
     expect(relativeTime('2026-10-19T09:00:00Z', now)).toBe('il y a 3 h')
     expect(relativeTime('2026-10-18T09:00:00Z', now)).toBe('hier')

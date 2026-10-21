@@ -15,6 +15,7 @@
  * réancré (un commit ne change pas) ; si le commit sort de l'historique de la
  * session, le démon le refuse et la barre de revue le désigne.
  */
+import { t } from '../../../shared/i18n'
 import type { AnyReviewComment, DiffFile, ReviewSide } from '../../../shared/protocol'
 import type { PromptVars } from '../../../shared/prompts'
 import type { DiffRow, LineAnchor } from './diff'
@@ -71,14 +72,14 @@ export const shortSha = (sha: string): string => sha.slice(0, 7)
 
 /** « a1b2c3d src/a.rs:12 » (« (ancienne version) » côté ancien). */
 export function commitCommentLabel(c: Pick<CommitDraftComment, 'sha' | 'path' | 'line' | 'side'>): string {
-  return `${shortSha(c.sha)} ${c.path}:${c.line}${c.side === 'old' ? ' (ancienne version)' : ''}`
+  return `${shortSha(c.sha)} ${c.path}:${c.line}${c.side === 'old' ? t('files.review.oldVersionSuffix') : ''}`
 }
 
 /** Lignes couvertes par une sélection de fichier, ou pourquoi on ne peut pas la commenter. */
 export function fileSelectionError(line: number, lineEnd: number): string | null {
-  if (!Number.isInteger(line) || !Number.isInteger(lineEnd) || line < 1 || lineEnd < line) return 'sélection invalide'
+  if (!Number.isInteger(line) || !Number.isInteger(lineEnd) || line < 1 || lineEnd < line) return t('files.review.invalidSelection')
   const n = lineEnd - line + 1
-  return n > MAX_FILE_COMMENT_LINES ? `sélection trop longue (${n} lignes) : ${MAX_FILE_COMMENT_LINES} lignes au plus` : null
+  return n > MAX_FILE_COMMENT_LINES ? t('files.review.selectionTooLong', { n, max: MAX_FILE_COMMENT_LINES }) : null
 }
 
 export interface ReviewEditing {

@@ -7,6 +7,7 @@
 import type { RunnerConfirmation } from '../../../shared/bridge'
 import type { Runner, RunnerKind, Session } from '../../../shared/protocol'
 import { RUNNER_KINDS } from '../../../shared/protocol'
+import { t } from '../../../shared/i18n'
 import { previewUrl } from '../../../shared/preview'
 import { readRunnerFiles } from '../../../shared/runnerFiles'
 
@@ -128,12 +129,23 @@ export function normalizeProcs(raw: unknown): RunnerProc[] {
   return out
 }
 
-export const KIND_LABELS: Record<RunnerKind, string> = {
-  dev: 'Développement',
-  test: 'Tests',
-  build: 'Construction',
-  lint: 'Vérifications',
-  other: 'Autres',
+/** Libellés des types de runners, lus à l'usage dans la langue courante (accesseurs). */
+export const KIND_LABELS: Readonly<Record<RunnerKind, string>> = {
+  get dev() {
+    return t('sessions.runners.kind.dev')
+  },
+  get test() {
+    return t('sessions.runners.kind.test')
+  },
+  get build() {
+    return t('sessions.runners.kind.build')
+  },
+  get lint() {
+    return t('sessions.runners.kind.lint')
+  },
+  get other() {
+    return t('sessions.runners.kind.other')
+  },
 }
 
 export interface RunnerGroup {
@@ -162,11 +174,11 @@ export function commandText(r: Pick<Runner, 'command' | 'cwd'>): string {
   return dir ? `(cd ${shellArg(dir)} && ${cmd})` : cmd
 }
 
-/** État d'une exécution, en français. */
+/** État d'une exécution, dans la langue courante. */
 export function stateLabel(p: Pick<RunnerProc, 'state' | 'exitCode'> & { signal?: string | null }): string {
-  if (p.state === 'running') return 'En cours'
-  if (p.exitCode === null) return p.signal ? `Arrêté (signal ${p.signal})` : 'Arrêté'
-  return p.exitCode === 0 ? 'Terminé (code 0)' : `Échec (code ${p.exitCode})`
+  if (p.state === 'running') return t('sessions.runners.state.running')
+  if (p.exitCode === null) return p.signal ? t('sessions.runners.state.signaled', { signal: p.signal }) : t('sessions.runners.state.stopped')
+  return p.exitCode === 0 ? t('sessions.runners.state.done') : t('sessions.runners.state.failed', { code: p.exitCode })
 }
 
 /** Ton de l'état (classe CSS). */
@@ -183,7 +195,7 @@ export function runningCount(procs: readonly Pick<RunnerProc, 'state'>[] | undef
 /** Libellé de l'indicateur (barre latérale, kanban), `null` si rien ne tourne. */
 export function runnersIndicator(n: number): string | null {
   if (n <= 0) return null
-  return n === 1 ? '1 runner en cours' : `${n} runners en cours`
+  return t('sessions.runners.indicator', { count: n })
 }
 
 /** URL d'une exécution affichables dans l'aperçu (les autres : navigateur seulement). */
@@ -222,10 +234,14 @@ export function readConfirmation(raw: unknown): RunnerConfirmation | null {
 }
 
 /** Fichiers de l'empreinte : la confirmation porte sur leur contenu entier. */
-export const FILES_TEXT = 'Tous ces fichiers sont pris en compte : toute modification redemandera ta confirmation.'
+export function filesText(): string {
+  return t('sessions.runners.filesText')
+}
 
 /** Texte de la confirmation demandée avant le premier lancement dans un worktree. */
-export const CONFIRM_TEXT = 'Cette commande vient du dépôt et va s’exécuter sur ta machine.'
+export function confirmText(): string {
+  return t('sessions.runners.confirmText')
+}
 
 /* ---------- Indicateur : exécutions en cours, par session ---------- */
 /* (sans appel au démon : voir `useRunnersIndex`) */

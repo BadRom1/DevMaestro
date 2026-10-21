@@ -22,8 +22,7 @@ import {
   rangeLabel,
   stepCommit,
   toggleRangeLabel,
-  OLD_DAEMON_COMMITS,
-  NO_STATS,
+  noStats,
   hasCounts,
   statsOf,
 } from '../src/renderer/src/state/commits'
@@ -176,8 +175,8 @@ describe('onglet Commits : libellés', () => {
     const none = commit({ files: null, additions: null, deletions: null })
     expect(hasCounts(none)).toBe(false)
     expect(hasCounts(commit())).toBe(true)
-    expect(countsLabel(none)).toBe(NO_STATS)
-    expect(NO_STATS).toBe('compteurs indisponibles (dépôt volumineux)')
+    expect(countsLabel(none)).toBe(noStats())
+    expect(noStats()).toBe('compteurs indisponibles (dépôt volumineux)')
     expect(commitAriaLabel(none, Date.parse('2026-10-20T16:15:38+02:00'))).toBe(
       'Corrige l’export, par Élodie, il y a 1 h, compteurs indisponibles (dépôt volumineux)',
     )
@@ -187,7 +186,7 @@ describe('onglet Commits : libellés', () => {
   })
 
   it('démon trop ancien : « mets orchd à jour »', () => {
-    expect(commitsErrorText(-32601, 'x', 'Historique indisponible')).toBe(OLD_DAEMON_COMMITS)
+    expect(commitsErrorText(-32601, 'x', 'Historique indisponible')).toBe('Le démon ne sait pas encore lire l’historique des commits : mets orchd à jour.')
     expect(commitsErrorText(-32017, 'la session n’est pas dans un dépôt git', 'Historique indisponible')).toBe(
       'Historique indisponible : la session n’est pas dans un dépôt git',
     )

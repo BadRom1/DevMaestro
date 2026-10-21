@@ -41,7 +41,9 @@ import {
   type SubagentEntry,
   type ToolEntry,
 } from '../../../shared/protocol'
+import { dateFormat, t as translate } from '../../../shared/i18n'
 import { CallError, api, call, errorText } from '../api'
+import { useI18n, useT } from '../i18n'
 import {
   OLDER_THRESHOLD,
   activityLabel,
@@ -91,8 +93,8 @@ const CLIP_TEXT = { chars: 20_000, lines: 400 }
 const CLIP_PROMPT = { chars: 4_000, lines: 60 }
 const CLIP_TOOL = { chars: 4_000, lines: 60 }
 
-const UNSUPPORTED = 'Le démon ne connaît pas encore la vue conversation : mets orchd à jour. Le terminal reste disponible.'
-const SEND_UNSUPPORTED = 'Le démon ne sait pas encore envoyer un prompt : mets orchd à jour, ou écris dans le terminal.'
+/** Démon sans la vue conversation (langue courante). */
+const unsupportedText = () => translate('conversation.unsupported')
 
 /* ---------- Mémoire par session (brouillon et historique du champ) ---------- */
 
@@ -130,9 +132,9 @@ interface RowContext {
 
 function formatTime(ts: string | null | undefined): string | null {
   if (!ts) return null
-  const t = Date.parse(ts)
-  if (Number.isNaN(t)) return null
-  return new Date(t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+  const ms = Date.parse(ts)
+  if (Number.isNaN(ms)) return null
+  return dateFormat({ hour: '2-digit', minute: '2-digit' }).format(new Date(ms))
 }
 
 /** Ouvre les liens du Markdown par la confirmation de l'app ; le reste est inerte. */
@@ -141,8 +143,8 @@ function linkHandler(onLink: (url: string) => void) {
     const a = (e.target as HTMLElement).closest('a')
     if (!a) return
     e.preventDefault()
-    const t = classifyLink(a.getAttribute('href'), '')
-    if (t.kind === 'external') onLink(t.url)
+    const link = classifyLink(a.getAttribute('href'), '')
+    if (link.kind === 'external') onLink(link.url)
   }
 }
 
@@ -201,6 +203,7 @@ function LongText({
   clip: { chars: number; lines: number }
   render: (text: string) => ReactNode
 }) {
+  const t = useT()
   const key = `${uid}:${part}:all`
   const all = ctx.isOpen(key)
   const full = truncated ? ctx.full(uid, part) : undefined
@@ -213,7 +216,7 @@ function LongText({
       {more && (
         <div className="cv-more">
           <span className="hint">
-            {truncated ? 'Contenu coupé par le démon.' : `Affiché en partie (${charsLabel(text.length)}).`}
+            {truncated ? t('conversation.long.truncated') : t('conversation.long.partial', { chars: charsLabel(text.length) })}
           </span>{' '}
           <button
             type="button"
@@ -224,7 +227,7 @@ function LongText({
               if (!all) ctx.toggle(key)
             }}
           >
-            {full?.phase === 'loading' ? 'Chargement…' : 'Voir tout'}
+            {full?.phase === 'loading' ? t('conversation.loading') : t('conversation.long.showAll')}
           </button>
           {full?.phase === 'error' && (
             <span className="inline-err" role="alert">
@@ -233,7 +236,7 @@ function LongText({
           )}
         </div>
       )}
-      {all && full?.phase === 'ready' && full.truncated && <p className="hint">Contenu entier coupé à 4 Mio par le démon.</p>}
+      {all && full?.phase === 'ready' && full.truncated && <p className="hint">{t('conversation.long.fullTruncated')}</p>}
     </>
   )
 }
@@ -287,6 +290,7 @@ function Disclosure({
 /* ---------- Entrées ---------- */
 
 function PromptRow({ e, ctx }: { e: PromptEntry; ctx: RowContext }) {
+  const t = useT()
   const source = promptSourceLabel(e.source)
   const pasted = Array.isArray(e.pasted) ? e.pasted.filter((p) => p && typeof p.text === 'string') : []
   const time = formatTime(e.ts)
@@ -297,7 +301,7 @@ function PromptRow({ e, ctx }: { e: PromptEntry; ctx: RowContext }) {
   return (
     <div className="cv-prompt">
       <div className="cv-who">
-        <span className="lbl">{fromParent ? 'Claude (agent parent)' : 'Toi'}</span>
+        <span className="lbl">{fromParent ? t('conversation.prompt.fromParent') : t('conversation.you')}</span>
         {source && !fromParent && <span className="chip">{source}</span>}
         {time && <span className="hint">{time}</span>}
       </div>
@@ -308,7 +312,7 @@ function PromptRow({ e, ctx }: { e: PromptEntry; ctx: RowContext }) {
         text={typeof e.text === 'string' ? e.text : ''}
         truncated={e.truncated === true}
         clip={CLIP_PROMPT}
-        render={(t) => <div className="cv-ptext">{t}</div>}
+        render={(x) => <div className="cv-ptext">{x}</div>}
       />
       {!fullShown &&
         pasted.map((p, i) => (
@@ -317,10 +321,10 @@ function PromptRow({ e, ctx }: { e: PromptEntry; ctx: RowContext }) {
             ctx={ctx}
             openKey={`${e.uid}:paste:${i}`}
             className="cv-paste"
-            label={`Collage ${p.id}, ${charsLabel(p.text.length)}`}
+            label={t('conversation.paste.label', { id: p.id, chars: charsLabel(p.text.length) })}
             head={
               <span>
-                Collage {p.id} <span className="hint">· {charsLabel(p.text.length)}</span>
+                {t('conversation.paste.title', { id: p.id })} <span className="hint">· {charsLabel(p.text.length)}</span>
               </span>
             }
           >
@@ -332,15 +336,20 @@ function PromptRow({ e, ctx }: { e: PromptEntry; ctx: RowContext }) {
 }
 
 function ToolRow({ e, ctx }: { e: ToolEntry; ctx: RowContext }) {
+  const t = useT()
   const st = toolStatus(e.result)
-  const name = typeof e.name === 'string' && e.name ? e.name : 'outil'
+  const name = typeof e.name === 'string' && e.name ? e.name : t('conversation.tool.fallbackName')
   const summary = typeof e.summary === 'string' ? e.summary : ''
   return (
     <Disclosure
       ctx={ctx}
       openKey={`${e.uid}:tool`}
       className={`cv-tool st-${st.key}`}
-      label={`Outil ${name}${summary ? ` : ${summary}` : ''}, ${st.label}`}
+      label={
+        summary
+          ? t('conversation.tool.labelSummary', { name, summary, status: st.label })
+          : t('conversation.tool.label', { name, status: st.label })
+      }
       head={
         <>
           <span className="cv-icon" aria-hidden="true">
@@ -360,6 +369,7 @@ function ToolRow({ e, ctx }: { e: ToolEntry; ctx: RowContext }) {
 }
 
 function ToolBody({ e, ctx }: { e: ToolEntry; ctx: RowContext }) {
+  const t = useT()
   const input = useMemo(() => inputText(e.input), [e.input])
   const hunks = useMemo(() => patchHunks(e.result?.patch), [e.result?.patch])
   const rows = useMemo(() => (hunks ? diffRows({ hunks, binary: false, too_large: false }) : null), [hunks])
@@ -367,7 +377,7 @@ function ToolBody({ e, ctx }: { e: ToolEntry; ctx: RowContext }) {
   return (
     <>
       <div className="cv-sect">
-        <span className="lbl">Entrée</span>
+        <span className="lbl">{t('conversation.tool.input')}</span>
         <LongText
           ctx={ctx}
           uid={e.uid}
@@ -375,12 +385,12 @@ function ToolBody({ e, ctx }: { e: ToolEntry; ctx: RowContext }) {
           text={input}
           truncated={e.input_truncated === true}
           clip={CLIP_TOOL}
-          render={(t) => <Pre text={t} />}
+          render={(x) => <Pre text={x} />}
         />
       </div>
       {rows && rows.length > 0 && (
         <div className="cv-sect cv-diff">
-          <span className="lbl">Modification</span>
+          <span className="lbl">{t('conversation.tool.change')}</span>
           <div className="cv-diffwrap">
             <DiffTable
               rows={rows}
@@ -395,7 +405,7 @@ function ToolBody({ e, ctx }: { e: ToolEntry; ctx: RowContext }) {
         </div>
       )}
       <div className="cv-sect">
-        <span className="lbl">Résultat</span>
+        <span className="lbl">{t('conversation.tool.result')}</span>
         {r ? (
           <LongText
             ctx={ctx}
@@ -404,10 +414,10 @@ function ToolBody({ e, ctx }: { e: ToolEntry; ctx: RowContext }) {
             text={typeof r.text === 'string' ? r.text : ''}
             truncated={r.truncated === true}
             clip={CLIP_TOOL}
-            render={(t) => (t ? <Pre text={t} className={r.status === 'error' ? 'err' : ''} /> : <p className="hint">(vide)</p>)}
+            render={(x) => (x ? <Pre text={x} className={r.status === 'error' ? 'err' : ''} /> : <p className="hint">{t('conversation.tool.empty')}</p>)}
           />
         ) : (
-          <p className="hint">En attente du résultat…</p>
+          <p className="hint">{t('conversation.tool.waitingResult')}</p>
         )}
       </div>
     </>
@@ -415,6 +425,7 @@ function ToolBody({ e, ctx }: { e: ToolEntry; ctx: RowContext }) {
 }
 
 function QuestionRow({ e }: { e: QuestionEntry }) {
+  const t = useT()
   const qs = useMemo(() => questionViews(e.questions, e.answers), [e.questions, e.answers])
   const answered = qs.some((q) => q.answer)
   return (
@@ -423,10 +434,10 @@ function QuestionRow({ e }: { e: QuestionEntry }) {
         <span className="cv-icon" aria-hidden="true">
           ?
         </span>
-        <span className="lbl">Question de Claude</span>
-        {!answered && <span className="chip pend">en attente de réponse</span>}
+        <span className="lbl">{t('conversation.questionFromClaude')}</span>
+        {!answered && <span className="chip pend">{t('conversation.question.awaiting')}</span>}
       </div>
-      {qs.length === 0 && <p className="hint">Question illisible : voir le terminal.</p>}
+      {qs.length === 0 && <p className="hint">{t('conversation.question.unreadable')}</p>}
       {qs.map((q, i) => (
         <div key={i} className="cv-q">
           {q.header && <span className="chip">{q.header}</span>}
@@ -438,7 +449,7 @@ function QuestionRow({ e }: { e: QuestionEntry }) {
                 return (
                   <li key={j} className={chosen ? 'chosen' : undefined}>
                     <span aria-hidden="true">{chosen ? '✓' : '○'}</span> {o.label}
-                    {chosen && <span className="sr-only"> (choisi)</span>}
+                    {chosen && <span className="sr-only">{t('conversation.question.chosen')}</span>}
                     {o.description && <span className="hint"> — {o.description}</span>}
                   </li>
                 )
@@ -447,7 +458,7 @@ function QuestionRow({ e }: { e: QuestionEntry }) {
           )}
           {q.answer && !q.answer.every((a) => q.options.some((o) => o.label === a)) && (
             <p className="cv-answer">
-              <span className="lbl">Réponse</span> {q.answer.join(', ')}
+              <span className="lbl">{t('conversation.question.answer')}</span> {q.answer.join(', ')}
             </p>
           )}
         </div>
@@ -457,10 +468,13 @@ function QuestionRow({ e }: { e: QuestionEntry }) {
 }
 
 function CompactionRow({ e, ctx }: { e: CompactionEntry; ctx: RowContext }) {
-  const trigger = e.trigger === 'auto' ? 'automatique' : e.trigger === 'manual' ? 'manuelle' : null
+  const t = useT()
+  const trigger = e.trigger === 'auto' ? t('conversation.compaction.auto') : e.trigger === 'manual' ? t('conversation.compaction.manual') : null
   const tokens =
-    e.pre_tokens != null || e.post_tokens != null ? ` · ${tokensLabel(e.pre_tokens)} → ${tokensLabel(e.post_tokens)} tokens` : ''
-  const label = `Conversation compactée${trigger ? ` (${trigger})` : ''}${tokens}`
+    e.pre_tokens != null || e.post_tokens != null
+      ? t('conversation.compaction.tokens', { pre: tokensLabel(e.pre_tokens), post: tokensLabel(e.post_tokens) })
+      : ''
+  const label = `${trigger ? t('conversation.compaction.titleTrigger', { trigger }) : t('conversation.compaction.title')}${tokens}`
   if (!e.summary) {
     return (
       <div className="cv-sep" role="separator" aria-label={label}>
@@ -473,8 +487,8 @@ function CompactionRow({ e, ctx }: { e: CompactionEntry; ctx: RowContext }) {
       ctx={ctx}
       openKey={`${e.uid}:summary`}
       className="cv-sep cv-compact"
-      label={`${label}, résumé`}
-      head={<span>{label} · résumé</span>}
+      label={t('conversation.compaction.summaryLabel', { label })}
+      head={<span>{t('conversation.compaction.summaryHead', { label })}</span>}
     >
       {() => (
         <LongText
@@ -484,7 +498,7 @@ function CompactionRow({ e, ctx }: { e: CompactionEntry; ctx: RowContext }) {
           text={e.summary ?? ''}
           truncated={e.truncated === true}
           clip={CLIP_TEXT}
-          render={(t) => <Markdown source={t} onLink={ctx.onLink} cacheKey={`${e.uid}:summary`} />}
+          render={(x) => <Markdown source={x} onLink={ctx.onLink} cacheKey={`${e.uid}:summary`} />}
         />
       )}
     </Disclosure>
@@ -492,16 +506,21 @@ function CompactionRow({ e, ctx }: { e: CompactionEntry; ctx: RowContext }) {
 }
 
 function SubagentRow({ e, ctx }: { e: SubagentEntry; ctx: RowContext }) {
+  const t = useT()
   const status = subagentStatusLabel(e.status)
   const key = typeof e.status === 'string' ? e.status : 'other'
   const glyph = e.status === 'running' ? '…' : e.status === 'done' ? '✓' : e.status === 'failed' ? '×' : e.status === 'interrupted' ? '■' : '?'
-  const type = e.agent_type || 'sous-agent'
+  const type = e.agent_type || t('conversation.agent.fallbackTitle')
   return (
     <Disclosure
       ctx={ctx}
       openKey={`${e.uid}:agent`}
       className={`cv-tool cv-agent st-${key}`}
-      label={`Sous-agent ${type}${e.description ? ` : ${e.description}` : ''}, ${status}`}
+      label={
+        e.description
+          ? t('conversation.agent.labelDescription', { type, description: e.description, status })
+          : t('conversation.agent.label', { type, status })
+      }
       head={
         <>
           <span className="cv-icon" aria-hidden="true">
@@ -519,7 +538,7 @@ function SubagentRow({ e, ctx }: { e: SubagentEntry; ctx: RowContext }) {
         e.agent_id ? (
           <SubagentThread sessionId={ctx.sessionId} agentId={e.agent_id} ctx={ctx} />
         ) : (
-          <p className="hint">L’agent n’a encore rien écrit.</p>
+          <p className="hint">{t('conversation.agentNothingYet')}</p>
         )
       }
     </Disclosure>
@@ -528,6 +547,7 @@ function SubagentRow({ e, ctx }: { e: SubagentEntry; ctx: RowContext }) {
 
 /** Entrées d'un sous-agent (chargées à l'ouverture, tenues à jour par `conversation.changed`). */
 function SubagentThread({ sessionId, agentId, ctx }: { sessionId: string; agentId: string; ctx: RowContext }) {
+  const t = useT()
   const [entries, setEntries] = useState<readonly ConversationEntry[] | null>(null)
   const [hasMore, setHasMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -555,7 +575,7 @@ function SubagentThread({ sessionId, agentId, ctx }: { sessionId: string; agentI
         setHasMore(page.has_more === true)
         setError(null)
       } catch (err) {
-        setError(err instanceof CallError && err.failure.code === ErrorCode.MethodNotFound ? UNSUPPORTED : errorText(err))
+        setError(err instanceof CallError && err.failure.code === ErrorCode.MethodNotFound ? unsupportedText() : errorText(err))
       } finally {
         setBusy(false)
       }
@@ -582,19 +602,19 @@ function SubagentThread({ sessionId, agentId, ctx }: { sessionId: string; agentI
   if (error && !entries) {
     return (
       <p className="inline-err" role="alert">
-        Entrées du sous-agent indisponibles : {error}
+        {t('conversation.thread.unavailable', { error })}
       </p>
     )
   }
-  if (!entries) return <p className="hint">Chargement des entrées du sous-agent…</p>
+  if (!entries) return <p className="hint">{t('conversation.thread.loading')}</p>
   return (
-    <div className="cv-thread" aria-label="Entrées du sous-agent">
+    <div className="cv-thread" aria-label={t('conversation.thread.label')}>
       {hasMore && (
         <button type="button" className="btn sm ghost" disabled={busy} onClick={() => void load(entries[0]?.uid)}>
-          {busy ? 'Chargement…' : 'Entrées plus anciennes'}
+          {busy ? t('conversation.loading') : t('conversation.thread.older')}
         </button>
       )}
-      {entries.length === 0 && <p className="hint">L’agent n’a encore rien écrit.</p>}
+      {entries.length === 0 && <p className="hint">{t('conversation.agentNothingYet')}</p>}
       {entries.map((x, i) => (
         <EntryRow key={x.uid} entry={x} prev={entries[i - 1]} ctx={ctx} />
       ))}
@@ -608,6 +628,7 @@ function SubagentThread({ sessionId, agentId, ctx }: { sessionId: string; agentI
 }
 
 function EntryBody({ e, ctx }: { e: ConversationEntry; ctx: RowContext }) {
+  const { t, rich } = useI18n()
   switch (e.kind) {
     case 'prompt':
       return <PromptRow e={e} ctx={ctx} />
@@ -621,14 +642,14 @@ function EntryBody({ e, ctx }: { e: ConversationEntry; ctx: RowContext }) {
             text={typeof e.markdown === 'string' ? e.markdown : ''}
             truncated={e.truncated === true}
             clip={CLIP_TEXT}
-            render={(t) => <Markdown source={t} onLink={ctx.onLink} cacheKey={`${e.uid}:text`} />}
+            render={(x) => <Markdown source={x} onLink={ctx.onLink} cacheKey={`${e.uid}:text`} />}
           />
         </div>
       )
     case 'thinking':
       return (
         <div className="cv-mark">
-          <span aria-hidden="true">✻</span> Claude a réfléchi
+          <span aria-hidden="true">✻</span> {t('conversation.entry.thinking')}
         </div>
       )
     case 'tool':
@@ -640,7 +661,12 @@ function EntryBody({ e, ctx }: { e: ConversationEntry; ctx: RowContext }) {
     case 'notification':
       return (
         <div className="cv-mark cv-notif">
-          <span aria-hidden="true">⚑</span> Tâche {e.status === 'completed' ? 'terminée' : e.status ? `: ${e.status}` : 'signalée'}
+          <span aria-hidden="true">⚑</span>{' '}
+          {e.status === 'completed'
+            ? t('conversation.entry.taskCompleted')
+            : e.status
+              ? t('conversation.entry.taskStatus', { status: e.status })
+              : t('conversation.entry.taskReported')}
           {e.summary && (
             <>
               {' — '}
@@ -675,7 +701,7 @@ function EntryBody({ e, ctx }: { e: ConversationEntry; ctx: RowContext }) {
         )
       }
       return (
-        <Disclosure ctx={ctx} openKey={`${e.uid}:out`} className="cv-tool cv-cmd" label={`Commande ${name}, sortie`} head={head}>
+        <Disclosure ctx={ctx} openKey={`${e.uid}:out`} className="cv-tool cv-cmd" label={t('conversation.entry.commandOutput', { name })} head={head}>
           {() => (
             <LongText
               ctx={ctx}
@@ -693,7 +719,8 @@ function EntryBody({ e, ctx }: { e: ConversationEntry; ctx: RowContext }) {
     case 'error':
       return (
         <div className="cv-error" role="note">
-          <span aria-hidden="true">×</span> <b>Erreur</b> :{' '}
+          <span aria-hidden="true">×</span> <b>{t('conversation.entry.error')}</b>
+          {t('conversation.colon')}
           <LongText
             ctx={ctx}
             uid={e.uid}
@@ -707,10 +734,10 @@ function EntryBody({ e, ctx }: { e: ConversationEntry; ctx: RowContext }) {
       )
     default: {
       const u = e as { kind?: unknown; type?: unknown; subtype?: unknown }
-      const what = [u.type, u.subtype].filter((x) => typeof x === 'string' && x).join(' / ') || String(u.kind ?? 'inconnu')
+      const what = [u.type, u.subtype].filter((x) => typeof x === 'string' && x).join(' / ') || String(u.kind ?? t('conversation.entry.unknownKind'))
       return (
         <div className="cv-mark cv-unknown">
-          <span aria-hidden="true">◇</span> Entrée non reconnue (<span className="mono">{what}</span>) : voir le terminal pour son contenu.
+          <span aria-hidden="true">◇</span> {rich('conversation.entry.unknown', { what: <span className="mono">{what}</span> })}
         </div>
       )
     }
@@ -743,14 +770,17 @@ const EntryRow = memo(function EntryRow({
 /* ---------- Indicateur d'activité ---------- */
 
 export function ActivityBar({ session }: { session: Session }) {
-  const label = activityLabel(session.activity) ?? (session.activity === undefined && session.status.state === 'running' ? 'Claude travaille…' : null)
+  const t = useT()
+  const label =
+    activityLabel(session.activity) ??
+    (session.activity === undefined && session.status.state === 'running' ? t('conversation.activity.working') : null)
   const since = session.activity?.since ? Date.parse(session.activity.since) : Number.NaN
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!label) return
     setNow(Date.now())
-    const t = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(t)
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
   }, [label, since])
   return (
     <div className="cv-activity">
@@ -782,7 +812,7 @@ export function Composer({
   slashCommands = null,
 }: {
   session: Session
-  /** Envoie le prompt ; rejette avec un message en français. */
+  /** Envoie le prompt ; rejette avec un message dans la langue courante. */
   onSend: (text: string) => Promise<void>
   /**
    * Le démon annonce `commands.list` (`hello.capabilities.slash_commands`) ;
@@ -790,6 +820,7 @@ export function Composer({
    */
   slashCommands?: boolean | null
 }) {
+  const { t, rich } = useI18n()
   const id = session.id
   const [value, setValue] = useState(() => drafts.get(id) ?? '')
   const [index, setIndex] = useState<number | null>(null)
@@ -812,9 +843,9 @@ export function Composer({
 
   const waiting = session.pending.length > 0 || session.status.state === 'waiting'
   const blocked = !session.alive
-    ? 'Session arrêtée : reprends-la pour lui écrire.'
+    ? t('conversation.composer.stopped')
     : waiting
-      ? 'Réponds d’abord à la demande en attente, en bas du volet.'
+      ? t('conversation.composer.waiting')
       : null
 
   /**
@@ -967,7 +998,7 @@ export function Composer({
         <SlashStatus count={suggestions.length} open={popupOpen} />
         <textarea
           ref={ref}
-          aria-label="Prompt pour Claude"
+          aria-label={t('conversation.composer.label')}
           aria-describedby={hintId}
           aria-autocomplete="list"
           aria-haspopup="listbox"
@@ -976,7 +1007,13 @@ export function Composer({
           aria-disabled={blocked ? true : undefined}
           readOnly={!!blocked}
           // Bloqué : la phrase entière est dans l'aide sous le champ ; ici, un rappel court.
-          placeholder={blocked ? (session.alive ? 'Demande en attente' : 'Session arrêtée') : 'Écris à Claude… (Entrée pour envoyer)'}
+          placeholder={
+            blocked
+              ? session.alive
+                ? t('conversation.composer.placeholderWaiting')
+                : t('conversation.composer.placeholderStopped')
+              : t('conversation.composer.placeholder')
+          }
           rows={Math.min(8, Math.max(1, value.split('\n').length))}
           value={value}
           onChange={(e) => {
@@ -992,7 +1029,7 @@ export function Composer({
           onKeyDown={onKeyDown}
         />
         <button type="submit" className="btn pri" disabled={!!blocked || busy || !value.trim()}>
-          {busy ? 'Envoi…' : 'Envoyer'}
+          {busy ? t('conversation.sending') : t('conversation.composer.send')}
         </button>
       </div>
       {error && (
@@ -1012,7 +1049,7 @@ export function Composer({
                   ref.current?.focus()
                 }}
               >
-                Récupérer le texte non envoyé
+                {t('conversation.composer.restore')}
               </button>
             </>
           )}
@@ -1020,9 +1057,16 @@ export function Composer({
       )}
       <p className="hint" id={hintId}>
         {blocked ? `${blocked} ` : ''}
-        <kbd>Entrée</kbd> envoie, <kbd>Maj</kbd> + <kbd>Entrée</kbd> va à la ligne, <kbd>↑</kbd> / <kbd>↓</kbd> dans un champ vide : prompts
-        précédents, <kbd>/</kbd> en tête : slash commands (<kbd>Tab</kbd> complète, <kbd>Échap</kbd> ferme). Si la TUI affiche un
-        sondage ou une suggestion, réponds dans le terminal. Une commande qui ouvre une interface s’utilise aussi dans le terminal.
+        {rich('conversation.composer.hint', {
+          enter: <kbd>{t('conversation.key.enter')}</kbd>,
+          shift: <kbd>{t('conversation.key.shift')}</kbd>,
+          up: <kbd>↑</kbd>,
+          down: <kbd>↓</kbd>,
+          slash: <kbd>/</kbd>,
+          // i18n-exempt: nom de touche identique dans les deux langues
+          tab: <kbd>Tab</kbd>,
+          esc: <kbd>{t('conversation.key.esc')}</kbd>,
+        })}
       </p>
     </form>
   )
@@ -1076,6 +1120,7 @@ export function ConversationView({
   /** Hauteur de la fenêtre imposée (tests sans mise en page). */
   viewportHeight?: number
 }) {
+  const t = useT()
   const id = session.id
   const [state, dispatch] = useReducer(conversationReducer, initialConversation)
   const [reloadSeq, reload] = useReducer((n: number) => n + 1, 0)
@@ -1112,7 +1157,7 @@ export function ConversationView({
       .catch((e: unknown) => {
         if (!alive) return
         const unsupported = e instanceof CallError && e.failure.code === ErrorCode.MethodNotFound
-        dispatch({ type: 'failed', unsupported, message: unsupported ? UNSUPPORTED : errorText(e) })
+        dispatch({ type: 'failed', unsupported, message: unsupported ? unsupportedText() : errorText(e) })
       })
     return () => {
       alive = false
@@ -1156,8 +1201,8 @@ export function ConversationView({
     if (activityKind !== 'idle') return
     const delay = settleDelay(state.pending, Date.now())
     if (delay === null) return
-    const t = setTimeout(() => dispatch({ type: 'settle', now: Date.now() }), delay)
-    return () => clearTimeout(t)
+    const timer = setTimeout(() => dispatch({ type: 'settle', now: Date.now() }), delay)
+    return () => clearTimeout(timer)
   }, [activityKind, state.pending])
 
   const toggle = useCallback((key: string) => {
@@ -1177,7 +1222,7 @@ export function ConversationView({
         .then((r) =>
           setFulls((m) => new Map(m).set(key, { phase: 'ready', text: typeof r.text === 'string' ? r.text : '', truncated: r.truncated === true })),
         )
-        .catch((e: unknown) => setFulls((m) => new Map(m).set(key, { phase: 'error', message: `Contenu entier indisponible : ${errorText(e)}` })))
+        .catch((e: unknown) => setFulls((m) => new Map(m).set(key, { phase: 'error', message: translate('conversation.long.fullUnavailable', { error: errorText(e) }) })))
     },
     [id],
   )
@@ -1207,7 +1252,9 @@ export function ConversationView({
       } catch (e) {
         dispatch({ type: 'sendFailed', id: pid })
         throw new Error(
-          e instanceof CallError && e.failure.code === ErrorCode.MethodNotFound ? SEND_UNSUPPORTED : `Envoi impossible : ${errorText(e)}`,
+          e instanceof CallError && e.failure.code === ErrorCode.MethodNotFound
+            ? translate('conversation.sendUnsupported')
+            : translate('conversation.sendFailed', { error: errorText(e) }),
         )
       }
     },
@@ -1384,16 +1431,16 @@ export function ConversationView({
   return (
     <div className="cv">
       <div className="cv-feed">
-        <div className="cv-scroll" ref={scroller} onScroll={onScroll} tabIndex={0} aria-label="Fil de la conversation">
-          {state.phase === 'loading' && <p className="empty">Chargement de la conversation…</p>}
+        <div className="cv-scroll" ref={scroller} onScroll={onScroll} tabIndex={0} aria-label={t('conversation.feed.label')}>
+          {state.phase === 'loading' && <p className="empty">{t('conversation.feed.loading')}</p>}
           {state.phase === 'unsupported' && <p className="empty">{state.error}</p>}
           {state.phase === 'error' && (
             <div className="empty">
               <p className="inline-err" role="alert">
-                Conversation indisponible : {state.error}
+                {t('conversation.feed.unavailable', { error: state.error })}
               </p>
               <button type="button" className="btn sm" onClick={reload}>
-                Réessayer
+                {t('conversation.retry')}
               </button>
             </div>
           )}
@@ -1403,16 +1450,16 @@ export function ConversationView({
                 <div className="cv-older">
                   {state.olderError ? (
                     <span className="inline-err" role="alert">
-                      Entrées plus anciennes indisponibles : {state.olderError}
+                      {t('conversation.feed.olderUnavailable', { error: state.olderError })}
                     </span>
                   ) : null}
                   <button type="button" className="btn sm ghost" disabled={state.olderLoading} onClick={loadOlder}>
-                    {state.olderLoading ? 'Chargement…' : 'Charger les entrées plus anciennes'}
+                    {state.olderLoading ? t('conversation.loading') : t('conversation.feed.loadOlder')}
                   </button>
                 </div>
               )}
               {entries.length === 0 && state.pending.length === 0 && (
-                <p className="empty">Rien encore dans cette conversation : écris à Claude ci-dessous, ou dans le terminal.</p>
+                <p className="empty">{t('conversation.feed.empty')}</p>
               )}
               <div className="cv-list" ref={listRef} style={{ height: total }}>
                 <div className="cv-window" style={{ transform: `translateY(${top}px)` }}>
@@ -1424,8 +1471,7 @@ export function ConversationView({
               </div>
               {state.invalidLines > 0 && (
                 <p className="hint cv-invalid">
-                  {state.invalidLines} ligne{state.invalidLines > 1 ? 's' : ''} illisible{state.invalidLines > 1 ? 's' : ''} du transcript
-                  ignorée{state.invalidLines > 1 ? 's' : ''}.
+                  {t('conversation.feed.invalidLines', { count: state.invalidLines })}
                 </p>
               )}
             </>
@@ -1433,12 +1479,12 @@ export function ConversationView({
           {state.pending.map((p) => (
             <div key={p.id} className="cv-prompt cv-pending">
               <div className="cv-who">
-                <span className="lbl">Toi</span>
+                <span className="lbl">{t('conversation.you')}</span>
                 <span className="chip pend">
-                  <span className="spin" aria-hidden="true" /> {p.sent ? 'envoyé, en attente du transcript' : 'envoi…'}
+                  <span className="spin" aria-hidden="true" /> {p.sent ? t('conversation.feed.pendingSent') : t('conversation.feed.pendingSending')}
                 </span>
                 <button type="button" className="btn sm ghost" onClick={() => dispatch({ type: 'dismiss', id: p.id })}>
-                  Retirer
+                  {t('conversation.feed.dismiss')}
                 </button>
               </div>
               <div className="cv-ptext">{clipText(p.text, CLIP_PROMPT.chars, CLIP_PROMPT.lines).shown}</div>
@@ -1447,7 +1493,7 @@ export function ConversationView({
         </div>
         {!atBottom && state.phase === 'ready' && (
           <button type="button" className="btn sm cv-bottom" onClick={toBottom}>
-            ↓ Aller en bas
+            {t('conversation.feed.toBottom')}
           </button>
         )}
       </div>

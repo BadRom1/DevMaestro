@@ -3,13 +3,12 @@
  * Calculs purs, testables sans DOM.
  */
 import { ErrorCode, type CommitInfo, type CommitRange, type CommitsList } from '../../../shared/protocol'
+import { dateFormat, t } from '../../../shared/i18n'
 import { relativeTime } from './format'
-
-export const OLD_DAEMON_COMMITS = 'Le démon ne sait pas encore lire l’historique des commits : mets orchd à jour.'
 
 /** Message d'une erreur de `sessions.commits*` (méthode inconnue : démon trop ancien). */
 export function commitsErrorText(code: number | null, text: string, what: string): string {
-  return code === ErrorCode.MethodNotFound ? OLD_DAEMON_COMMITS : `${what} : ${text}`
+  return code === ErrorCode.MethodNotFound ? t('files.commits.oldDaemon') : t('files.errorWith', { what, text })
 }
 
 export function otherRange(r: CommitRange): CommitRange {
@@ -18,27 +17,34 @@ export function otherRange(r: CommitRange): CommitRange {
 
 function baseName(list: Pick<CommitsList, 'base'>): string {
   const b = list.base
-  if (!b) return 'la base'
-  return b.ref || b.sha.slice(0, 7) || 'la base'
+  if (!b) return t('files.commits.theBase')
+  return b.ref || b.sha.slice(0, 7) || t('files.commits.theBase')
 }
 
 /** « Commits de la branche depuis main » ou « Derniers commits de feature/x ». */
 export function rangeLabel(list: Pick<CommitsList, 'range' | 'base'>, branch: string | null | undefined): string {
-  return list.range === 'branch' ? `Commits de la branche depuis ${baseName(list)}` : `Derniers commits de ${branch || 'HEAD'}`
+  return list.range === 'branch'
+    ? t('files.commits.rangeBranch', { base: baseName(list) })
+    : t('files.commits.rangeRecent', { branch: branch || 'HEAD' })
 }
 
 /** Libellé du bouton qui force l'autre mode. */
 export function toggleRangeLabel(list: Pick<CommitsList, 'range' | 'base'>, branch: string | null | undefined): string {
-  return list.range === 'branch' ? `Voir les derniers commits de ${branch || 'HEAD'}` : `Voir les commits de la branche depuis ${baseName(list)}`
+  return list.range === 'branch'
+    ? t('files.commits.toggleRecent', { branch: branch || 'HEAD' })
+    : t('files.commits.toggleBranch', { base: baseName(list) })
 }
 
 /** Liste vide : pourquoi. */
 export function emptyLabel(list: Pick<CommitsList, 'range' | 'head'>): string {
-  if (list.head === null) return 'Aucun commit pour l’instant.'
-  return list.range === 'branch' ? 'Aucun commit sur la branche depuis la base.' : 'Aucun commit.'
+  if (list.head === null) return t('files.commits.emptyNoHead')
+  return list.range === 'branch' ? t('files.commits.emptyBranch') : t('files.commits.empty')
 }
 
-export const NO_STATS = 'compteurs indisponibles (dépôt volumineux)'
+/** « compteurs indisponibles (dépôt volumineux) », dans la langue courante. */
+export function noStats(): string {
+  return t('files.commits.noStats')
+}
 
 /** Le démon a-t-il calculé les compteurs ? (champ absent : ancien démon, oui). */
 export function statsOf(list: Pick<CommitsList, 'stats'>): boolean {
@@ -54,26 +60,30 @@ export function hasCounts(
 
 /** « 3 fichiers », « 1 fichier », « aucun fichier ». */
 export function filesLabel(n: number): string {
-  return n === 0 ? 'aucun fichier' : `${n} fichier${n > 1 ? 's' : ''}`
+  return n === 0 ? t('files.commits.noFiles') : t('files.filesCount', { count: n })
 }
 
 /** « +12 −3 » (signe moins typographique), ou « compteurs indisponibles (dépôt volumineux) ». */
 export function countsLabel(c: Pick<CommitInfo, 'files' | 'additions' | 'deletions'>): string {
-  return hasCounts(c) ? `+${c.additions} −${c.deletions}` : NO_STATS
+  return hasCounts(c) ? `+${c.additions} −${c.deletions}` : noStats()
 }
 
 /** Libellé accessible d'un commit de la liste. */
 export function commitAriaLabel(c: CommitInfo, now = Date.now()): string {
-  const head = `${c.subject || '(sans message)'}, par ${c.author || 'auteur inconnu'}, ${relativeTime(c.date, now)}`
-  if (!hasCounts(c)) return `${head}, ${NO_STATS}`
-  return `${head}, ${filesLabel(c.files)}, ${c.additions} ajout${c.additions > 1 ? 's' : ''}, ${c.deletions} suppression${c.deletions > 1 ? 's' : ''}`
+  const head = t('files.commits.ariaHead', {
+    subject: c.subject || t('files.commits.noMessage'),
+    author: c.author || t('files.commits.unknownAuthor'),
+    when: relativeTime(c.date, now),
+  })
+  if (!hasCounts(c)) return `${head}, ${noStats()}`
+  return `${head}, ${filesLabel(c.files)}, ${t('files.additions', { count: c.additions })}, ${t('files.deletions', { count: c.deletions })}`
 }
 
 /** Date complète (infobulle) : « 20/10/2026 15:15 ». */
 export function fullDate(iso: string): string {
-  const t = Date.parse(iso)
-  if (Number.isNaN(t)) return iso
-  return new Date(t).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })
+  const ms = Date.parse(iso)
+  if (Number.isNaN(ms)) return iso
+  return dateFormat({ dateStyle: 'short', timeStyle: 'short' }).format(new Date(ms))
 }
 
 /** Commit suivant ou précédent (borné). */

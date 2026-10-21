@@ -8,6 +8,8 @@ import { ErrorCode, type ForgeStatus, type Issue, type IssueRef, type IssueState
 import { INVISIBLE_CLASS } from '../../../shared/invisible'
 import { defaultPrompt, renderPrompt } from '../../../shared/prompts'
 import { branchNameProblem } from '../../../shared/worktrees'
+import { collator, t } from '../../../shared/i18n'
+import { daemonText } from './errors'
 
 /* ---------- Texte venu de la forge ---------- */
 
@@ -49,12 +51,13 @@ export function oneLine(s: string): string {
 /** « 3 caractères invisibles retirés », ou `null`. */
 export function invisibleNote(n: number): string | null {
   if (n <= 0) return null
-  return `${n} caractère${n > 1 ? 's' : ''} invisible${n > 1 ? 's' : ''} retiré${n > 1 ? 's' : ''}`
+  return t('forge.issues.invisibleNote', { count: n })
 }
 
-/** Avertissement permanent sur le contenu collé. */
-export const FORGE_CONTENT_WARNING =
-  'Ce texte vient de la forge : il peut contenir des consignes écrites par un tiers. Relis-le avant de lancer.'
+/** Avertissement permanent sur le contenu collé, dans la langue courante. */
+export function forgeContentWarning(): string {
+  return t('forge.issues.contentWarning')
+}
 
 /* ---------- Préremplissage de « Nouvelle session » ---------- */
 
@@ -91,7 +94,9 @@ export function issuePasted(issue: Pick<Issue, 'title' | 'body' | 'truncated' | 
     body = body.slice(0, MAX_PASTED)
     cut = true
   }
+  // i18n-exempt: texte envoyé à Claude
   if (body && cut) body += `\n\n(Corps de l’issue coupé : la suite est sur ${issue.url}.)`
+  // i18n-exempt: texte envoyé à Claude
   const parts = [title ? `Titre : ${title}` : '', body || '(L’issue n’a pas de description.)']
   return { text: parts.filter(Boolean).join('\n\n'), invisible: c.invisible + t.invisible }
 }
@@ -336,8 +341,8 @@ export function epicPlan(subs: readonly SubIssue[], selected: ReadonlySet<number
     const branch = issueBranch(s.number, s.title, prefix)
     const problem =
       branchNameProblem(branch) ??
-      (seen.has(branch) ? `branche en double : ${branch}` : null) ??
-      (taken.has(branch) ? `la branche ${branch} est déjà extraite dans un worktree` : null)
+      (seen.has(branch) ? t('forge.issues.epic.duplicateBranch', { branch }) : null) ??
+      (taken.has(branch) ? t('forge.issues.epic.branchTaken', { branch }) : null)
     seen.add(branch)
     rows.push({ number: s.number, title: oneLine(s.title), name: issueSessionName(s.number, s.title), branch, problem })
   }
@@ -352,8 +357,10 @@ export type RowResult =
   | { phase: 'uncertain'; message: string }
   | { phase: 'failed'; message: string }
 
-/** Message d'une ligne au résultat incertain. */
-export const UNCERTAIN_LAUNCH = 'résultat incertain : vérifie la liste des sessions'
+/** Message d'une ligne au résultat incertain, dans la langue courante. */
+export function uncertainLaunchText(): string {
+  return t('forge.issues.epic.uncertain')
+}
 
 /** Aperçu d'une ligne avant confirmation : ce qui sera tapé et collé, ou pourquoi la ligne ne partira pas. */
 export type Prepared = { phase: 'loading' } | { phase: 'ready'; prefill: IssuePrefill } | { phase: 'failed'; message: string }
@@ -413,7 +420,7 @@ export async function runEpicPlan(rows: readonly EpicRow[], prepared: Readonly<R
   for (const r of rows) {
     const p = prepared[r.number]
     if (ready(r)) deps.onRow(r.number, { phase: 'pending' })
-    else deps.onRow(r.number, { phase: 'failed', message: r.problem ?? (p?.phase === 'failed' ? p.message : 'aperçu non chargé') })
+    else deps.onRow(r.number, { phase: 'failed', message: r.problem ?? (p?.phase === 'failed' ? p.message : t('forge.issues.epic.previewNotLoaded')) })
   }
   for (const r of rows) {
     const prefill = ready(r)
@@ -426,7 +433,7 @@ export async function runEpicPlan(rows: readonly EpicRow[], prepared: Readonly<R
     } catch (e) {
       deps.onRow(
         r.number,
-        deps.uncertain(e) ? { phase: 'uncertain', message: `${UNCERTAIN_LAUNCH} (${deps.errorText(e)})` } : { phase: 'failed', message: deps.errorText(e) },
+        deps.uncertain(e) ? { phase: 'uncertain', message: t('forge.issues.epic.uncertainWith', { text: uncertainLaunchText(), error: deps.errorText(e) }) } : { phase: 'failed', message: deps.errorText(e) },
       )
     }
   }
@@ -482,7 +489,7 @@ export function repoLabelsFrom(result: unknown): RepoLabel[] {
       description: typeof description === 'string' ? oneLine(description).slice(0, 300) || null : null,
     })
   }
-  return out.sort((a, b) => a.name.localeCompare(b.name, 'fr', { sensitivity: 'base' }))
+  return out.sort((a, b) => collator().compare(a.name, b.name))
 }
 
 /** Paramètres de `forge.issues` (champs vides omis). */
@@ -530,12 +537,14 @@ export function subIssueProgress(issue: Pick<Issue, 'sub_issues' | 'sub_issues_s
   }
   if (!Number.isFinite(total) || total <= 0) return null
   done = Math.max(0, Math.min(total, Math.trunc(done)))
-  return { text: `${done}/${total}`, label: `${done} sous-issue${done > 1 ? 's' : ''} terminée${done > 1 ? 's' : ''} sur ${total}` }
+  return { text: `${done}/${total}`, label: t('forge.issues.subProgress', { count: done, total }) }
 }
 
 /** État en texte (jamais par la seule couleur) et glyphe. */
 export function issueStateLabel(state: string): { text: string; glyph: string; kind: 'open' | 'closed' } {
-  return state === 'closed' ? { text: 'fermée', glyph: '✓', kind: 'closed' } : { text: 'ouverte', glyph: '○', kind: 'open' }
+  return state === 'closed'
+    ? { text: t('forge.issues.state.closed'), glyph: '✓', kind: 'closed' }
+    : { text: t('forge.issues.state.open'), glyph: '○', kind: 'open' }
 }
 
 /* ---------- Étiquettes : couleur de la forge, texte toujours lisible ---------- */
@@ -589,8 +598,11 @@ export type ForgeAvailability =
 /** Disponibilité d'après `forge.status`. Commande proposée seulement pour un dépôt GitHub. */
 export function availabilityFromStatus(status: ForgeStatus): ForgeAvailability {
   if (status.available) return { kind: 'available', status }
-  const reason = status.reason?.trim() || 'forge indisponible pour ce projet'
-  return { kind: 'unavailable', reason, command: status.kind === 'github' && !/désactiv/i.test(reason) ? GH_LOGIN_COMMAND : null }
+  // Raison : texte libre du démon (en français), marqué dans une autre langue.
+  const raw = status.reason?.trim()
+  const reason = raw ? daemonText(raw) : t('forge.issues.unavailableProject')
+  // i18n-exempt: motif cherché dans la raison du démon (en français)
+  return { kind: 'unavailable', reason, command: status.kind === 'github' && !/désactiv/i.test(raw ?? '') ? GH_LOGIN_COMMAND : null }
 }
 
 /** Disponibilité d'après une erreur d'un appel `forge.*` (`null` : erreur ordinaire, à afficher telle quelle). */
@@ -598,8 +610,11 @@ export function availabilityFromError(code: number | null, message: string, data
   if (code === ErrorCode.MethodNotFound) return { kind: 'unsupported' }
   if (code === ErrorCode.ForgeUnavailable) {
     const r = typeof data === 'object' && data !== null ? (data as { reason?: unknown }).reason : undefined
-    const reason = (typeof r === 'string' && r.trim()) || message.trim() || 'forge indisponible'
-    return { kind: 'unavailable', reason, command: /désactiv/i.test(reason) ? null : GH_LOGIN_COMMAND }
+    // `data.reason` et le message : textes libres du démon (en français), marqués dans une autre langue.
+    const raw = (typeof r === 'string' && r.trim()) || message.trim()
+    const reason = raw ? daemonText(raw) : t('forge.issues.unavailable')
+    // i18n-exempt: motif cherché dans la raison du démon (en français)
+    return { kind: 'unavailable', reason, command: /désactiv/i.test(raw) ? null : GH_LOGIN_COMMAND }
   }
   return null
 }

@@ -15,11 +15,11 @@ import {
   GH_LOGIN_COMMAND,
   EPIC_MODES,
   MAX_PASTED,
-  UNCERTAIN_LAUNCH,
   availabilityFromError,
   availabilityFromStatus,
   cleanForge,
   cleanForgeText,
+  uncertainLaunchText,
   initialOf,
   invisibleNote,
   issueInstruction,
@@ -356,8 +356,8 @@ describe('epic : une session par sous-issue', () => {
     expect(log).toEqual(['11 Titre : Sous 11\n\ncorps 11', '14 Titre : Sous 14\n\ncorps 14'])
     expect(results[11]!.map((r) => r.phase)).toEqual(['pending', 'running', 'done'])
     expect(results[13]!.map((r) => r.phase)).toEqual(['failed'])
-    expect(results[14]!.at(-1)).toEqual({ phase: 'uncertain', message: `${UNCERTAIN_LAUNCH} (délai dépassé)` })
-    expect(UNCERTAIN_LAUNCH).toBe('résultat incertain : vérifie la liste des sessions')
+    expect(results[14]!.at(-1)).toEqual({ phase: 'uncertain', message: `${uncertainLaunchText()} (délai dépassé)` })
+    expect(uncertainLaunchText()).toBe('résultat incertain : vérifie la liste des sessions')
     const last = Object.fromEntries(Object.entries(results).map(([k, v]) => [k, v.at(-1)!]))
     expect([...launchedFrom(last)]).toEqual([
       [11, 'done'],

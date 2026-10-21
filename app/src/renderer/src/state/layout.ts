@@ -8,20 +8,26 @@
  * Chaque onglet existe exactement une fois dans l'arbre ; une zone n'est
  * jamais vide (elle est fermée, sa sœur prend sa place).
  */
+import { t, type PlainKey } from '../../../shared/i18n'
 import type { KeyValueStorage } from './collapse'
 
 /** Onglets d'une session, dans l'ordre de la disposition par défaut. */
 export const TAB_IDS = ['conversation', 'terminal', 'diff', 'commits', 'files', 'agents', 'runners'] as const
 export type TabId = (typeof TAB_IDS)[number]
 
-export const TAB_LABELS: Record<TabId, string> = {
-  conversation: 'Conversation',
-  terminal: 'Terminal',
-  diff: 'Diff',
-  commits: 'Commits',
-  files: 'Fichiers',
-  agents: 'Agents',
-  runners: 'Lancer',
+const TAB_LABEL_KEYS: Record<TabId, PlainKey> = {
+  conversation: 'shell.tab.conversation',
+  terminal: 'shell.tab.terminal',
+  diff: 'shell.tab.diff',
+  commits: 'shell.tab.commits',
+  files: 'shell.tab.files',
+  agents: 'shell.tab.agents',
+  runners: 'shell.tab.runners',
+}
+
+/** Nom d'un onglet, dans la langue courante. */
+export function tabLabel(id: TabId): string {
+  return t(TAB_LABEL_KEYS[id])
 }
 
 /** Nombre maximal de zones. */

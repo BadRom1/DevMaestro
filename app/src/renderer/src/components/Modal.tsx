@@ -21,6 +21,7 @@ import {
   savePanelSize,
   type PanelSize,
 } from '../state/panelSize'
+import { useT } from '../i18n'
 import { ViewBoundary } from './ViewBoundary'
 
 const FOCUSABLE =
@@ -47,6 +48,7 @@ export function Modal({
   /** Panneau redimensionnable ancré à droite, taille retenue sous `sizeKey`. */
   panel?: { sizeKey: string }
 }) {
+  const t = useT()
   const sizeKey = panel?.sizeKey ?? null
   const [size, setSize] = useState<PanelSize>(() => (sizeKey ? loadPanelSize(browserStorage(), sizeKey) : DEFAULT_PANEL_SIZE))
   /** Glisser en cours : point et largeur de départ, dernière taille calculée (enregistrée au relâcher). */
@@ -174,12 +176,12 @@ export function Modal({
               type="button"
               className="btn ghost sm mh-size"
               onClick={() => commit({ ...size, maximized: !maximized })}
-              title={maximized ? 'Revenir à la taille retenue' : 'Occuper toute la fenêtre'}
+              title={maximized ? t('shell.modal.restoreTitle') : t('shell.modal.maximizeTitle')}
             >
-              {maximized ? 'Réduire' : 'Agrandir'}
+              {maximized ? t('shell.modal.restore') : t('shell.modal.maximize')}
             </button>
           )}
-          <button className="btn ghost sm x" onClick={() => onCloseRef.current()} aria-label="Fermer" disabled={busy}>
+          <button className="btn ghost sm x" onClick={() => onCloseRef.current()} aria-label={t('shell.close')} disabled={busy}>
             ×
           </button>
         </div>
@@ -193,13 +195,13 @@ export function Modal({
             className="panel-grip"
             role="separator"
             aria-orientation="vertical"
-            aria-label="Largeur du panneau (flèches gauche et droite ; Fin : toute la largeur)"
+            aria-label={t('shell.modal.gripLabel')}
             aria-valuemin={Math.min(MIN_PANEL_WIDTH, gripMax)}
             aria-valuemax={gripMax}
             aria-valuenow={Math.min(size.width ?? gripMax, gripMax)}
-            aria-valuetext={size.width === null ? 'toute la largeur' : `${size.width} pixels`}
+            aria-valuetext={size.width === null ? t('shell.modal.fullWidth') : t('shell.pixels', { n: size.width })}
             tabIndex={0}
-            title="Glisser pour redimensionner ; double-clic : toute la largeur"
+            title={t('shell.modal.gripTitle')}
             onPointerDown={onGripDown}
             onPointerMove={onGripMove}
             onPointerUp={onGripUp}

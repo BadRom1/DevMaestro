@@ -4,6 +4,8 @@
  * Calculs purs, testables sans DOM.
  */
 import type { WorktreeInfo, WorktreeRemoved, WorktreesList } from '../../../shared/protocol'
+import { collator, t } from '../../../shared/i18n'
+import { daemonText } from './errors'
 import { cleanupCandidate, hasOwnWork, isIntegrated, protectedBranches } from '../../../shared/worktrees'
 
 export { cleanupCandidate, isIntegrated, protectedBranches }
@@ -36,39 +38,35 @@ export interface WorktreeState {
   tone: 'ok' | 'pend' | 'bad' | 'muted'
 }
 
-function plural(n: number, one: string, many: string): string {
-  return `${n} ${n > 1 ? many : one}`
-}
-
 /** États d'un worktree, dans l'ordre d'affichage. */
 export function worktreeStates(w: WorktreeInfo): WorktreeState[] {
   const out: WorktreeState[] = []
   if (isIntegrated(w)) {
     out.push({
       kind: 'integrated',
-      label: w.integrated === 'squashed' ? 'intégrée (contenu repris)' : 'intégrée',
+      label: w.integrated === 'squashed' ? t('sessions.worktree.integratedSquashed') : t('sessions.worktree.integrated'),
       icon: '✓',
       tone: 'ok',
     })
   } else if (w.integrated === 'empty') {
-    out.push({ kind: 'empty', label: 'aucun commit', icon: '○', tone: 'muted' })
+    out.push({ kind: 'empty', label: t('sessions.worktree.empty'), icon: '○', tone: 'muted' })
   } else if (w.integrated === 'no' && (w.ahead ?? 0) > 0) {
-    out.push({ kind: 'ahead', label: `en avance de ${plural(w.ahead!, 'commit', 'commits')}`, icon: '↑', tone: 'pend' })
+    out.push({ kind: 'ahead', label: t('sessions.worktree.ahead', { count: w.ahead! }), icon: '↑', tone: 'pend' })
   } else if (w.integrated === 'no') {
-    out.push({ kind: 'ahead', label: 'non intégrée', icon: '↑', tone: 'pend' })
+    out.push({ kind: 'ahead', label: t('sessions.worktree.notIntegrated'), icon: '↑', tone: 'pend' })
   }
-  if (w.dirty) out.push({ kind: 'dirty', label: 'modifications non commitées', icon: '✎', tone: 'bad' })
+  if (w.dirty) out.push({ kind: 'dirty', label: t('sessions.worktree.dirty'), icon: '✎', tone: 'bad' })
   if ((w.sessions_running ?? 0) > 0) {
     out.push({
       kind: 'running',
-      label: w.sessions_running > 1 ? `${w.sessions_running} sessions en cours` : 'session en cours',
+      label: t('sessions.worktree.running', { count: w.sessions_running }),
       icon: '▶',
       tone: 'muted',
     })
   }
-  if (w.managed_by === 'claude_desktop') out.push({ kind: 'desktop', label: 'géré par Claude Desktop', icon: '◆', tone: 'muted' })
-  if (!w.exists) out.push({ kind: 'missing', label: 'dossier absent', icon: '∅', tone: 'muted' })
-  if (w.locked) out.push({ kind: 'locked', label: 'verrouillé', icon: '🔒', tone: 'muted' })
+  if (w.managed_by === 'claude_desktop') out.push({ kind: 'desktop', label: t('sessions.worktree.desktop'), icon: '◆', tone: 'muted' })
+  if (!w.exists) out.push({ kind: 'missing', label: t('sessions.worktree.missing'), icon: '∅', tone: 'muted' })
+  if (w.locked) out.push({ kind: 'locked', label: t('sessions.worktree.locked'), icon: '🔒', tone: 'muted' })
   return out
 }
 
@@ -124,12 +122,12 @@ export function cleanupRows(list: readonly WorktreeInfo[], seen?: ReadonlySet<st
     .sort(
       (a, b) =>
         Number(candidate(b, seen)) - Number(candidate(a, seen)) ||
-        (a.branch ?? a.path).localeCompare(b.branch ?? b.path, 'fr'),
+        collator().compare(a.branch ?? a.path, b.branch ?? b.path),
     )
 }
 
 /**
- * Ce qui sera perdu en supprimant ce worktree (phrases en français) : vide
+ * Ce qui sera perdu en supprimant ce worktree (phrases dans la langue courante) : vide
  * si rien (branche intégrée, aucune modification). `force` : suppression
  * forcée (modifications non commitées perdues, branche supprimée même non
  * intégrée).
@@ -139,16 +137,16 @@ export function lossesFor(w: WorktreeInfo, deleteBranch: boolean, force = false)
   if (w.dirty) {
     out.push(
       force
-        ? 'les modifications non commitées et les fichiers non suivis seront perdus'
-        : 'modifications non commitées : la suppression sera refusée sans confirmation supplémentaire',
+        ? t('sessions.worktree.lossDirtyForce')
+        : t('sessions.worktree.lossDirty'),
     )
   }
   // `empty` : branche créée par le démon, encore sur son commit de départ (aucun commit à elle ; supprimée par `-D`).
   if (deleteBranch && w.branch && !isIntegrated(w) && w.integrated !== 'empty' && (w.ahead ?? 0) > 0) {
     out.push(
       force
-        ? `${plural(w.ahead!, 'commit non intégré', 'commits non intégrés')} de ${w.branch} seront perdus`
-        : `${w.branch} a ${plural(w.ahead!, 'commit non intégré', 'commits non intégrés')} : git refusera de supprimer la branche`,
+        ? t('sessions.worktree.lossCommitsForce', { count: w.ahead!, branch: w.branch })
+        : t('sessions.worktree.lossCommits', { count: w.ahead!, branch: w.branch }),
     )
   }
   return out
@@ -172,11 +170,13 @@ export function cleanupCount(list: WorktreesList | undefined, seen?: ReadonlySet
 /** Résultat d'une suppression, pour la ligne du dialogue (le démon fait foi pour la branche). */
 export function removedText(r: Pick<WorktreeRemoved, 'branch' | 'branch_deleted' | 'branch_error'> | null | undefined, branch: string | null): string {
   const b = r?.branch ?? branch
-  if (r?.branch_deleted === true) return b ? `✓ Worktree supprimé, branche ${b} supprimée` : '✓ Worktree supprimé, branche supprimée'
+  if (r?.branch_deleted === true) return b ? t('sessions.worktree.removedBranch', { branch: b }) : t('sessions.worktree.removedBranchAnon')
   if (r?.branch_deleted === false) {
-    return `✓ Worktree supprimé ; branche non supprimée : ${r.branch_error?.trim() || 'raison inconnue'}`
+    // Raison donnée par le démon (sortie de git) : texte libre, montré tel quel.
+    const reason = r.branch_error?.trim()
+    return t('sessions.worktree.removedBranchKept', { reason: reason ? daemonText(reason) : t('sessions.worktree.unknownReason') })
   }
-  return '✓ Worktree supprimé'
+  return t('sessions.worktree.removed')
 }
 
 /** Liste courte des fichiers modifiés donnée par le démon avec -32020 (`data`), si elle est lisible. */

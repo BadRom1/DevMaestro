@@ -10,6 +10,7 @@
  * | arrêtée | rond gris « ✓ » |
  * | erreur | rond rouge « × » |
  */
+import { t } from '../../../shared/i18n'
 import type { Session, SessionStatus } from '../../../shared/protocol'
 
 export type GlyphKind = 'waiting' | 'running' | 'idle' | 'stopped' | 'error'
@@ -26,23 +27,23 @@ export function glyphFor(status: SessionStatus | null | undefined): Glyph {
         kind: 'waiting',
         label:
           status.wait === 'permission'
-            ? 'À répondre : permission'
+            ? t('common.status.waitingPermission')
             : status.wait === 'question'
-              ? 'À répondre : question'
-              : 'À répondre',
+              ? t('common.status.waitingQuestion')
+              : t('common.status.waiting'),
       }
     case 'starting':
-      return { kind: 'running', label: 'Démarrage' }
+      return { kind: 'running', label: t('common.status.starting') }
     case 'running':
-      return { kind: 'running', label: 'En cours' }
+      return { kind: 'running', label: t('common.status.running') }
     case 'idle':
-      return { kind: 'idle', label: 'Inactive' }
+      return { kind: 'idle', label: t('common.status.idle') }
     case 'stopped':
-      return { kind: 'stopped', label: 'Arrêtée' }
+      return { kind: 'stopped', label: t('common.status.stopped') }
     case 'error':
-      return { kind: 'error', label: 'Erreur' }
+      return { kind: 'error', label: t('common.status.error') }
     default:
-      return { kind: 'idle', label: 'Statut inconnu' }
+      return { kind: 'idle', label: t('common.status.unknown') }
   }
 }
 

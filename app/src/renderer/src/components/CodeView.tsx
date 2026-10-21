@@ -9,6 +9,7 @@
  */
 import { useEffect, useMemo, useRef, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react'
 
+import { useT } from '../i18n'
 import { codeSelection } from '../state/domSelection'
 import { highlightCode, lineCount } from '../state/highlight'
 import type { FileDraftComment } from '../state/review'
@@ -54,6 +55,7 @@ export function CodeView({
   comments: readonly FileDraftComment[]
   onSelect: (span: LineSpan | null, at: SelectionPoint | null) => void
 }) {
+  const t = useT()
   const total = useMemo(() => lineCount(text), [text])
   const numbers = useMemo(() => Array.from({ length: total }, (_, i) => i + 1).join('\n'), [total])
   const html = useMemo(() => (highlight ? highlightCode(text, language) : null), [text, language, highlight])
@@ -143,7 +145,7 @@ export function CodeView({
 
   return (
     <div className="codeview" style={style}>
-      <pre className="gutter" ref={gutterRef} aria-hidden="true" onMouseDown={onGutterDown} title="Clique, glisse ou Maj+clic pour choisir des lignes à commenter">
+      <pre className="gutter" ref={gutterRef} aria-hidden="true" onMouseDown={onGutterDown} title={t('files.code.gutterTitle')}>
         {numbers}
       </pre>
       <pre className="code" onMouseUp={readTextSelection}>
@@ -159,7 +161,7 @@ export function CodeView({
           key={c.id}
           className="cmark"
           style={band({ line: c.line, lineEnd: c.lineEnd })}
-          title={`Dans la revue (lignes ${linesLabel(c.line, c.lineEnd)})${c.text ? ` : ${c.text}` : ''}`}
+          title={c.text ? t('files.code.inReviewWithText', { lines: linesLabel(c.line, c.lineEnd), text: c.text }) : t('files.code.inReview', { lines: linesLabel(c.line, c.lineEnd) })}
         />
       ))}
       {selection && <span className="selband" style={band(selection)} aria-hidden="true" />}

@@ -12,6 +12,7 @@
 import { useEffect, useId, useRef, useState, type Ref, type RefObject } from 'react'
 
 import type { PendingRequest, Session } from '../../../shared/protocol'
+import { useT } from '../i18n'
 import { dockReduced, pruneDock, reduceDock, requestKey, showDock } from '../state/askDock'
 import { PermissionCard, QuestionCard } from './RequestCards'
 
@@ -64,22 +65,19 @@ export function RequestDock({
   onToggle: () => void
   dockRef?: Ref<HTMLDivElement>
 }) {
+  const t = useT()
   const listId = useId()
   const n = session ? pending.length : 0
   // Une seule demande, zone ouverte : le titre de la carte suffit (pas deux titres empilés) ; celui de la zone
   // reste pour les lecteurs d'écran, et « Réduire » se cale dans le coin de la carte.
   const solo = n === 1 && !reduced
   return (
-    <div className={`asks${reduced ? ' reduced' : ''}${solo ? ' solo' : ''}`} ref={dockRef} role="region" aria-live="polite" aria-label="Demandes en attente">
+    <div className={`asks${reduced ? ' reduced' : ''}${solo ? ' solo' : ''}`} ref={dockRef} role="region" aria-live="polite" aria-label={t('conversation.dock.label')}>
       {session && n > 0 && (
         <>
           <div className="asks-bar">
             <span className={solo ? 'asks-t sr-only' : 'asks-t'}>
-              {reduced
-                ? `Claude attend ta réponse${n > 1 ? ` (${n} demandes)` : ''}`
-                : n > 1
-                  ? `${n} demandes en attente`
-                  : 'Demande en attente'}
+              {reduced ? t('conversation.dock.reduced', { count: n }) : t('conversation.dock.pending', { count: n })}
             </span>
             {reduced && (
               <span className="asks-sep" aria-hidden="true">
@@ -94,7 +92,7 @@ export function RequestDock({
               aria-controls={listId}
               onClick={onToggle}
             >
-              {reduced ? 'Afficher' : 'Réduire'}
+              {reduced ? t('conversation.dock.show') : t('conversation.dock.reduce')}
             </button>
           </div>
           <div className="asks-list" id={listId} hidden={reduced}>

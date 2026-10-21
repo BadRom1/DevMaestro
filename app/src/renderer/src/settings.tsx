@@ -15,6 +15,7 @@ import {
   type ProfileLabel,
   type SettingsPatch,
 } from '../../shared/settings'
+import { t } from '../../shared/i18n'
 import { api } from './api'
 import { describeError } from './state/errors'
 
@@ -30,13 +31,34 @@ interface SettingsApi {
 
 const Ctx = createContext<SettingsApi | null>(null)
 
-export function SettingsProvider({ initial, children }: { initial: AppSettings; children: ReactNode }) {
+export function SettingsProvider({
+  initial,
+  late = null,
+  children,
+}: {
+  initial: AppSettings
+  /** Réglages arrivés après le premier rendu (processus principal lent) : appliqués s'il n'y a eu aucune modification entre-temps. */
+  late?: Promise<AppSettings | null> | null
+  children: ReactNode
+}) {
   const [settings, setSettings] = useState(initial)
   const [saveError, setSaveError] = useState<string | null>(null)
   const pending = useRef<SettingsPatch | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** Numéro du dernier envoi : une réponse plus ancienne n'écrase pas une plus récente. */
   const seq = useRef(0)
+  /** Une modification a-t-elle été faite dans la page ? (une réponse tardive ne l'écrase pas) */
+  const touched = useRef(false)
+
+  useEffect(() => {
+    let live = true
+    void late?.then((s) => {
+      if (live && s && !touched.current) setSettings(s)
+    })
+    return () => {
+      live = false
+    }
+  }, [late])
 
   const flush = useCallback(async () => {
     timer.current = null
@@ -46,14 +68,14 @@ export function SettingsProvider({ initial, children }: { initial: AppSettings; 
     const mine = ++seq.current
     try {
       const r = await api.updateSettings(patch)
-      if (!r.ok) setSaveError(`Réglages non enregistrés : ${describeError(r.error.code, r.error.message)}`)
+      if (!r.ok) setSaveError(t('shell.settings.notSaved', { error: describeError(r.error.code, r.error.message, r.error.data) }))
       else {
         setSaveError(null)
         // Modification plus récente en attente ou envoyée depuis : on garde la copie locale.
         if (!pending.current && mine === seq.current) setSettings(r.settings)
       }
     } catch (e) {
-      setSaveError(`Réglages non enregistrés : ${(e as Error).message}`)
+      setSaveError(t('shell.settings.notSaved', { error: (e as Error).message }))
     }
   }, [])
 
@@ -66,6 +88,7 @@ export function SettingsProvider({ initial, children }: { initial: AppSettings; 
         setSaveError((e as Error).message)
         return
       }
+      touched.current = true
       setSettings((s) => applyPatch(s, patch))
       pending.current = pending.current ? mergePatches(pending.current, patch) : patch
       if (timer.current) clearTimeout(timer.current)

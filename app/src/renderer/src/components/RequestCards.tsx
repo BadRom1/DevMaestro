@@ -1,7 +1,9 @@
 import { useId, useRef, useState } from 'react'
 
 import type { PendingRequest, PermissionDecision, Question, Session } from '../../../shared/protocol'
+import { t as translate } from '../../../shared/i18n'
 import { call, errorCode, errorText } from '../api'
+import { useT } from '../i18n'
 import { ALREADY_CLOSED } from '../state/errors'
 import {
   answerability,
@@ -36,7 +38,7 @@ function useAnswer() {
       succeeded.current = true
       setDone(true)
     } catch (e) {
-      if (!(succeeded.current && errorCode(e) === ALREADY_CLOSED)) setError(`Réponse non transmise : ${errorText(e)}`)
+      if (!(succeeded.current && errorCode(e) === ALREADY_CLOSED)) setError(translate('conversation.request.notDelivered', { error: errorText(e) }))
     } finally {
       inFlight.current = false
       setBusy(null)
@@ -46,12 +48,10 @@ function useAnswer() {
 }
 
 function StaleBadge() {
+  const t = useT()
   return (
-    <span
-      className="chip pend"
-      title="La demande a peut-être déjà été traitée dans le terminal (interruption, dialogue fermé) : la réponse peut être refusée."
-    >
-      peut-être obsolète
+    <span className="chip pend" title={t('conversation.request.staleTitle')}>
+      {t('conversation.request.stale')}
     </span>
   )
 }
@@ -67,6 +67,7 @@ export function PermissionCard({
   stale: boolean
   cardKey: string
 }) {
+  const t = useT()
   const { busy, done, error, send, locked } = useAnswer()
   const [denyOpen, setDenyOpen] = useState(false)
   const [message, setMessage] = useState('')
@@ -95,24 +96,26 @@ export function PermissionCard({
   return (
     <section
       className={`ask${stale ? ' stale' : ''}`}
-      aria-label={`Permission demandée${tool ? ` : ${tool}` : ''}`}
+      aria-label={tool ? t('conversation.request.permissionTool', { tool }) : t('conversation.request.permission')}
       tabIndex={-1}
       data-request-key={cardKey}
     >
       <span className="t">
-        Permission demandée
+        {t('conversation.request.permission')}
         {stale && <StaleBadge />}
-        {done && <span className="chip">réponse envoyée</span>}
+        {done && <span className="chip">{t('conversation.answerSent')}</span>}
       </span>
       {detailed && (
         <div>
-          {tool} : <code>{summary}</code>
+          {tool}
+          {t('conversation.colon')}
+          <code>{summary}</code>
         </div>
       )}
       {!can.ok && <div className="muted">{can.why}</div>}
       {suggestions.length > 0 && (
         <div>
-          <span className="muted">« Toujours » ajouterait :</span>
+          <span className="muted">{t('conversation.request.alwaysWouldAdd')}</span>
           <ul className="sugg">
             {suggestions.map((s, i) => (
               <li key={i}>{s}</li>
@@ -122,18 +125,18 @@ export function PermissionCard({
       )}
       <div className="row">
         <button className="btn pri" disabled={off} onClick={() => void answer('allow')}>
-          {busy === 'allow' ? 'Envoi…' : 'Autoriser'}
+          {busy === 'allow' ? t('conversation.sending') : t('conversation.request.allow')}
         </button>
         <button
           className="btn"
           disabled={off || !always}
-          title={always ? undefined : 'Claude Code ne propose aucune règle à enregistrer pour cette demande.'}
+          title={always ? undefined : t('conversation.request.noRule')}
           onClick={() => void answer('allow_always')}
         >
-          {busy === 'allow_always' ? 'Envoi…' : 'Toujours pour ce projet'}
+          {busy === 'allow_always' ? t('conversation.sending') : t('conversation.request.always')}
         </button>
         <button className="btn" disabled={off} onClick={() => void answer('deny')}>
-          {busy === 'deny' ? 'Envoi…' : 'Refuser'}
+          {busy === 'deny' ? t('conversation.sending') : t('conversation.request.deny')}
         </button>
         <button
           className="btn ghost"
@@ -142,7 +145,7 @@ export function PermissionCard({
           aria-controls={msgId}
           onClick={() => setDenyOpen((v) => !v)}
         >
-          Refuser avec un message…
+          {t('conversation.request.denyWithMessage')}
         </button>
       </div>
       {denyOpen && (
@@ -156,14 +159,14 @@ export function PermissionCard({
         >
           <input
             type="text"
-            aria-label="Message pour Claude (facultatif)"
-            placeholder="Pourquoi refuser, ou quoi faire à la place…"
+            aria-label={t('conversation.request.denyMessageLabel')}
+            placeholder={t('conversation.request.denyMessagePlaceholder')}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             autoFocus
           />
           <button className="btn danger" disabled={off}>
-            Envoyer le refus
+            {t('conversation.request.sendDenial')}
           </button>
         </form>
       )}
@@ -191,6 +194,7 @@ function QuestionBlock({
   onPick?: (label: string) => void
   disabled: boolean
 }) {
+  const t = useT()
   const name = useId()
   const multi = !!q.multi_select
   return (
@@ -234,8 +238,8 @@ function QuestionBlock({
       <div className="row">
         <input
           type="text"
-          aria-label={`Autre réponse à « ${q.question} »`}
-          placeholder="Autre réponse (texte libre)…"
+          aria-label={t('conversation.request.otherLabel', { question: q.question })}
+          placeholder={t('conversation.request.otherPlaceholder')}
           value={draft.other}
           disabled={disabled}
           onChange={(e) => onDraft({ ...draft, other: e.target.value })}
@@ -256,6 +260,7 @@ export function QuestionCard({
   stale: boolean
   cardKey: string
 }) {
+  const t = useT()
   const d = req.pending
   const questions = d.kind === 'question' && d.detailed !== false ? d.questions : []
   const [drafts, setDrafts] = useState<QuestionDraft[]>(() => questions.map(() => emptyDraft()))
@@ -273,22 +278,22 @@ export function QuestionCard({
 
   if (questions.length === 0) {
     return (
-      <section className={`ask${stale ? ' stale' : ''}`} aria-label="Question de Claude" tabIndex={-1} data-request-key={cardKey}>
+      <section className={`ask${stale ? ' stale' : ''}`} aria-label={t('conversation.questionFromClaude')} tabIndex={-1} data-request-key={cardKey}>
         <span className="t">
-          Claude te pose une question
+          {t('conversation.request.asks', { count: 1 })}
           {stale && <StaleBadge />}
         </span>
-        <div className="muted">{can.ok ? 'Détails inconnus : réponds dans le terminal.' : can.why}</div>
+        <div className="muted">{can.ok ? t('conversation.request.unknownDetails') : can.why}</div>
       </section>
     )
   }
 
   return (
-    <section className={`ask${stale ? ' stale' : ''}`} aria-label="Question de Claude" tabIndex={-1} data-request-key={cardKey}>
+    <section className={`ask${stale ? ' stale' : ''}`} aria-label={t('conversation.questionFromClaude')} tabIndex={-1} data-request-key={cardKey}>
       <span className="t">
-        Claude te pose {questions.length > 1 ? `${questions.length} questions` : 'une question'}
+        {t('conversation.request.asks', { count: questions.length })}
         {stale && <StaleBadge />}
-        {done && <span className="chip">réponse envoyée</span>}
+        {done && <span className="chip">{t('conversation.answerSent')}</span>}
       </span>
       <form
         style={{ display: 'grid', gap: 10 }}
@@ -311,9 +316,9 @@ export function QuestionCard({
         {!can.ok && <div className="muted">{can.why}</div>}
         <div className="row">
           <button className="btn pri" disabled={!complete || locked || !can.ok}>
-            {busy ? 'Envoi…' : 'Envoyer la réponse'}
+            {busy ? t('conversation.sending') : t('conversation.request.sendAnswer')}
           </button>
-          {!complete && <span className="hint">Réponds à chaque question pour envoyer.</span>}
+          {!complete && <span className="hint">{t('conversation.request.answerAll')}</span>}
         </div>
       </form>
       {error && (

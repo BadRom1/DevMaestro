@@ -4,8 +4,10 @@
  */
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 
+import { dateFormat, t as translate } from '../../../shared/i18n'
 import { ErrorCode, type Session, type Subagent } from '../../../shared/protocol'
 import { call, errorCode, errorText } from '../api'
+import { useT } from '../i18n'
 import { classifyLink, renderMarkdown } from '../state/markdown'
 import {
   agentDurationMs,
@@ -90,6 +92,7 @@ export function SidebarAgents({
   /** Ouvre l'onglet « Agents » (sur cet agent, ou sans choix). */
   onOpen: (agentId: string | null) => void
 }) {
+  const t = useT()
   const tree = useMemo(() => agentTree(agents), [agents])
   if (agents.length === 0) return null
   const running = tree.running.length
@@ -101,9 +104,9 @@ export function SidebarAgents({
         <span className="chev" aria-hidden="true">
           {open ? '▾' : '▸'}
         </span>
-        <span>Sous-agents</span>
+        <span>{t('conversation.agents.title')}</span>
         <span className="hint">
-          {running > 0 ? `${running} en cours · ` : ''}
+          {running > 0 ? t('conversation.agents.runningPrefix', { count: running }) : ''}
           {agents.length}
         </span>
       </button>
@@ -119,7 +122,11 @@ export function SidebarAgents({
                 className="ag-row"
                 onClick={() => onOpen(a.agent_id)}
                 title={`${title}\n${type} · ${g.label}${a.current_tool ? ` · ${a.current_tool}` : ''}`}
-                aria-label={`Sous-agent ${title}, ${type}, ${g.label}${a.current_tool ? `, outil en cours ${a.current_tool}` : ''}`}
+                aria-label={
+                  a.current_tool
+                    ? t('conversation.agents.rowLabelTool', { title, type, status: g.label, tool: a.current_tool })
+                    : t('conversation.agents.rowLabel', { title, type, status: g.label })
+                }
               >
                 <AgentGlyphIcon agent={a} />
                 <span className="names">
@@ -138,7 +145,7 @@ export function SidebarAgents({
         {open && tree.more > 0 && (
           <li>
             <button className="ag-more hint" onClick={() => onOpen(null)}>
-              + {tree.more} autre{tree.more > 1 ? 's' : ''}
+              {t('conversation.agents.more', { count: tree.more })}
             </button>
           </li>
         )}
@@ -180,7 +187,7 @@ function useAgentDetail(sessionId: string, agent: Subagent | null): Detail | nul
         if (!alive) return
         const a = subagentFromResult(r)
         if (!a) {
-          setDetail({ key, d: { phase: 'error', message: 'réponse du démon illisible' } })
+          setDetail({ key, d: { phase: 'error', message: translate('conversation.agents.unreadable') } })
           return
         }
         remember(key, a)
@@ -203,6 +210,7 @@ function useAgentDetail(sessionId: string, agent: Subagent | null): Detail | nul
 }
 
 function Report({ agent, detail, onLink }: { agent: Subagent; detail: Detail | null; onLink: (url: string) => void }) {
+  const t = useT()
   const ref = useRef<HTMLElement>(null)
   const report = detail?.phase === 'ready' ? detail.agent.report : null
   const truncated = detail?.phase === 'ready' && detail.agent.report_truncated === true
@@ -212,27 +220,27 @@ function Report({ agent, detail, onLink }: { agent: Subagent; detail: Detail | n
     const a = (e.target as HTMLElement).closest('a')
     if (!a) return
     e.preventDefault()
-    const t = classifyLink(a.getAttribute('href'), '')
-    if (t.kind === 'external') onLink(t.url)
-    else if (t.kind === 'anchor') ref.current?.querySelector(`[id="${CSS.escape(t.id)}"]`)?.scrollIntoView({ block: 'start' })
+    const link = classifyLink(a.getAttribute('href'), '')
+    if (link.kind === 'external') onLink(link.url)
+    else if (link.kind === 'anchor') ref.current?.querySelector(`[id="${CSS.escape(link.id)}"]`)?.scrollIntoView({ block: 'start' })
     // Fichiers et autres liens : inertes (le rapport n'a pas de dossier de référence).
   }
 
-  if (!detail || detail.phase === 'loading') return <p className="empty">Chargement du rapport…</p>
+  if (!detail || detail.phase === 'loading') return <p className="empty">{t('conversation.agents.reportLoading')}</p>
   if (detail.phase === 'unsupported') {
-    return <p className="empty">Le démon ne donne pas encore les rapports des sous-agents : mets orchd à jour.</p>
+    return <p className="empty">{t('conversation.agents.reportUnsupported')}</p>
   }
   if (detail.phase === 'error') {
     return (
       <p className="inline-err pad" role="alert">
-        Rapport indisponible : {detail.message}
+        {t('conversation.agents.reportUnavailable', { error: detail.message })}
       </p>
     )
   }
   if (!html) {
     return (
       <p className="empty">
-        {agent.status === 'running' ? 'Le rapport arrivera à la fin de l’agent.' : 'Aucun rapport pour cet agent.'}
+        {agent.status === 'running' ? t('conversation.agents.reportPending') : t('conversation.agents.reportNone')}
       </p>
     )
   }
@@ -240,7 +248,7 @@ function Report({ agent, detail, onLink }: { agent: Subagent; detail: Detail | n
     <>
       {truncated && (
         <p className="ag-cut" role="note">
-          Rapport coupé par le démon (64 Kio au plus) : la fin manque.
+          {t('conversation.agents.reportTruncated')}
         </p>
       )}
       {/* HTML produit par markdown-it sans HTML brut (échappé) ni image chargée, comme l'onglet Fichiers. */}
@@ -251,9 +259,9 @@ function Report({ agent, detail, onLink }: { agent: Subagent; detail: Detail | n
 
 function formatClock(iso: string | null): string | null {
   if (!iso) return null
-  const t = Date.parse(iso)
-  if (Number.isNaN(t)) return null
-  return new Date(t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const ms = Date.parse(iso)
+  if (Number.isNaN(ms)) return null
+  return dateFormat({ hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(ms))
 }
 
 /** Aucun sous-agent (référence stable). */
@@ -279,11 +287,12 @@ export function AgentsView({
   onSelect: (agentId: string) => void
   onLink: (url: string) => void
 }) {
+  const t = useT()
   const agents = known ?? NO_AGENTS
   // Même ordre que la barre latérale, sans limite : en cours, puis les finis du plus récent au plus ancien.
   const ordered = useMemo(() => {
-    const t = agentTree(agents, Number.MAX_SAFE_INTEGER)
-    return [...t.running, ...t.finished]
+    const tree = agentTree(agents, Number.MAX_SAFE_INTEGER)
+    return [...tree.running, ...tree.finished]
   }, [agents])
   const agent = ordered.find((a) => a.agent_id === selectedId) ?? ordered[0] ?? null
   // Agent affiché sans choix explicite : il devient le choix, pour ne plus changer tout seul.
@@ -301,22 +310,20 @@ export function AgentsView({
       // Liste reçue vide alors que le démon en compte, ou demande en échec : « indisponible ».
       return load === 'failed' || (known !== undefined && load !== 'loading') ? (
         <div className="empty">
-          <p>
-            Liste indisponible : {total} sous-agent{total > 1 ? 's' : ''} connu{total > 1 ? 's' : ''} du démon.
-          </p>
+          <p>{t('conversation.agents.listUnavailable', { count: total })}</p>
           <button className="btn sm" onClick={onRetry}>
-            Réessayer
+            {t('conversation.retry')}
           </button>
         </div>
       ) : (
-        <p className="empty">Chargement des sous-agents…</p>
+        <p className="empty">{t('conversation.agents.loading')}</p>
       )
     }
     return (
       <p className="empty">
         {session.subagents_total === undefined
-          ? 'Le démon ne suit pas encore les sous-agents : mets orchd à jour.'
-          : 'Aucun sous-agent lancé dans cette session.'}
+          ? t('conversation.agents.unsupported')
+          : t('conversation.agents.none')}
       </p>
     )
   }
@@ -325,10 +332,10 @@ export function AgentsView({
     <div className="agents-view">
       <div className="ag-list">
         <div className="cap">
-          <span className="lbl">Sous-agents</span>
+          <span className="lbl">{t('conversation.agents.title')}</span>
           <span className="hint">
-            {running > 0 ? `${running} en cours · ` : ''}
-            {total} au total
+            {running > 0 ? t('conversation.agents.runningPrefix', { count: running }) : ''}
+            {t('conversation.agents.total', { count: total })}
           </span>
         </div>
         <ul role="list">
@@ -369,38 +376,42 @@ export function AgentsView({
             </h3>
             <dl className="ag-meta">
               <div>
-                <dt>Statut</dt>
+                <dt>{t('conversation.agents.status')}</dt>
                 <dd>{agentGlyph(agent.status).label}</dd>
               </div>
               <div>
-                <dt>Type</dt>
+                <dt>{t('conversation.agents.type')}</dt>
                 <dd className="mono">{agentType(agent)}</dd>
               </div>
               <div>
-                <dt>Modèle</dt>
-                <dd>{agent.model ?? 'inconnu'}</dd>
+                <dt>{t('conversation.agents.model')}</dt>
+                <dd>{agent.model ?? t('conversation.agents.unknown')}</dd>
               </div>
               <div>
-                <dt>Durée</dt>
+                <dt>{t('conversation.agents.duration')}</dt>
                 <dd>
                   <AgentDuration agent={agent} />
                   {formatClock(agent.started_at) && (
                     <span className="hint">
                       {' '}
-                      (départ {formatClock(agent.started_at)}
-                      {formatClock(agent.ended_at) ? `, fin ${formatClock(agent.ended_at)}` : ''})
+                      {formatClock(agent.ended_at)
+                        ? t('conversation.agents.startedEnded', {
+                            start: formatClock(agent.started_at),
+                            end: formatClock(agent.ended_at),
+                          })
+                        : t('conversation.agents.started', { start: formatClock(agent.started_at) })}
                     </span>
                   )}
                 </dd>
               </div>
               <div>
-                <dt>Outils</dt>
+                <dt>{t('conversation.agents.toolsTitle')}</dt>
                 <dd>
                   {toolCountLabel(agent.tool_count)}
                   {agent.current_tool ? (
-                    <span className="mono"> · en cours : {agent.current_tool}</span>
+                    <span className="mono">{t('conversation.agents.currentTool', { tool: agent.current_tool })}</span>
                   ) : agent.last_tool ? (
-                    <span className="mono hint"> · dernier : {agent.last_tool}</span>
+                    <span className="mono hint">{t('conversation.agents.lastTool', { tool: agent.last_tool })}</span>
                   ) : null}
                 </dd>
               </div>

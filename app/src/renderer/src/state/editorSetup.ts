@@ -28,6 +28,7 @@ import {
 } from '@codemirror/view'
 import { tags as t } from '@lezer/highlight'
 
+import { t as tr } from '../../../shared/i18n'
 import { editorLanguage } from './editorLanguage'
 import { eolStyle, normalizeEol } from './fileEdit'
 
@@ -109,34 +110,36 @@ export function themeFor(doc: Document = document): Extension {
   return doc.documentElement.dataset.theme === 'light' ? lightTheme : darkTheme
 }
 
-/** Phrases de l'interface de CodeMirror (recherche, aides), en français. */
-const PHRASES: Record<string, string> = {
-  Find: 'Rechercher',
-  Replace: 'Remplacer',
-  next: 'suivant',
-  previous: 'précédent',
-  all: 'tout',
-  'match case': 'respecter la casse',
-  'by word': 'mot entier',
-  regexp: 'expression régulière',
-  replace: 'remplacer',
-  'replace all': 'tout remplacer',
-  close: 'fermer',
-  'current match': 'occurrence courante',
-  'on line': 'à la ligne',
-  'replaced match on line $': 'occurrence remplacée à la ligne $',
-  'replaced $ matches': '$ occurrences remplacées',
-  'Go to line': 'Aller à la ligne',
-  go: 'aller',
-  'Control character': 'Caractère de contrôle',
-  'Folded lines': 'Lignes repliées',
-  'Unfolded lines': 'Lignes dépliées',
-  to: 'à',
-  'folded code': 'code replié',
-  unfold: 'déplier',
-  'Fold line': 'Replier la ligne',
-  'Unfold line': 'Déplier la ligne',
-  'Selection deleted': 'Sélection supprimée',
+/** Phrases de l'interface de CodeMirror (recherche, aides), dans la langue courante (lues à la création de l'éditeur). */
+function phrases(): Record<string, string> {
+  return {
+    Find: tr('files.cm.findField'),
+    Replace: tr('files.cm.replaceField'),
+    next: tr('files.cm.next'),
+    previous: tr('files.cm.previous'),
+    all: tr('files.cm.all'),
+    'match case': tr('files.cm.matchCase'),
+    'by word': tr('files.cm.byWord'),
+    regexp: tr('files.cm.regexp'),
+    replace: tr('files.cm.replace'),
+    'replace all': tr('files.cm.replaceAll'),
+    close: tr('files.cm.close'),
+    'current match': tr('files.cm.currentMatch'),
+    'on line': tr('files.cm.onLine'),
+    'replaced match on line $': tr('files.cm.replacedMatchOnLineN'),
+    'replaced $ matches': tr('files.cm.replacedNMatches'),
+    'Go to line': tr('files.cm.goToLine'),
+    go: tr('files.cm.go'),
+    'Control character': tr('files.cm.controlCharacter'),
+    'Folded lines': tr('files.cm.foldedLines'),
+    'Unfolded lines': tr('files.cm.unfoldedLines'),
+    to: tr('files.cm.to'),
+    'folded code': tr('files.cm.foldedCode'),
+    unfold: tr('files.cm.unfold'),
+    'Fold line': tr('files.cm.foldLine'),
+    'Unfold line': tr('files.cm.unfoldLine'),
+    'Selection deleted': tr('files.cm.selectionDeleted'),
+  }
 }
 
 export interface EditorHooks {
@@ -178,7 +181,7 @@ export function createEditorState(text: string, path: string, hooks: EditorHooks
     highlightActiveLine(),
     highlightSelectionMatches(),
     search({ top: true }),
-    EditorState.phrases.of(PHRASES),
+    EditorState.phrases.of(phrases()),
     EditorView.contentAttributes.of({ 'aria-label': hooks.label, 'aria-multiline': 'true' }),
     Prec.highest(
       keymap.of([

@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 
+import { useT } from '../i18n'
 import { useSettings } from '../settings'
 import { truncateStart } from '../state/format'
 import { profileTone } from '../state/profileTone'
@@ -16,6 +17,7 @@ export function StatusGlyph({ glyph, decorative = true }: { glyph: Glyph; decora
 }
 
 export function Meter({ pct, width, label }: { pct: number | null | undefined; width?: number; label: string }) {
+  const t = useT()
   const p = typeof pct === 'number' ? Math.max(0, Math.min(100, pct)) : 0
   return (
     <span
@@ -26,7 +28,7 @@ export function Meter({ pct, width, label }: { pct: number | null | undefined; w
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={typeof pct === 'number' ? Math.round(p) : undefined}
-      aria-valuetext={typeof pct === 'number' ? `${Math.round(p)} %` : 'inconnu'}
+      aria-valuetext={typeof pct === 'number' ? t('format.pct', { n: Math.round(p) }) : t('format.unknown')}
     >
       <i className={meterLevel(pct)} style={{ width: `${p}%` }} />
     </span>
@@ -40,8 +42,9 @@ export function profileClass(profile: string, profiles: { name: string }[]): str
 /** Badge court d'un profil (« P », « W ») ; libellé long et nom technique en infobulle. */
 export function ProfileBadge({ profile, profiles }: { profile: string; profiles: { name: string }[] }) {
   const { label } = useSettings()
+  const t = useT()
   const l = label(profile)
-  const tip = `Profil ${l.long} (${profile})`
+  const tip = t('common.profileBadgeTitle', { label: l.long, profile })
   return (
     <span className={`pbadge ${profileClass(profile, profiles)}`} title={tip} aria-hidden="true">
       {l.short}
@@ -55,8 +58,9 @@ export function ProfileBadge({ profile, profiles }: { profile: string; profiles:
  * l'alignement des lignes.
  */
 export function AnyProfileBadge() {
+  const t = useT()
   return (
-    <span className="pbadge pany" title="Visible par plusieurs profils : profil d’origine inconnu" aria-hidden="true">
+    <span className="pbadge pany" title={t('common.anyProfileTitle')} aria-hidden="true">
       ·
     </span>
   )
@@ -65,9 +69,10 @@ export function AnyProfileBadge() {
 /** Libellé long d'un profil (sans le badge court : jamais les deux côte à côte), nom technique en infobulle. */
 export function ProfileChip({ profile, profiles, className = '' }: { profile: string; profiles: { name: string }[]; className?: string }) {
   const { label } = useSettings()
+  const t = useT()
   const l = label(profile)
   return (
-    <span className={`chip ${profileClass(profile, profiles)} ${className}`.trim()} title={`Profil Claude Code ${l.long} (${profile})`}>
+    <span className={`chip ${profileClass(profile, profiles)} ${className}`.trim()} title={t('common.profileChipTitle', { label: l.long, profile })}>
       {l.long}
     </span>
   )

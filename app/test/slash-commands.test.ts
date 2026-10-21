@@ -6,15 +6,18 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import { helloCapabilities } from '../src/main/daemon/client'
 import { ValidationError, validateParams } from '../src/main/validate'
 import { RENDERER_METHODS, type SlashCommand } from '../src/shared/protocol'
 import builtinJson from '../src/shared/builtinCommands.json'
+import { setLocale } from '../src/shared/i18n'
+import { BUILTIN_COMMANDS_EN } from '../src/shared/i18n/catalog/conversation'
 import {
   BUILTIN_COMMANDS,
   BUILTIN_VERSION,
+  commandTexts,
   completeCommand,
   conflictLabel,
   listNote,
@@ -193,5 +196,28 @@ describe('capacités et validation IPC', () => {
     expect(validateParams('commands.list', { id: ID, extra: 1 })).toEqual({ id: ID })
     expect(() => validateParams('commands.list', {})).toThrow(ValidationError)
     expect(() => validateParams('commands.list', { id: '../x' })).toThrow(ValidationError)
+  })
+})
+
+describe('descriptions anglaises des commandes intégrées (lot 20)', () => {
+  afterEach(() => setLocale('fr'))
+
+  it('une par commande intégrée, et seulement pour elles', () => {
+    const names = BUILTIN_COMMANDS.map((c) => c.name)
+    expect(Object.keys(BUILTIN_COMMANDS_EN).sort()).toEqual([...names].sort())
+    for (const c of BUILTIN_COMMANDS) expect(BUILTIN_COMMANDS_EN[c.name]!.description.trim()).not.toBe('')
+  })
+
+  it('choisies selon la langue, jamais pour les commandes du disque', () => {
+    const compact = BUILTIN_COMMANDS.find((c) => c.name === 'compact')!
+    const user = cmd('compact', 'user', { description: 'Ma commande', argument_hint: '[x]' })
+    expect(commandTexts(compact)).toEqual({ description: compact.description, argument_hint: compact.argument_hint })
+    setLocale('en')
+    expect(commandTexts(compact)).toEqual({
+      description: 'Free up context by summarizing the conversation',
+      argument_hint: '[summary instructions]',
+    })
+    expect(commandTexts(user)).toEqual({ description: 'Ma commande', argument_hint: '[x]' })
+    expect(sourceLabel(compact)).toBe('built-in')
   })
 })

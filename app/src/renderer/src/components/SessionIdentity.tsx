@@ -8,11 +8,13 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { MAX_TITLE, SESSION_COLORS, type SessionColor } from '../../../shared/protocol'
 import { clampTitle, normalizeTitleInput, titleLength } from '../state/title'
 import { COLOR_LABELS } from '../state/format'
+import { useT } from '../i18n'
 
 /** Barre verticale de couleur ; rien si aucune couleur. */
 export function ColorBar({ color, size = 'sm' }: { color: SessionColor | null; size?: 'sm' | 'lg' }) {
+  const t = useT()
   if (!color) return null
-  const label = `Couleur : ${COLOR_LABELS[color].toLowerCase()}`
+  const label = t('shell.color.bar', { color: COLOR_LABELS[color].toLowerCase() })
   return <span className={`cbar ${size} c-${color}`} role="img" aria-label={label} title={label} />
 }
 
@@ -31,6 +33,7 @@ export function RenameField({
   onSave: (title: string | null) => Promise<void>
   onCancel: () => void
 }) {
+  const t = useT()
   const [value, setValue] = useState(initial)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -52,7 +55,7 @@ export function RenameField({
     if (done.current || inFlight.current) return
     const next = normalizeTitleInput(value)
     if (!next.ok) {
-      setError(`Renommage impossible : ${next.error}`)
+      setError(t('shell.renameFailed', { error: next.error }))
       return
     }
     const before = normalizeTitleInput(initial)
@@ -87,7 +90,7 @@ export function RenameField({
         type="text"
         value={value}
         placeholder={placeholder}
-        aria-label="Nom de la session (vide : nom automatique)"
+        aria-label={t('shell.rename.label')}
         aria-invalid={error ? true : undefined}
         disabled={busy}
         onChange={(e) => {
@@ -110,7 +113,7 @@ export function RenameField({
         }}
       />
       <span className="hint" aria-live="polite">
-        {busy ? 'enregistrement…' : `${titleLength(value)}/${MAX_TITLE}`}
+        {busy ? t('shell.rename.saving') : `${titleLength(value)}/${MAX_TITLE}`}
       </span>
       {error && (
         <span className="inline-err" role="alert">
@@ -133,6 +136,7 @@ export function ColorPicker({
   disabledReason?: string
   onPick: (c: SessionColor | null) => void
 }) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const button = useRef<HTMLButtonElement>(null)
@@ -164,7 +168,7 @@ export function ColorPicker({
     if (c !== value) onPick(c)
   }
 
-  const current = value ? COLOR_LABELS[value] : 'aucune'
+  const current = value ? COLOR_LABELS[value] : t('shell.color.noneLower')
   return (
     <div className="cpick" ref={root}>
       <button
@@ -174,17 +178,17 @@ export function ColorPicker({
         aria-expanded={open}
         aria-controls={open ? popId : undefined}
         disabled={disabled}
-        title={disabled ? disabledReason : `Couleur de la session : ${current.toLowerCase()}`}
+        title={disabled ? disabledReason : t('shell.color.current', { color: current.toLowerCase() })}
         onClick={() => setOpen((o) => !o)}
       >
         <span className={`swatch ${value ? `c-${value}` : 'none'}`} aria-hidden="true" />
-        Couleur
+        {t('shell.color.button')}
       </button>
       {open && (
-        <div className="cpop" id={popId} role="group" aria-label="Couleur de la session">
-          <button className="sw" aria-pressed={value === null} title="Aucune couleur" onClick={() => pick(null)}>
+        <div className="cpop" id={popId} role="group" aria-label={t('shell.color.group')}>
+          <button className="sw" aria-pressed={value === null} title={t('shell.color.noneTitle')} onClick={() => pick(null)}>
             <span className="swatch none" aria-hidden="true" />
-            <span>Aucune</span>
+            <span>{t('shell.color.none')}</span>
           </button>
           {SESSION_COLORS.map((c) => (
             <button key={c} className="sw" aria-pressed={value === c} title={COLOR_LABELS[c]} onClick={() => pick(c)}>

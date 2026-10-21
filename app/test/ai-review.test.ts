@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { CommitInfo, DiffFile, FileDiff, PullDetail, WorktreeInfo } from '../src/shared/protocol'
+import { setLocale } from '../src/shared/i18n'
 import { defaultPrompt, promptProblem, renderPrompt } from '../src/shared/prompts'
 import {
   MAX_REVIEW_FILES_READ,
@@ -272,6 +273,15 @@ describe('contenu collé', () => {
     const ctx = buildReviewContext(pullTarget(), reads(['src/a.ts']), { noWorktree: true })
     expect(ctx.pasted).toMatch(/^Note de DevMaestro : la session tourne dans le dossier du projet, qui n’est pas sur la branche relue/)
     expect(reviewInstruction(pullTarget(), defaultPrompt('aiReviewPr'), true)).toMatch(/n’est pas sur la branche relue, fie-toi au diff collé\.$/)
+  })
+
+  it('« Lancer sans worktree » en anglais : la note ajoutée à la consigne est en anglais', () => {
+    setLocale('en')
+    try {
+      expect(reviewInstruction(pullTarget(), defaultPrompt('aiReviewPr'), true)).toMatch(/ Warning: your working folder is not on the reviewed branch, rely on the pasted diff\.$/)
+    } finally {
+      setLocale('fr')
+    }
   })
 
   it('coupe en octets sans casser un caractère', () => {

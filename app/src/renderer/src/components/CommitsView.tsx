@@ -17,7 +17,7 @@ import {
   emptyLabel,
   filesLabel,
   hasCounts,
-  NO_STATS,
+  noStats,
   statsOf,
   fullDate,
   otherRange,
@@ -26,7 +26,7 @@ import {
   stepCommit,
   toggleRangeLabel,
 } from '../state/commits'
-import { STATUS_LABELS, diffRows, skippedCount, sortFiles, totals } from '../state/diff'
+import { diffRows, statusLabel, skippedCount, sortFiles, totals } from '../state/diff'
 import { relativeTime } from '../state/format'
 import {
   MAX_COMMENTS,
@@ -38,6 +38,7 @@ import {
   type ReviewAction,
   type ReviewDraft,
 } from '../state/review'
+import { useI18n, useT } from '../i18n'
 import { useNotifiedReload } from '../notifiedReload'
 import { DiffFileList, DiffTable, FileHeadCounts, fileKeys, useFileNav } from './DiffReader'
 import { AiReviewButton } from './AiReview'
@@ -60,6 +61,9 @@ const listCache = new Map<string, CommitsList>()
  * `null` pour le choix automatique).
  */
 export function useSessionCommits(sessionId: string, seq: number, range: CommitRange | null): CommitsState & { reload: () => void } {
+  const t = useT()
+  const tRef = useRef(t)
+  tRef.current = t
   const [state, setState] = useState<CommitsState>(() => ({ list: listCache.get(sessionId) ?? null, loading: false, error: null }))
   const current = useRef({ sessionId, range })
   current.current = { sessionId, range }
@@ -77,7 +81,7 @@ export function useSessionCommits(sessionId: string, seq: number, range: CommitR
       setState({ list, loading: false, error: null })
     } catch (e) {
       if (mine !== gen.current) return
-      setState((s) => ({ ...s, loading: false, error: commitsErrorText(errorCode(e), errorText(e), 'Historique indisponible') }))
+      setState((s) => ({ ...s, loading: false, error: commitsErrorText(errorCode(e), errorText(e), tRef.current('files.commits.historyUnavailable')) }))
     }
   }, [])
 
@@ -138,6 +142,7 @@ export function CommitsView({
   /** Commit et fichier à montrer (clic dans la liste de la revue) ; `n` change à chaque demande. */
   focusCommit?: { sessionId: string; sha: string; path: string; n: number } | null
 }) {
+  const { t, rich } = useI18n()
   const memo = commitsMemoryFor(session.id)
   const freshFocus = focusCommit && focusCommit.sessionId === session.id && focusCommit.n > memo.focusN ? focusCommit : null
   const [range, setRange] = useState<CommitRange | null>(memo.range)
@@ -204,7 +209,7 @@ export function CommitsView({
         remember(session.id, d)
         if (alive) setCdiff(d)
       })
-      .catch((e: unknown) => alive && setCdiffError(commitsErrorText(errorCode(e), errorText(e), 'Fichiers du commit indisponibles')))
+      .catch((e: unknown) => alive && setCdiffError(commitsErrorText(errorCode(e), errorText(e), t('files.commits.filesUnavailable'))))
     return () => {
       alive = false
     }
@@ -234,7 +239,7 @@ export function CommitsView({
       .catch((e: unknown) => {
         if (!alive) return
         setFileDiff(null)
-        setFileError(commitsErrorText(errorCode(e), errorText(e), 'Diff du fichier indisponible'))
+        setFileError(commitsErrorText(errorCode(e), errorText(e), t('files.diff.fileUnavailable')))
       })
     return () => {
       alive = false
@@ -257,7 +262,7 @@ export function CommitsView({
   const full = activeComments(draft).length >= MAX_COMMENTS
   const onFileKey = fileKeys(files, path, setPath, listRef, { nav })
   const commit = list?.commits.find((c) => c.sha === sha) ?? null
-  const t = totals(files)
+  const tot = totals(files)
 
   function selectCommit(next: string) {
     if (next === sha) return
@@ -283,7 +288,7 @@ export function CommitsView({
       <div className="diffpane empty" role="alert">
         <b>{commits.error}</b>
         <button className="btn sm" onClick={commits.reload}>
-          Réessayer
+          {t('files.retry')}
         </button>
       </div>
     )
@@ -291,7 +296,7 @@ export function CommitsView({
   if (!list) {
     return (
       <div className="diffpane empty" role="status">
-        Lecture de l’historique…
+        {t('files.commits.loading')}
       </div>
     )
   }
@@ -304,7 +309,7 @@ export function CommitsView({
       <div
         className="clist"
         ref={clistRef}
-        aria-label="Commits"
+        aria-label={t('files.commits.listLabel')}
         onKeyDown={onListKey}
         // Défilement retenu au fil de l'eau : au démontage, les éléments ne sont plus lisibles.
         onScroll={(e) => {
@@ -314,10 +319,10 @@ export function CommitsView({
         <div className="fhead">
           <span className="lbl">{rangeLabel(list, session.branch)}</span>
           <span className="hint">
-            {list.commits.length} commit{list.commits.length > 1 ? 's' : ''}
-            {list.truncated ? ' (les plus récents)' : ''}
-            {!statsOf(list) && ` · ${NO_STATS}`}
-            {commits.loading && ' · mise à jour…'}
+            {t('files.commits.count', { count: list.commits.length })}
+            {list.truncated ? t('files.commits.mostRecent') : ''}
+            {!statsOf(list) && ` · ${noStats()}`}
+            {commits.loading && t('files.updating')}
           </span>
           {list.head !== null && (
             <button
@@ -349,10 +354,10 @@ export function CommitsView({
                   className="cmt-row"
                   data-sha={c.sha}
                   aria-current={c.sha === sha}
-                  aria-label={`${commitAriaLabel(c, now)}${n ? `, ${n} commentaire${n > 1 ? 's' : ''}` : ''}`}
+                  aria-label={`${commitAriaLabel(c, now)}${n ? `, ${t('files.commentsCount', { count: n })}` : ''}`}
                   onClick={() => selectCommit(c.sha)}
                 >
-                  <span className="csubj">{c.subject || '(sans message)'}</span>
+                  <span className="csubj">{c.subject || t('files.commits.noMessage')}</span>
                   <span className="cmeta" aria-hidden="true">
                     <span className="mono" title={c.sha}>
                       {shortSha(c.sha)}
@@ -367,9 +372,9 @@ export function CommitsView({
                         <span>{filesLabel(c.files)}</span>
                       </>
                     ) : (
-                      <span title={NO_STATS}>compteurs indisponibles</span>
+                      <span title={noStats()}>{t('files.commits.noStatsShort')}</span>
                     )}
-                    {c.parents.length > 1 && <span className="chip">fusion</span>}
+                    {c.parents.length > 1 && <span className="chip">{t('files.commits.merge')}</span>}
                     {n > 0 && <span className="ccount">💬{n}</span>}
                   </span>
                 </button>
@@ -388,7 +393,7 @@ export function CommitsView({
                       })
                     }}
                   >
-                    <summary>Message complet</summary>
+                    <summary>{t('files.commits.fullMessage')}</summary>
                     <pre>{c.body}</pre>
                   </details>
                 )}
@@ -397,7 +402,7 @@ export function CommitsView({
           })}
         </ul>
         <p className="hint pad">
-          <kbd>↑</kbd> / <kbd>↓</kbd> dans la liste : commit précédent / suivant
+          {rich('files.commits.navHint', { up: <kbd>↑</kbd>, down: <kbd>↓</kbd> })}
         </p>
       </div>
       <div className="diffpane">
@@ -407,8 +412,8 @@ export function CommitsView({
           onSelect={setPath}
           listRef={listRef}
           nav={nav}
-          label={commit ? `Fichiers du commit ${shortSha(commit.sha)}` : 'Fichiers du commit'}
-          empty={!sha ? 'Choisis un commit.' : cdiff ? 'Aucun fichier changé.' : cdiffError ? '' : 'Chargement…'}
+          label={commit ? t('files.commits.filesOf', { sha: shortSha(commit.sha) }) : t('files.commits.files')}
+          empty={!sha ? t('files.commits.pick') : cdiff ? t('files.commits.noChangedFiles') : cdiffError ? '' : t('files.loading')}
           comments={(p) => (sha ? commitComments(draft, sha).filter((c) => c.path === p).length : 0)}
           head={
             commit ? (
@@ -418,12 +423,12 @@ export function CommitsView({
                 </span>
                 {cdiff?.base && (
                   <span className="hint" title={cdiff.base.sha}>
-                    {cdiff.base.kind === 'root' ? 'premier commit (contre l’arbre vide)' : `contre ${cdiff.base.ref}`}
+                    {cdiff.base.kind === 'root' ? t('files.commits.rootBase') : t('files.commits.against', { ref: cdiff.base.ref })}
                   </span>
                 )}
                 {cdiff && (
                   <span className="hint">
-                    <span className="plus">+{t.additions}</span> <span className="minus">−{t.deletions}</span>
+                    <span className="plus">+{tot.additions}</span> <span className="minus">−{tot.deletions}</span>
                   </span>
                 )}
                 {cdiff && cdiff.sha === commit.sha && (
@@ -432,9 +437,9 @@ export function CommitsView({
                     target={() => ({ kind: 'commit', session, commit, files, listTruncated: !!cdiff.truncated, skipped: skippedCount(cdiff.skipped_non_utf8) })}
                   />
                 )}
-                {cdiff?.truncated && <span className="chip pend">liste tronquée</span>}
+                {cdiff?.truncated && <span className="chip pend">{t('files.truncatedList')}</span>}
                 {cdiff && skippedCount(cdiff.skipped_non_utf8) > 0 && (
-                  <span className="hint">{skippedCount(cdiff.skipped_non_utf8)} fichier(s) non UTF-8 ignoré(s)</span>
+                  <span className="hint">{t('files.commits.skippedNonUtf8', { n: skippedCount(cdiff.skipped_non_utf8) })}</span>
                 )}
                 {cdiffError && (
                   <span className="inline-err" role="alert">
@@ -454,8 +459,7 @@ export function CommitsView({
               </span>
               <FileHeadCounts file={file} fileDiff={shown?.data ?? null} />
               <span className="hint">
-                {STATUS_LABELS[file.status]} dans « {commit.subject || shortSha(commit.sha)} » · survole une ligne et clique sur + pour
-                commenter
+                {t('files.commits.fileHint', { status: statusLabel(file.status), subject: commit.subject || shortSha(commit.sha) })}
               </span>
             </div>
           ) : (
@@ -467,17 +471,17 @@ export function CommitsView({
             onScroll={(e) => {
               memo.diffScroll = e.currentTarget.scrollTop
             }}
-            tabIndex={0} aria-label={file ? `Diff de ${file.path} dans le commit` : 'Diff du commit'}>
+            tabIndex={0} aria-label={file ? t('files.commits.diffOf', { path: file.path }) : t('files.commits.diff')}>
             {fileError && (
               <p className="inline-err pad" role="alert">
                 {fileError}
               </p>
             )}
-            {file && shown && shown.data.binary && <p className="empty">Fichier binaire : pas de diff ligne à ligne.</p>}
+            {file && shown && shown.data.binary && <p className="empty">{t('files.binaryNoDiff')}</p>}
             {file && shown && shown.data.too_large && (
-              <p className="empty">Fichier trop volumineux pour être affiché ici.</p>
+              <p className="empty">{t('files.tooLarge')}</p>
             )}
-            {file && !shown && !fileError && <p className="empty">Chargement…</p>}
+            {file && !shown && !fileError && <p className="empty">{t('files.loading')}</p>}
             {rows.length > 0 && sha && path && (
               <DiffTable
                 rows={rows}

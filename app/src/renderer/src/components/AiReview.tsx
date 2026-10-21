@@ -9,7 +9,6 @@ import { createContext, useContext, useEffect, useId, useMemo, useRef, useState,
 
 import type { FileDiff, Profile, PullDetail, Session } from '../../../shared/protocol'
 import { resolvePrompt } from '../../../shared/prompts'
-import { LOCATION_LABELS } from '../../../shared/worktrees'
 import { call, errorCode, errorText } from '../api'
 import {
   MAX_REVIEW_FILES_READ,
@@ -25,7 +24,9 @@ import {
   reviewInstruction,
   reviewLocation,
   reviewPromptId,
+  reviewNoteLabel,
   reviewSessionName,
+  reviewSubject,
   saveReviewMarks,
   short,
   sizeLabel,
@@ -39,11 +40,12 @@ import {
   type ReviewTarget,
 } from '../state/aiReview'
 import { browserStorage } from '../state/collapse'
-import { UNCERTAIN_TEXT, outcomeUncertain } from '../state/errors'
+import { daemonText, outcomeUncertain, uncertainText } from '../state/errors'
 import { initialOf } from '../state/forge'
 import { pullDiffFiles, validHeadSha } from '../state/forgePulls'
 import { resolveDefaultProfile } from '../state/newSession'
 import type { WorktreeLists } from '../state/worktrees'
+import { useI18n, useT } from '../i18n'
 import { useSettings } from '../settings'
 import { Modal } from './Modal'
 
@@ -90,18 +92,23 @@ export function useReviewMarks(): ReviewMarks {
 
 /** Badge « revue » d'une session (barre latérale, en-tête). */
 export function ReviewBadge({ mark, onOpenPull }: { mark: ReviewMark; onOpenPull?: () => void }) {
-  const what = mark.kind === 'pull' ? `de la demande #${mark.pr ?? '?'}` : mark.kind === 'commit' ? `du commit ${mark.sha ? short(mark.sha) : ''}` : 'du diff'
-  const title = `Session de revue assistée ${what}, en lecture seule (mode plan)`
+  const t = useT()
+  const title =
+    mark.kind === 'pull'
+      ? t('forge.review.badge.titlePull', { pr: mark.pr ?? '?' })
+      : mark.kind === 'commit'
+        ? t('forge.review.badge.titleCommit', { sha: mark.sha ? short(mark.sha) : '' })
+        : t('forge.review.badge.titleDiff')
   if (onOpenPull && mark.kind === 'pull' && mark.pr) {
     return (
-      <button type="button" className="chip review-chip" title={`${title} : ouvrir la demande`} onClick={onOpenPull}>
-        <span aria-hidden="true">◎</span> revue PR #{mark.pr}
+      <button type="button" className="chip review-chip" title={t('forge.review.badge.openTitle', { title })} onClick={onOpenPull}>
+        <span aria-hidden="true">◎</span> {t('forge.review.badge.pr', { pr: mark.pr })}
       </button>
     )
   }
   return (
     <span className="chip review-chip" title={title}>
-      <span aria-hidden="true">◎</span> revue
+      <span aria-hidden="true">◎</span> {t('forge.review.badge.label')}
     </span>
   )
 }
@@ -133,6 +140,7 @@ export function useAiReview(): AiReviewApi | null {
 }
 
 export function AiReviewProvider({ children, ...deps }: AiReviewDeps & { children: ReactNode }) {
+  const t = useT()
   const [target, setTarget] = useState<ReviewTarget | null>(null)
   /** Lancement en cours : Échap, le fond et × ne ferment pas la fenêtre. */
   const [busy, setBusy] = useState(false)
@@ -145,15 +153,13 @@ export function AiReviewProvider({ children, ...deps }: AiReviewDeps & { childre
     <Ctx.Provider value={api}>
       {children}
       {target && (
-        <Modal title={`Revue assistée : ${reviewSessionName(target).replace(/^Revue /, '')}`} onClose={close} width={720} busy={busy}>
+        <Modal title={t('forge.review.modalTitle', { subject: reviewSubject(target) })} onClose={close} width={720} busy={busy}>
           <AiReviewConfirm target={target} deps={api} onCancel={close} onDone={close} onBusy={setBusy} />
         </Modal>
       )}
     </Ctx.Provider>
   )
 }
-
-const OLD_DAEMON = 'Démon trop ancien : il ne sait pas taper une consigne puis coller un contenu. Mets orchd à jour.'
 
 /**
  * Bouton « Revue assistée ». `onClick` absent : la fenêtre de confirmation
@@ -172,6 +178,7 @@ export function AiReviewButton({
   className?: string
   buttonRef?: Ref<HTMLButtonElement>
 }) {
+  const t = useT()
   const ctx = useAiReview()
   const reasonId = useId()
   if (!ctx) return null
@@ -191,18 +198,18 @@ export function AiReviewButton({
         aria-label={label}
         aria-disabled={ctx.supported ? undefined : true}
         aria-describedby={ctx.supported ? undefined : reasonId}
-        title={ctx.supported ? `${label} : session Claude en lecture seule (mode plan), diff en contexte` : OLD_DAEMON}
+        title={ctx.supported ? t('forge.review.button.title', { label }) : t('forge.review.oldDaemon')}
         onClick={() => {
           if (!ctx.supported) return
-          const t = target()
-          if (t) (onClick ?? ctx.open)(t)
+          const next = target()
+          if (next) (onClick ?? ctx.open)(next)
         }}
       >
-        Revue assistée
+        {t('forge.review.button.text')}
       </button>
       {!ctx.supported && (
         <span className="hint" id={reasonId}>
-          revue assistée : mets orchd à jour
+          {t('forge.review.button.oldHint')}
         </span>
       )}
     </>
@@ -246,6 +253,7 @@ export function AiReviewConfirm({
   /** Lancement en cours (la fenêtre ou le panneau ne se ferme pas). */
   onBusy?: (busy: boolean) => void
 }) {
+  const { t, rich, locale } = useI18n()
   const { settings, label } = useSettings()
   const [target, setTarget] = useState(initialTarget)
   const root = targetRoot(target)
@@ -284,7 +292,7 @@ export function AiReviewConfirm({
     } catch (e) {
       return { error: (e as Error).message }
     }
-  }, [target, template, noWorktree])
+  }, [target, template, noWorktree, locale])
 
   const needsWorktree = target.kind !== 'diff'
   useEffect(() => {
@@ -346,11 +354,12 @@ export function AiReviewConfirm({
         ...(deps.termSize ?? {}),
         ...(location.kind === 'worktree' ? { worktree: { branch: location.branch, base: location.base, location: 'managed' as const } } : {}),
       })
-      const warnings = [...(r.warnings ?? [])]
+      // Avertissements du démon marqués ici ; ceux de l'app, ajoutés plus bas, sont déjà traduits.
+      const warnings = (r.warnings ?? []).map(daemonText)
       let worktree: string | null = null
       if (location.kind === 'worktree') {
         worktree = r.worktree?.path ?? null
-        if (!r.worktree) warnings.push(`pas de worktree créé (démon trop ancien ?) : la revue tourne dans ${r.session.cwd}`)
+        if (!r.worktree) warnings.push(t('forge.review.warn.noWorktree', { cwd: r.session.cwd }))
         deps.loadWorktrees(root)
       } else if (location.kind === 'reuse') {
         worktree = location.cwd
@@ -360,7 +369,7 @@ export function AiReviewConfirm({
       try {
         session = (await call('sessions.update', { id: session.id, title: reviewSessionName(target) })).session
       } catch (e) {
-        warnings.push(`nom non enregistré : ${errorText(e)}`)
+        warnings.push(t('forge.review.warn.nameNotSaved', { error: errorText(e) }))
       }
       setBusy(false)
       deps.onLaunched(session, warnings)
@@ -393,35 +402,35 @@ export function AiReviewConfirm({
   const branch = reviewBranch(target)
   const where =
     location === null
-      ? 'Sha invalide : rien à relire.'
+      ? t('forge.review.where.invalidSha')
       : location.kind === 'folder'
         ? target.kind === 'diff'
-          ? `Dans le dossier de la session (${location.cwd}) : les changements non commités y sont.`
-          : `Dans le dossier du projet (${location.cwd}), sans worktree : il n’est pas sur la branche relue, Claude n’a que le diff collé (la consigne et le contenu le disent).`
+          ? t('forge.review.where.sessionFolder', { cwd: location.cwd })
+          : t('forge.review.where.projectFolder', { cwd: location.cwd })
         : location.kind === 'reuse'
-          ? `Dans le worktree de revue existant (${location.cwd}, branche ${location.branch}).`
-          : `Dans un worktree jetable (${LOCATION_LABELS.managed.toLowerCase()}), branche ${branch} sur ${sha ? short(sha) : '?'} ; ton dépôt principal n’est pas touché. À nettoyer à la fin.`
+          ? t('forge.review.where.reuse', { cwd: location.cwd, branch: location.branch })
+          : t('forge.review.where.worktree', { branch: String(branch), sha: sha ? short(sha) : '?' })
   const limit = Math.min(target.files.length, MAX_REVIEW_FILES_READ)
+  const readyVars = ctx && { count: ctx.total, included: ctx.included, size: sizeLabel(ctx.bytes), max: sizeLabel(MAX_REVIEW_PASTED_BYTES) }
 
   return (
     <div className="aireview">
       <div className="mb" aria-busy={busy || prep.phase === 'loading'}>
-        <p className="hint">
-          Une session Claude s’ouvre en <b>lecture seule</b> pour expliquer et commenter ces changements ; tu poses tes questions dans la conversation.
-        </p>
+        <p className="hint">{rich('forge.review.intro', { readOnly: <b>{t('forge.review.introReadOnly')}</b> })}</p>
         <dl className="ar-facts">
-          <dt>Session</dt>
+          <dt>{t('forge.review.facts.session')}</dt>
           <dd>{reviewSessionName(target)}</dd>
-          <dt>Mode</dt>
+          <dt>{t('forge.review.facts.mode')}</dt>
           <dd>
-            <span className="chip">Plan (lecture seule)</span>
+            <span className="chip">{t('forge.review.modeChip')}</span>
           </dd>
-          <dt>Où</dt>
-          <dd>{listReady ? where : 'Lecture des worktrees du projet…'}</dd>
+          <dt>{t('forge.review.facts.where')}</dt>
+          <dd>{listReady ? where : t('forge.review.where.loading')}</dd>
         </dl>
         <label className="field" htmlFor={profileId}>
-          <span className="lbl">Profil</span>
+          <span className="lbl">{t('forge.review.profile')}</span>
           <select id={profileId} ref={selectRef} data-autofocus value={effectiveProfile} onChange={(e) => setProfile(e.target.value)} disabled={busy}>
+            {/* i18n-exempt: nom technique du profil */}
             {names.length === 0 && <option value="default">default</option>}
             {names.map((n) => (
               <option key={n} value={n}>
@@ -431,83 +440,70 @@ export function AiReviewConfirm({
           </select>
           <span className="hint">
             {profile !== null && profile !== resolved.profile
-              ? `remplace le défaut (${label(resolved.profile).long})`
+              ? t('forge.review.profile.overrides', { profile: label(resolved.profile).long })
               : resolved.source === 'project'
-                ? 'profil par défaut du projet'
+                ? t('forge.review.profile.project')
                 : resolved.source === 'recent'
-                  ? 'profil utilisé récemment dans ce projet'
-                  : 'profil par défaut'}
+                  ? t('forge.review.profile.recent')
+                  : t('forge.review.profile.default')}
           </span>
         </label>
         <div className="ar-status">
           {/* Annonce seulement le début et la fin ; le compteur n'est pas lu à chaque fichier. */}
           <p role="status">
-            {prep.phase === 'loading' && 'Préparation du contexte…'}
-            {ctx &&
-              `Contexte prêt : ${ctx.total} fichier${ctx.total > 1 ? 's' : ''}, diff de ${ctx.included} inclus, ${sizeLabel(ctx.bytes)} collés sur ${sizeLabel(MAX_REVIEW_PASTED_BYTES)} au plus${ctx.truncated ? ' (incomplet, voir ci-dessous)' : ''}.`}
+            {prep.phase === 'loading' && t('forge.review.preparing')}
+            {readyVars && (ctx?.truncated ? t('forge.review.readyIncomplete', readyVars) : t('forge.review.ready', readyVars))}
           </p>
           {prep.phase === 'loading' && (
             <span className="hint" aria-hidden="true">
-              <span className="spin" /> {readCount}/{limit} fichiers lus
+              <span className="spin" /> {t('forge.review.filesRead', { read: readCount, limit })}
             </span>
           )}
         </div>
-        {ctx && ctx.notes.length > 0 && (
-          <ul className="ar-notes" aria-label="Ce qui manque au contexte">
-            {ctx.notes.map((n) => (
-              <li key={n} className="hint warn">
-                {n}
+        {ctx && ctx.missing.length > 0 && (
+          <ul className="ar-notes" aria-label={t('forge.review.missing')}>
+            {ctx.missing.map((n) => (
+              <li key={n.kind} className="hint warn">
+                {reviewNoteLabel(n)}
               </li>
             ))}
           </ul>
         )}
         {prep.phase === 'error' && (
           <p className="inline-err" role="alert">
-            Contexte indisponible : {prep.message}
+            {t('forge.review.contextError', { error: prep.message })}
           </p>
         )}
         {'error' in instruction && (
           <p className="inline-err" role="alert">
-            Consigne « revue assistée » invalide : {instruction.error} (Réglages → Consignes).
+            {t('forge.review.instructionError', { error: instruction.error })}
           </p>
         )}
         {!deps.supported && (
           <p className="inline-err" role="alert">
-            {OLD_DAEMON}
+            {t('forge.review.oldDaemon')}
           </p>
         )}
         <details className="ar-preview">
-          <summary>Voir ce qui sera envoyé</summary>
-          <p className="lbl">Consigne tapée</p>
+          <summary>{t('forge.review.preview')}</summary>
+          <p className="lbl">{t('forge.review.preview.typed')}</p>
           <pre className="ar-pre">{'text' in instruction ? instruction.text : '—'}</pre>
-          <p className="lbl">Contenu collé (donnée, pas une consigne)</p>
+          <p className="lbl">{t('forge.review.preview.pasted')}</p>
           <pre className="ar-pre">{ctx ? ctx.pasted : '…'}</pre>
         </details>
         {error && (
           <div className="inline-err" role="alert">
             {error.kind === 'base' ? (
               <>
-                <p>
-                  Le commit {sha ? short(sha) : ''} n’est pas dans ton dépôt local (fourche ou branche jamais récupérée) : DevMaestro ne récupère rien
-                  lui-même.
-                </p>
-                {error.command && (
-                  <p>
-                    Lance-le toi-même dans {root}, puis réessaie : <code className="mono">{error.command}</code>
-                  </p>
-                )}
+                <p>{t('forge.review.error.base', { sha: sha ? short(sha) : '' })}</p>
+                {error.command && <p>{rich('forge.review.error.baseCommand', { root, command: <code className="mono">{error.command}</code> })}</p>}
               </>
             ) : error.kind === 'stale' ? (
-              <p>
-                La demande a changé depuis son ouverture (tête {sha ? short(sha) : '?'} → {short(error.sha)}) : le diff préparé n’est plus à jour. Aucune
-                session n’a été lancée.
-              </p>
+              <p>{t('forge.review.error.stale', { old: sha ? short(sha) : '?', new: short(error.sha) })}</p>
             ) : error.kind === 'uncertain' ? (
-              <p>
-                Lancement sans réponse ({error.message}) : {UNCERTAIN_TEXT} des sessions et des worktrees avant de relancer.
-              </p>
+              <p>{t('forge.review.error.uncertain', { error: error.message, uncertain: uncertainText() })}</p>
             ) : (
-              <p>Lancement impossible : {error.message}</p>
+              <p>{t('forge.review.error.other', { error: error.message })}</p>
             )}
           </div>
         )}
@@ -515,20 +511,20 @@ export function AiReviewConfirm({
       <div className="mf">
         <span style={{ marginRight: 'auto' }} />
         <button type="button" className="btn ghost" onClick={onCancel} disabled={busy}>
-          Annuler
+          {t('forge.review.cancel')}
         </button>
         {error?.kind === 'base' && target.kind === 'pull' && !noWorktree && (
           <button type="button" className="btn" disabled={busy} onClick={() => (setNoWorktree(true), setError(null))}>
-            Lancer sans worktree…
+            {t('forge.review.noWorktree')}
           </button>
         )}
         {error?.kind === 'stale' ? (
           <button type="button" className="btn pri" disabled={busy} onClick={() => reloadPull(error.fresh)}>
-            Recharger la demande
+            {t('forge.review.reload')}
           </button>
         ) : (
           <button type="button" className="btn pri" disabled={!ready || busy} onClick={() => void launch()}>
-            {busy ? 'Lancement…' : error ? 'Réessayer' : 'Lancer la revue'}
+            {busy ? t('forge.review.launching') : error ? t('forge.review.retry') : t('forge.review.launch')}
           </button>
         )}
       </div>

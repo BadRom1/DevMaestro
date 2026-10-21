@@ -8,6 +8,7 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 
 import { reportRendererError } from '../errorReport'
+import { t } from '../../../shared/i18n'
 
 interface State {
   error: Error | null
@@ -21,7 +22,9 @@ export class ViewBoundary extends Component<{ children: ReactNode; label: string
   }
 
   override componentDidCatch(error: unknown, info: ErrorInfo): void {
+    // i18n-exempt: journal technique
     const where = this.props.kind === 'dialogue' ? `du dialogue « ${this.props.label} »` : `de l’onglet ${this.props.label}`
+    // i18n-exempt: journal technique
     console.error(`[devmaestro] affichage ${where} :`, error, info.componentStack)
     reportRendererError(`affichage ${where}`, error, info.componentStack)
   }
@@ -31,13 +34,15 @@ export class ViewBoundary extends Component<{ children: ReactNode; label: string
     const dialog = this.props.kind === 'dialogue'
     return (
       <div className={dialog ? 'mb boundary' : 'diffpane empty'} role="alert">
-        <b>Affichage impossible</b>
+        <b>{t('shell.viewBoundary.title')}</b>
         <span className="hint">
-          {dialog ? `Le dialogue « ${this.props.label} »` : `L’onglet ${this.props.label}`} a rencontré une erreur :{' '}
+          {dialog
+            ? t('shell.viewBoundary.dialogError', { label: this.props.label })
+            : t('shell.viewBoundary.tabError', { label: this.props.label })}{' '}
           {this.state.error.message}
         </span>
         <button className="btn sm" autoFocus onClick={() => this.setState({ error: null })}>
-          Réessayer
+          {t('shell.viewBoundary.retry')}
         </button>
       </div>
     )

@@ -38,6 +38,7 @@ import {
   type DeliveryAction,
 } from '../state/delivery'
 import type { RunFailure } from '../../../shared/protocol'
+import { useI18n, useT } from '../i18n'
 import { useSettings } from '../settings'
 import { LinkDialog } from './LinkDialog'
 import { Modal } from './Modal'
@@ -117,6 +118,7 @@ export function DeliveryBar({
   /** La pastille « PR #n » de l'en-tête montre déjà la CI de la demande. */
   hidePullCi: boolean
 }) {
+  const t = useT()
   const { settings } = useSettings()
   const pd = projectDelivery(settings.delivery, projectKey)
   const { ci, old, reload } = useSessionCi(session, pd.mode, enabled)
@@ -133,6 +135,7 @@ export function DeliveryBar({
   const primary = primaryAction(pd.mode)
   const secondary: DeliveryAction = primary === 'pr' ? 'merge' : 'pr'
   const pullNumber = delivery?.pull?.number ?? null
+  const modeName = pd.mode === 'trunk' ? 'trunk-based' : 'PR' // i18n-exempt: noms de modes techniques
   const button = (a: DeliveryAction, pri: boolean) => {
     const blocker = deliveryBlocker(session, a, state, pullNumber)
     return (
@@ -141,7 +144,7 @@ export function DeliveryBar({
         type="button"
         className={`btn sm${pri ? ' pri' : ' ghost'}`}
         disabled={blocker !== null}
-        title={blocker ?? `La consigne sera montrée avant d’être tapée dans la session (mode ${pd.mode === 'trunk' ? 'trunk-based' : 'PR'} du projet).`}
+        title={blocker ?? t('forge.delivery.bar.buttonTitle', { mode: modeName })}
         onClick={() => setConfirm(a)}
       >
         {actionLabel(a, base)}…
@@ -149,12 +152,12 @@ export function DeliveryBar({
     )
   }
   return (
-    <div className="sh-deliv" role="group" aria-label="Livraison">
+    <div className="sh-deliv" role="group" aria-label={t('forge.delivery.bar.label')}>
       {badge && <ForgeBadge b={badge} className="sm" />}
       {ciB && <ForgeBadge b={ciB} className="sm" />}
       {failed.length > 0 && (
         <button type="button" className="btn sm ghost" onClick={() => setFailure(true)}>
-          Voir l’échec…
+          {t('forge.delivery.bar.seeFailure')}
         </button>
       )}
       <span className="sh-deliv-acts">
@@ -200,6 +203,7 @@ function DeliveryConfirm({
   onClose: () => void
   onSent: () => void
 }) {
+  const { t, rich } = useI18n()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const id = useId()
@@ -213,27 +217,26 @@ function DeliveryConfirm({
       onSent()
       onClose()
     } catch (e) {
-      setError(`Envoi impossible : ${errorText(e)}`)
+      setError(t('forge.delivery.sendFailed', { error: errorText(e) }))
     } finally {
       setBusy(false)
     }
   }
   return (
-    <Modal title={`${actionLabel(action, base)} ?`} onClose={onClose} width={640} busy={busy}>
+    <Modal title={t('forge.delivery.confirm.title', { action: actionLabel(action, base) })} onClose={onClose} width={640} busy={busy}>
       <div className="mb">
         <p style={{ margin: 0 }}>
-          Cette consigne sera <b>tapée</b> dans la session, comme si tu l’écrivais. Claude fera la livraison lui-même, avec ses
-          demandes de permission habituelles ; l’app n’écrit rien sur la forge.
+          {rich('forge.delivery.confirm.intro', { typed: <b>{t('forge.delivery.confirm.typed')}</b> })}
         </p>
         {'text' in prompt ? (
           <>
             <span className="lbl" id={`${id}-l`}>
-              Consigne envoyée
+              {t('forge.delivery.confirm.sentLabel')}
             </span>
             <pre className="deliv-prompt mono" aria-labelledby={`${id}-l`}>
               {prompt.text}
             </pre>
-            <span className="hint">Modèle : {ORIGIN_LABELS[origin]} ; modifiable dans Réglages → Consignes (globalement ou par projet).</span>
+            <span className="hint">{t('forge.delivery.confirm.templateHint', { origin: ORIGIN_LABELS[origin] })}</span>
           </>
         ) : (
           <p className="inline-err" role="alert">
@@ -250,10 +253,10 @@ function DeliveryConfirm({
           <span style={{ marginRight: 'auto' }} />
         )}
         <button className="btn ghost" onClick={onClose} data-autofocus disabled={busy}>
-          Annuler
+          {t('forge.delivery.confirm.cancel')}
         </button>
         <button className="btn pri" disabled={busy || !('text' in prompt)} onClick={() => void send()}>
-          {busy ? 'Envoi…' : 'Envoyer à Claude'}
+          {busy ? t('forge.delivery.sending') : t('forge.delivery.confirm.send')}
         </button>
       </div>
     </Modal>
@@ -276,6 +279,7 @@ function CiFailureDialog({
   template: string
   onClose: () => void
 }) {
+  const t = useT()
   const [runId, setRunId] = useState(runs[0]!.id)
   const [state, setState] = useState<FailureState>({ phase: 'loading' })
   const [busy, setBusy] = useState(false)
@@ -294,16 +298,16 @@ function CiFailureDialog({
     }
   }, [root, runId])
   const blocker = !session.alive
-    ? 'La session ne tourne pas : reprends-la pour lui envoyer l’échec.'
+    ? t('forge.delivery.failure.notAlive')
     : session.status.state === 'waiting' || session.pending.length > 0
-      ? 'Réponds d’abord à la demande en attente dans la session.'
+      ? t('forge.delivery.blocker.pending')
       : null
   /** Consigne tapée : le modèle des réglages, rendu (jamais l'`instruction` du démon, ni un texte de la forge). */
   let instruction: { text: string } | { error: string }
   try {
     instruction = { text: renderPrompt('ciFailure', template, { branch: session.branch ?? null, run: runId }) }
   } catch (e) {
-    instruction = { error: `Modèle de consigne invalide : ${(e as Error).message} (à corriger dans Réglages → Consignes).` }
+    instruction = { error: t('forge.delivery.invalidTemplate', { message: (e as Error).message }) }
   }
   async function send(f: RunFailure) {
     if (!f.excerpt || !('text' in instruction)) return
@@ -313,18 +317,18 @@ function CiFailureDialog({
       await call('sessions.sendPrompt', { id: session.id, instruction: instruction.text, pasted: f.excerpt })
       onClose()
     } catch (e) {
-      setSendError(`Envoi impossible : ${errorText(e)}`)
+      setSendError(t('forge.delivery.sendFailed', { error: errorText(e) }))
     } finally {
       setBusy(false)
     }
   }
   const f = state.phase === 'ready' ? state.f : null
   return (
-    <Modal title="Échec de la CI" onClose={onClose} width={820} busy={busy}>
+    <Modal title={t('forge.delivery.failure.title')} onClose={onClose} width={820} busy={busy}>
       <div className="mb">
         {runs.length > 1 && (
           <label className="wtrow">
-            <span>Exécution</span>
+            <span>{t('forge.delivery.failure.run')}</span>
             <select value={runId} onChange={(e) => setRunId(Number(e.target.value))}>
               {runs.map((r) => (
                 <option key={r.id} value={r.id}>
@@ -336,12 +340,12 @@ function CiFailureDialog({
         )}
         {state.phase === 'loading' && (
           <p className="hint" role="status">
-            <span className="spin" aria-hidden="true" /> Lecture des journaux…
+            <span className="spin" aria-hidden="true" /> {t('forge.delivery.failure.loading')}
           </p>
         )}
         {state.phase === 'error' && (
           <p className="inline-err" role="alert">
-            Échec illisible : {state.message}
+            {t('forge.delivery.failure.unreadable', { error: state.message })}
           </p>
         )}
         {f && (
@@ -352,29 +356,36 @@ function CiFailureDialog({
                 <>
                   {' · '}
                   <button type="button" className="linkish" onClick={() => setLink(f.run.url)}>
-                    Voir sur la forge
+                    {t('forge.delivery.failure.viewOnForge')}
                   </button>
                 </>
               )}
             </p>
             {f.in_progress ? (
-              <p className="hint">L’exécution est encore en cours : la forge ne donne ses journaux qu’à la fin.</p>
+              <p className="hint">{t('forge.delivery.failure.inProgress')}</p>
             ) : (
               <>
-                <span className="lbl">Jobs en échec</span>
+                <span className="lbl">{t('forge.delivery.failure.failedJobs')}</span>
                 {f.failed_jobs.length === 0 ? (
-                  <p className="hint">Aucun job en échec rendu par la forge.</p>
+                  <p className="hint">{t('forge.delivery.failure.noFailedJobs')}</p>
                 ) : (
                   <ul className="ci-jobs">
                     {f.failed_jobs.map((j) => (
                       <li key={j.name}>
                         <span aria-hidden="true">✗</span> <b>{j.name}</b>
-                        {j.failed_steps.length > 0 && <span className="hint"> — étape « {j.failed_steps.join(' », « ')} »</span>}
+                        {j.failed_steps.length > 0 && (
+                          <span className="hint">
+                            {t('forge.delivery.failure.steps', {
+                              count: j.failed_steps.length,
+                              steps: j.failed_steps.join(t('forge.delivery.failure.stepSeparator')),
+                            })}
+                          </span>
+                        )}
                       </li>
                     ))}
                   </ul>
                 )}
-                <span className="lbl">Consigne tapée</span>
+                <span className="lbl">{t('forge.delivery.failure.typedInstruction')}</span>
                 {'text' in instruction ? (
                   <pre className="deliv-prompt mono">{instruction.text}</pre>
                 ) : (
@@ -383,13 +394,13 @@ function CiFailureDialog({
                   </p>
                 )}
                 <span className="lbl" id={`${id}-x`}>
-                  Extrait collé à Claude, comme donnée (contenu de la forge, non fiable)
+                  {t('forge.delivery.failure.excerptLabel')}
                 </span>
                 <pre className="ci-excerpt mono" aria-labelledby={`${id}-x`} tabIndex={0}>
                   {f.excerpt}
                 </pre>
                 {f.truncated && (
-                  <span className="hint">Journaux coupés : la fin de chaque job est gardée (64 Kio par job, 256 Kio en tout).</span>
+                  <span className="hint">{t('forge.delivery.failure.truncated')}</span>
                 )}
               </>
             )}
@@ -407,7 +418,7 @@ function CiFailureDialog({
           </span>
         )}
         <button className="btn ghost" onClick={onClose} data-autofocus disabled={busy}>
-          Fermer
+          {t('forge.delivery.failure.close')}
         </button>
         <button
           className="btn pri"
@@ -415,7 +426,7 @@ function CiFailureDialog({
           title={blocker ?? undefined}
           onClick={() => f && void send(f)}
         >
-          {busy ? 'Envoi…' : 'Envoyer l’échec à Claude'}
+          {busy ? t('forge.delivery.sending') : t('forge.delivery.failure.send')}
         </button>
       </div>
       {link && <LinkDialog url={link} onClose={() => setLink(null)} />}

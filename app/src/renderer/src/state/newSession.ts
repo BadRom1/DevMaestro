@@ -4,6 +4,7 @@
  * projet, sessions à reprendre. Calculs purs, testables sans DOM.
  */
 import type { PastSession, ProjectInfo, Session } from '../../../shared/protocol'
+import { getLocale, t } from '../../../shared/i18n'
 import { rootFromCommonDir } from '../../../shared/worktrees'
 import { basename, resumeBlock, tildify } from './format'
 import { folderName, pastTime } from './projects'
@@ -179,7 +180,7 @@ export function buildProjectChoices(args: {
     const { dirAt: _d, ...rest } = c
     out.push({ ...rest, dirs })
   }
-  return out.sort((a, b) => b.latest - a.latest || a.name.localeCompare(b.name, 'fr'))
+  return out.sort((a, b) => b.latest - a.latest || a.name.localeCompare(b.name, getLocale()))
 }
 
 export type ProfileSource = 'project' | 'recent' | 'global'
@@ -271,9 +272,11 @@ export function resumeCandidates(args: {
 }
 
 /** Alias de modèles de Claude Code (le CLI choisit la version) ; vide = celui du profil. */
-export const MODEL_ALIASES: readonly { value: string; label: string }[] = [
-  { value: '', label: 'Par défaut du profil' },
-  { value: 'opus', label: 'Opus' },
-  { value: 'sonnet', label: 'Sonnet' },
-  { value: 'haiku', label: 'Haiku' },
-]
+export function modelAliases(): readonly { value: string; label: string }[] {
+  return [
+    { value: '', label: t('sessions.new.modelDefault') },
+    { value: 'opus', label: 'Opus' },
+    { value: 'sonnet', label: 'Sonnet' },
+    { value: 'haiku', label: 'Haiku' },
+  ]
+}

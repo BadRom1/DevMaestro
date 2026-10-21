@@ -163,3 +163,26 @@ describe('changement de mode', () => {
     expect(run([{ type: 'request', target: 'auto', mode: 'default', now: T0 }], p)).toBe(p)
   })
 })
+
+describe('lot 20 : erreur produite par l’app, en anglais', () => {
+  it('pas de marque « orchd message (in French) » quand data.origin = app', async () => {
+    const { setLocale } = await import('../src/shared/i18n')
+    setLocale('en')
+    try {
+      const s = run([
+        { type: 'request', target: 'plan', mode: 'default', now: T0 },
+        { type: 'failed', code: ErrorCode.InvalidParams, message: 'parameters rejected by the app (details in the app log)', data: { origin: 'app' }, mode: 'default', now: T0 + 1 },
+      ])
+      const err = (x: ModeSwitch) => ('error' in x ? x.error : null)
+      expect(err(s)).toContain('parameters rejected by the app (details in the app log)')
+      expect(err(s)).not.toContain('orchd')
+      const d = run([
+        { type: 'request', target: 'plan', mode: 'default', now: T0 },
+        { type: 'failed', code: ErrorCode.InvalidParams, message: 'base inconnue', mode: 'default', now: T0 + 1 },
+      ])
+      expect(err(d)).toContain('orchd message (in French): base inconnue')
+    } finally {
+      setLocale('fr')
+    }
+  })
+})

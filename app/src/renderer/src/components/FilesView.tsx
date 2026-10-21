@@ -14,12 +14,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from 'react'
 
 import { ErrorCode, type DiffFile, type DiffSummary, type FileContent, type FileEntry, type Session } from '../../../shared/protocol'
+import { t as tGlobal } from '../../../shared/i18n'
 import { CallError, call, errorCode, errorText } from '../api'
+import { useI18n } from '../i18n'
 import { awaitingAnswer } from '../state/status'
 import { outcomeUncertain } from '../state/errors'
 import { canEdit, conflictVersion, editReducer, editable, eolStyle, expectedFor, isVersion, normalizeEol, notEditableReason, type EditState } from '../state/fileEdit'
 import { guardLeave, setUnsaved, subscribeLeave, unsavedVersion } from '../state/unsaved'
-import { STATUS_LABELS } from '../state/diff'
+import { statusLabel } from '../state/diff'
 import {
   ancestorDirs,
   defaultFile,
@@ -82,19 +84,25 @@ export function forgetFilesMemory(id: string): void {
   memory.delete(id)
 }
 
-export const OLD_DAEMON_FILES = 'Le démon ne sait pas encore lister les fichiers : mets orchd à jour.'
-/** « Mentionner » et « Envoyer la revue » ramènent au terminal : pas pendant une édition modifiée. */
-const UNSAVED_BLOCKS = 'Enregistre ou annule d’abord tes modifications du fichier'
-export const OLD_DAEMON_WRITE = 'Le démon ne sait pas encore enregistrer les fichiers : mets orchd à jour.'
-
+/** Erreur de `files.*` : démon trop ancien (méthode inconnue), ou « <what> : <détail> » (langue courante). */
 function failure(e: unknown, what: string): string {
-  return errorCode(e) === ErrorCode.MethodNotFound ? OLD_DAEMON_FILES : `${what} : ${errorText(e)}`
+  return errorCode(e) === ErrorCode.MethodNotFound ? tGlobal('files.view.oldDaemonList') : tGlobal('files.errorWith', { what, text: errorText(e) })
 }
 
 function icon(r: Pick<TreeRow, 'kind' | 'path' | 'expanded'>): string {
   if (r.kind === 'dir') return r.expanded ? '▾' : '▸'
   if (r.kind === 'symlink') return '↪'
   return isMarkdown(r.path) ? '¶' : '·'
+}
+
+/** « Ctrl+X » en touches de clavier (aide de l'éditeur). */
+function ctrlKey(k: string) {
+  return (
+    <>
+      {/* i18n-exempt: nom de touche */}
+      <kbd>Ctrl</kbd>+<kbd>{k}</kbd>
+    </>
+  )
 }
 
 interface PendingSelection {
@@ -140,6 +148,9 @@ export function FilesView({
   /** Lien http(s) : confirmation puis navigateur (dialogue existant). */
   onLink: (url: string) => void
 }) {
+  const { t, rich } = useI18n()
+  /** « Mentionner » et « Envoyer la revue » ramènent au terminal : pas pendant une édition modifiée. */
+  const unsavedBlocks = t('files.view.unsavedBlocks')
   const memo = memoryFor(session.id)
   const [cache, setCache] = useState<DirCache>(memo.cache)
   const [open, setOpen] = useState<ReadonlySet<string>>(memo.open)
@@ -232,8 +243,8 @@ export function FilesView({
           const r = await call('files.list', { id: session.id, ...(dir ? { path: dir } : {}) })
           if (dirSeq.current.get(dir) !== seq) return null
           setCache((c) => ({ ...c, [dir]: r.entries }))
-          setTruncated((t) => {
-            const n = new Set(t)
+          setTruncated((prev) => {
+            const n = new Set(prev)
             if (r.truncated) n.add(dir)
             else n.delete(dir)
             return n
@@ -242,7 +253,7 @@ export function FilesView({
           setTreeError(null)
           return r.entries
         } catch (e) {
-          if (dirSeq.current.get(dir) === seq) setTreeError(failure(e, 'Liste des fichiers indisponible'))
+          if (dirSeq.current.get(dir) === seq) setTreeError(failure(e, tGlobal('files.view.listUnavailable')))
           return null
         } finally {
           inFlight.current.delete(dir)
@@ -279,10 +290,10 @@ export function FilesView({
   openRef.current = open
   useEffect(() => {
     if (diffVersion === 0) return
-    const t = setTimeout(() => {
+    const timer = setTimeout(() => {
       for (const d of ['', ...openRef.current]) void loadDir(d)
     }, TREE_REFRESH_MS)
-    return () => clearTimeout(t)
+    return () => clearTimeout(timer)
   }, [diffVersion, loadDir])
 
   // Contenu du fichier choisi.
@@ -297,7 +308,7 @@ export function FilesView({
     setContent(null)
     call('files.read', { id: session.id, path: file })
       .then((c) => alive && gen === writeGen.current && setContent(c))
-      .catch((e: unknown) => alive && setViewError(failure(e, 'Lecture impossible')))
+      .catch((e: unknown) => alive && setViewError(failure(e, tGlobal('files.view.readFailed'))))
     return () => {
       alive = false
     }
@@ -309,7 +320,7 @@ export function FilesView({
   useEffect(() => {
     if (diffVersion === 0 || !file || !changedRef.current.includes(file)) return
     let alive = true
-    const t = setTimeout(() => {
+    const timer = setTimeout(() => {
       const scroll = body.current?.scrollTop ?? 0
       const gen = writeGen.current
       call('files.read', { id: session.id, path: file })
@@ -333,7 +344,7 @@ export function FilesView({
     }, TREE_REFRESH_MS)
     return () => {
       alive = false
-      clearTimeout(t)
+      clearTimeout(timer)
     }
   }, [diffVersion])
 
@@ -483,7 +494,7 @@ export function FilesView({
       then?.()
       return
     }
-    guardLeave(session.id, 'ouvrir un autre fichier', () => {
+    guardLeave(session.id, t('files.leave.openOther'), () => {
       if (editRef.current) dispatchEdit({ type: 'cancel' })
       restoreScroll.current = null
       setFile(path)
@@ -515,7 +526,7 @@ export function FilesView({
         })
       })
       .catch((e: unknown) => {
-        if (mounted.current && editRef.current?.path === path) dispatchEdit({ type: 'currentFailed', error: `Version actuelle illisible : ${errorText(e)}` })
+        if (mounted.current && editRef.current?.path === path) dispatchEdit({ type: 'currentFailed', error: t('files.view.currentUnreadable', { text: errorText(e) }) })
       })
   }
 
@@ -553,14 +564,14 @@ export function FilesView({
         // Fichier supprimé : rien à relire.
         if (current !== null) loadCurrent(e.path)
       } else if (code === ErrorCode.MethodNotFound) {
-        dispatchEdit({ type: 'failed', error: OLD_DAEMON_WRITE })
+        dispatchEdit({ type: 'failed', error: t('files.view.oldDaemonWrite') })
       } else if (outcomeUncertain(code)) {
         dispatchEdit({
           type: 'failed',
-          error: `Enregistrement incertain : ${errorText(err)}. Il a peut-être abouti : enregistre de nouveau pour vérifier (un conflit sera signalé s’il a abouti).`,
+          error: t('files.view.saveUncertain', { text: errorText(err) }),
         })
       } else {
-        dispatchEdit({ type: 'failed', error: `Enregistrement impossible : ${errorText(err)}` })
+        dispatchEdit({ type: 'failed', error: t('files.view.saveFailed', { text: errorText(err) }) })
       }
     }
   }
@@ -582,7 +593,7 @@ export function FilesView({
       dispatchEdit({ type: 'reload', content: c.content, version: c.version })
       editor.current?.focus()
     } catch (err) {
-      if (mounted.current) dispatchEdit({ type: 'currentFailed', error: `Rechargement impossible : ${errorText(err)}` })
+      if (mounted.current) dispatchEdit({ type: 'currentFailed', error: t('files.view.reloadFailed', { text: errorText(err) }) })
     }
   }
 
@@ -600,16 +611,16 @@ export function FilesView({
 
   /** Fichier supprimé depuis son ouverture, « Fermer » : modifications abandonnées (confirmation), plus d'aperçu. */
   function closeDeleted() {
-    guardLeave(session.id, 'fermer le fichier supprimé', () => {
+    guardLeave(session.id, t('files.leave.closeDeleted'), () => {
       dispatchEdit({ type: 'cancel' })
       setContent(null)
-      setViewError('Le fichier a été supprimé depuis son ouverture.')
+      setViewError(t('files.view.deletedSinceOpen'))
     })
   }
 
   /** « Annuler les modifications » : retour en lecture (confirmation s'il y a des modifications). */
   function cancelEdit() {
-    guardLeave(session.id, 'annuler les modifications', () => {
+    guardLeave(session.id, t('files.leave.cancelEdit'), () => {
       dispatchEdit({ type: 'cancel' })
       requestAnimationFrame(() => body.current?.focus())
     })
@@ -619,10 +630,10 @@ export function FilesView({
     const a = (e.target as HTMLElement).closest('a')
     if (!a || !file) return
     e.preventDefault()
-    const t = classifyLink(a.getAttribute('href'), file)
-    if (t.kind === 'external') onLink(t.url)
-    else if (t.kind === 'file') openFile(t.path, t.anchor)
-    else if (t.kind === 'anchor') document.getElementById(t.id)?.scrollIntoView({ block: 'start' })
+    const link = classifyLink(a.getAttribute('href'), file)
+    if (link.kind === 'external') onLink(link.url)
+    else if (link.kind === 'file') openFile(link.path, link.anchor)
+    else if (link.kind === 'anchor') document.getElementById(link.id)?.scrollIntoView({ block: 'start' })
   }
 
   async function mention() {
@@ -630,7 +641,7 @@ export function FilesView({
     setMentionError(null)
     const m = mentionFor(file)
     if (!m.ok) {
-      setMentionError(`Mention impossible : ${m.error}.`)
+      setMentionError(t('files.view.mentionRefused', { error: m.error }))
       return
     }
     try {
@@ -639,8 +650,8 @@ export function FilesView({
     } catch (e) {
       setMentionError(
         errorCode(e) === ErrorCode.MethodNotFound
-          ? 'Le démon ne sait pas encore recevoir de texte : mets orchd à jour.'
-          : `Mention impossible : ${errorText(e)}`,
+          ? t('files.view.oldDaemonInput')
+          : t('files.view.mentionFailed', { text: errorText(e) }),
       )
     }
   }
@@ -666,24 +677,24 @@ export function FilesView({
 
   return (
     <div className={`fpane${showToc ? '' : ' notoc'}`}>
-      <nav className="ftree" aria-label="Fichiers de la session">
+      <nav className="ftree" aria-label={t('files.view.treeLabel')}>
         <input
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filtrer les fichiers…"
-          aria-label="Filtrer les fichiers"
+          placeholder={t('files.view.filterPlaceholder')}
+          aria-label={t('files.view.filterLabel')}
           aria-describedby={filter ? 'ffilter-hint' : undefined}
         />
         {filter && (
           <span className="hint pad" id="ffilter-hint">
-            Dans les dossiers déjà ouverts et les fichiers modifiés.
+            {t('files.view.filterHint')}
           </span>
         )}
         {treeError && (
           <p className="inline-err pad" role="alert">
             {treeError}
             <button className="btn sm" onClick={() => void loadDir('')}>
-              Réessayer
+              {t('files.retry')}
             </button>
           </p>
         )}
@@ -695,7 +706,7 @@ export function FilesView({
                 style={{ paddingLeft: 8 + r.depth * 12 }}
                 aria-current={r.path === file}
                 aria-expanded={r.kind === 'dir' ? r.expanded : undefined}
-                aria-label={`${r.name}${r.kind === 'dir' ? ', dossier' : ''}${r.changed ? `, ${STATUS_LABELS[r.changed]}` : ''}${r.changedInside ? ', contient des fichiers modifiés' : ''}`}
+                aria-label={`${r.name}${r.kind === 'dir' ? t('files.tree.dirSuffix') : ''}${r.changed ? `, ${statusLabel(r.changed)}` : ''}${r.changedInside ? t('files.tree.changedInsideSuffix') : ''}`}
                 onClick={() => toggle(r)}
                 title={r.path}
               >
@@ -714,12 +725,12 @@ export function FilesView({
                   </span>
                 )}
               </button>
-              {r.kind === 'dir' && r.expanded && truncated.has(r.path) && <span className="hint pad">Dossier tronqué (2 000 entrées au plus).</span>}
+              {r.kind === 'dir' && r.expanded && truncated.has(r.path) && <span className="hint pad">{t('files.tree.dirTruncated')}</span>}
             </li>
           ))}
-          {filter && rows.length === 0 && <li className="hint pad">Aucun fichier.</li>}
+          {filter && rows.length === 0 && <li className="hint pad">{t('files.tree.noFile')}</li>}
         </ul>
-        {truncated.has('') && <p className="hint pad">Racine tronquée (2 000 entrées au plus).</p>}
+        {truncated.has('') && <p className="hint pad">{t('files.tree.rootTruncated')}</p>}
       </nav>
       <div className="fview" onKeyDown={onViewKeyDown}>
         <div className="fhead">
@@ -733,21 +744,21 @@ export function FilesView({
                 </span>
               ))}
           </span>
-          {changed && <span className={`chip ${changed === 'A' ? 'ok' : 'pend'}`}>{STATUS_LABELS[changed]} dans la session</span>}
+          {changed && <span className={`chip ${changed === 'A' ? 'ok' : 'pend'}`}>{t('files.view.changedInSession', { status: statusLabel(changed) })}</span>}
           <span className="acts">
             {file && isMarkdown(file) && (
-              <div className="seg" role="group" aria-label="Affichage du Markdown">
-                <button aria-pressed={!raw} onClick={() => setRaw(false)} disabled={!!edit} title={edit ? 'Pendant l’édition, le Markdown reste en source' : undefined}>
-                  Rendu
+              <div className="seg" role="group" aria-label={t('files.view.markdownMode')}>
+                <button aria-pressed={!raw} onClick={() => setRaw(false)} disabled={!!edit} title={edit ? t('files.view.markdownSourceWhileEditing') : undefined}>
+                  {t('files.view.rendered')}
                 </button>
                 <button aria-pressed={raw} onClick={() => setRaw(true)} disabled={!!edit}>
-                  Source
+                  {t('files.view.source')}
                 </button>
               </div>
             )}
             {changed && file && (
               <button className="btn sm" onClick={() => onShowDiff(file)}>
-                Voir le diff
+                {t('files.view.showDiff')}
               </button>
             )}
             {editPossible && (
@@ -755,29 +766,29 @@ export function FilesView({
                 className="btn sm"
                 disabled={mixedEol}
                 onClick={beginEdit}
-                title={mixedEol ? 'Fins de ligne mélangées (LF et CRLF) : l’éditeur ne saurait pas les conserver' : 'Modifier ce fichier dans l’app'}
+                title={mixedEol ? t('files.view.mixedEol') : t('files.view.editTitle')}
               >
-                Modifier
+                {t('files.view.edit')}
               </button>
             )}
             {refused && (
-              <button className="btn sm" disabled title={refused} aria-label={`Modifier (impossible : ${refused})`}>
-                Modifier
+              <button className="btn sm" disabled title={refused} aria-label={t('files.view.editRefused', { reason: refused })}>
+                {t('files.view.edit')}
               </button>
             )}
             {edit && (
               <>
                 {edit.dirty && (
                   <span className="chip pend" role="status">
-                    Modifié, non enregistré
+                    {t('files.view.dirty')}
                   </span>
                 )}
                 <button className="btn sm ghost" onClick={cancelEdit} disabled={busy}>
-                  Annuler les modifications
+                  {t('files.view.cancelEdit')}
                 </button>
                 {edit.phase !== 'conflict' && edit.phase !== 'confirmOverwrite' && (
-                  <button className="btn sm pri" onClick={() => void save()} disabled={busy} aria-keyshortcuts="Control+S" title="Enregistrer (Ctrl+S)">
-                    {busy ? 'Enregistrement…' : 'Enregistrer'}
+                  <button className="btn sm pri" onClick={() => void save()} disabled={busy} aria-keyshortcuts="Control+S" title={t('files.view.saveTitle')}>
+                    {busy ? t('files.view.saving') : t('files.view.save')}
                   </button>
                 )}
               </>
@@ -788,15 +799,15 @@ export function FilesView({
               onClick={() => void mention()}
               title={
                 edit?.dirty
-                  ? UNSAVED_BLOCKS
+                  ? unsavedBlocks
                   : !session.alive
-                  ? 'La session ne tourne pas'
+                  ? t('files.view.notRunning')
                   : waiting
-                    ? 'Réponds d’abord à la demande en attente : le texte irait dans son dialogue'
-                    : 'Tape « @fichier » dans le message de la session'
+                    ? t('files.view.answerFirst')
+                    : t('files.view.mentionTitle')
               }
             >
-              Mentionner à Claude
+              {t('files.view.mention')}
             </button>
           </span>
           {mentionError && (
@@ -806,25 +817,25 @@ export function FilesView({
           )}
           {!edit && tooBigToColor && (
             <span className="hint">
-              {rendered ? 'Blocs de code non colorés' : 'Coloration désactivée'} : fichier de plus de 200 Kio ou 5 000 lignes.
+              {t('files.view.tooBigToColor', { what: rendered ? t('files.view.codeBlocksNotColored') : t('files.view.coloringOff') })}
             </span>
           )}
         </div>
-        <div className="fbody" ref={body} tabIndex={0} aria-label={file ? `Contenu de ${file}` : 'Contenu'} onMouseDown={onBodyDown}>
-          {!file && <p className="empty">Choisis un fichier à gauche.</p>}
+        <div className="fbody" ref={body} tabIndex={0} aria-label={file ? t('files.view.contentOf', { path: file }) : t('files.view.content')} onMouseDown={onBodyDown}>
+          {!file && <p className="empty">{t('files.view.pickFile')}</p>}
           {viewError && (
             <p className="inline-err pad" role="alert">
               {viewError}
             </p>
           )}
-          {file && !content && !viewError && <p className="empty">Chargement…</p>}
-          {content?.binary && <p className="empty">Fichier binaire : pas d’aperçu.</p>}
-          {content?.too_large && <p className="empty">Fichier trop volumineux pour être affiché (2 Mio au plus).</p>}
+          {file && !content && !viewError && <p className="empty">{t('files.loading')}</p>}
+          {content?.binary && <p className="empty">{t('files.view.binary')}</p>}
+          {content?.too_large && <p className="empty">{t('files.view.tooLarge')}</p>}
           {edit && file && edit.path === file ? (
             <div className="fedit">
               {edit.phase === 'editing' && edit.diskChanged && (
                 <p className="ebanner info" role="status">
-                  Le fichier a changé sur le disque depuis son ouverture (sans doute Claude) : l’enregistrement te le signalera.
+                  {t('files.view.diskChanged')}
                 </p>
               )}
               {edit.error && (
@@ -837,56 +848,56 @@ export function FilesView({
                   <p>
                     <b>
                       {edit.conflict.version === null
-                        ? 'Le fichier a été supprimé depuis son ouverture.'
-                        : 'Le fichier a été modifié (sans doute par Claude) depuis son ouverture.'}
+                        ? t('files.view.deletedSinceOpen')
+                        : t('files.view.modifiedSinceOpen')}
                     </b>{' '}
-                    Tes modifications ne sont pas enregistrées.
+                    {t('files.view.notSaved')}
                   </p>
                   {edit.conflict.loadError && <p className="inline-err">{edit.conflict.loadError}</p>}
                   {edit.phase === 'conflict' && edit.conflict.version === null ? (
                     <div className="eacts">
                       <button className="btn sm" onClick={() => dispatchEdit({ type: 'askOverwrite' })}>
-                        Le recréer
+                        {t('files.view.recreate')}
                       </button>
                       <button className="btn sm" onClick={closeDeleted}>
-                        Fermer
+                        {t('files.close')}
                       </button>
                     </div>
                   ) : edit.phase === 'conflict' ? (
                     <div className="eacts">
                       <button className="btn sm" onClick={() => setDiffOf({ mine: editor.current?.text() ?? '' })}>
-                        Voir les différences
+                        {t('files.view.showDifferences')}
                       </button>
                       <button className="btn sm" onClick={() => void reload()}>
-                        Recharger (perdre mes modifications)
+                        {t('files.view.reloadLose')}
                       </button>
                       <button
                         className="btn sm danger"
                         disabled={edit.conflict.version === undefined}
-                        title={edit.conflict.version === undefined ? 'Version actuelle encore inconnue' : undefined}
+                        title={edit.conflict.version === undefined ? t('files.view.currentUnknown') : undefined}
                         onClick={() => dispatchEdit({ type: 'askOverwrite' })}
                       >
-                        Écraser quand même
+                        {t('files.view.overwriteAnyway')}
                       </button>
                     </div>
                   ) : (
                     <div className="eacts">
                       <span>
                         {edit.conflict.version === null
-                          ? 'Recréer le fichier avec ta version ?'
-                          : 'Remplacer la version actuelle par la tienne ? Les changements faits sur le disque depuis l’ouverture seront perdus.'}
+                          ? t('files.view.confirmRecreate')
+                          : t('files.view.confirmOverwrite')}
                       </span>
                       <button className="btn sm" autoFocus disabled={edit.phase === 'overwriting'} onClick={() => dispatchEdit({ type: 'cancelOverwrite' })}>
-                        Annuler
+                        {t('files.cancel')}
                       </button>
                       <button className="btn sm danger" disabled={edit.phase === 'overwriting'} onClick={() => void save(true)}>
                         {edit.conflict.version === null
                           ? edit.phase === 'overwriting'
-                            ? 'Création…'
-                            : 'Le recréer'
+                            ? t('files.view.creating')
+                            : t('files.view.recreate')
                           : edit.phase === 'overwriting'
-                            ? 'Écrasement…'
-                            : 'Écraser'}
+                            ? t('files.view.overwriting')
+                            : t('files.view.overwrite')}
                       </button>
                     </div>
                   )}
@@ -902,8 +913,15 @@ export function FilesView({
                 handleRef={editor}
               />
               <p className="hint ehint">
-                <kbd>Ctrl</kbd>+<kbd>S</kbd> : enregistrer · <kbd>Ctrl</kbd>+<kbd>F</kbd> : rechercher · <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd> :
-                annuler / refaire · <kbd>Échap</kbd> puis <kbd>Tab</kbd> : sortir de l’éditeur
+                {rich('files.view.editorHint', {
+                  save: ctrlKey('S'),
+                  find: ctrlKey('F'),
+                  undo: ctrlKey('Z'),
+                  redo: ctrlKey('Y'),
+                  esc: <kbd>{t('files.key.esc')}</kbd>,
+                  // i18n-exempt: nom de touche
+                  tab: <kbd>Tab</kbd>,
+                })}
               </p>
             </div>
           ) : text != null &&
@@ -930,21 +948,21 @@ export function FilesView({
             <div className="selfloat" style={{ top: pick.top, left: pick.left }}>
               {commentText !== null ? (
                 <CommentBox
-                  title={`${file}:${linesLabel(pick.span.line, pick.span.lineEnd)}${pickStale ? ' · le fichier a changé depuis la sélection : vérifie les lignes avant d’ajouter' : ''}`}
+                  title={`${file}:${linesLabel(pick.span.line, pick.span.lineEnd)}${pickStale ? t('files.view.pickStaleSuffix') : ''}`}
                   text={commentText}
                   onText={setCommentText}
                   onSave={saveComment}
                   onCancel={cancelComment}
-                  label={`Commentaire sur les lignes ${linesLabel(pick.span.line, pick.span.lineEnd)}`}
-                  placeholder="Ta remarque sur ces lignes (facultatif)… (Entrée : ajouter, Maj+Entrée : nouvelle ligne, Échap : annuler)"
+                  label={t('files.view.commentOnLines', { lines: linesLabel(pick.span.line, pick.span.lineEnd) })}
+                  placeholder={t('files.view.pickPlaceholder')}
                 />
               ) : pickError ? (
                 <span className="inline-err" role="alert">
-                  Impossible de commenter : {pickError}.
+                  {t('files.view.cantComment', { error: pickError })}
                 </span>
               ) : draftFull ? (
                 <span className="inline-err" role="alert">
-                  Limite de {MAX_COMMENTS} commentaires atteinte.
+                  {t('files.review.limit', { max: MAX_COMMENTS })}
                 </span>
               ) : (
                 <button
@@ -954,7 +972,9 @@ export function FilesView({
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => setCommentText('')}
                 >
-                  Commenter {pick.span.lineEnd > pick.span.line ? `les lignes ${linesLabel(pick.span.line, pick.span.lineEnd)}` : `la ligne ${pick.span.line}`}
+                  {pick.span.lineEnd > pick.span.line
+                    ? t('files.view.commentLines', { lines: linesLabel(pick.span.line, pick.span.lineEnd) })
+                    : t('files.view.commentLine', { line: pick.span.line })}
                 </button>
               )}
             </div>
@@ -967,7 +987,7 @@ export function FilesView({
             review={review}
             files={reviewFiles}
             onSent={onSent}
-            blockedReason={edit?.dirty ? UNSAVED_BLOCKS : null}
+            blockedReason={edit?.dirty ? unsavedBlocks : null}
             onOpenFile={(path, line) => {
               if (path !== file) openFile(path, null, () => setPendingLine({ path, line }))
               else setPendingLine({ path, line })
@@ -987,8 +1007,8 @@ export function FilesView({
         />
       )}
       {showToc && rendered && (
-        <nav className="toc" aria-label="Sur cette page">
-          <span className="lbl">Sur cette page</span>
+        <nav className="toc" aria-label={t('files.view.toc')}>
+          <span className="lbl">{t('files.view.toc')}</span>
           {rendered.outline.map((o) => (
             <button key={o.id} className={`l${o.level}`} onClick={() => document.getElementById(o.id)?.scrollIntoView({ block: 'start' })}>
               {o.text}

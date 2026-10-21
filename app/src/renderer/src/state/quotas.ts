@@ -5,6 +5,7 @@
  * de la fenêtre est passée (la valeur ne dit plus rien de la fenêtre en cours).
  */
 import type { DaemonProfileQuota, DaemonQuotaWindow, Profile, RateLimitWindow, Session } from '../../../shared/protocol'
+import { t, type PlainKey } from '../../../shared/i18n'
 
 export interface ProfileQuota {
   profile: string
@@ -144,11 +145,13 @@ export function refreshSettled(
   return profiles.every((p) => (now[p] ?? 0) > (before[p] ?? 0))
 }
 
-const SOURCE_LABELS: Record<string, string> = {
-  usage_api: 'API d’usage de Claude Code',
-  statusline: 'statusline d’une session',
+const SOURCE_LABELS: Record<string, PlainKey> = {
+  usage_api: 'shell.quotas.source.usageApi',
+  statusline: 'shell.quotas.source.statusline',
 }
 
 export function sourceLabel(s: string | null | undefined): string | null {
-  return s ? (SOURCE_LABELS[s] ?? s) : null
+  if (!s) return null
+  const key = Object.prototype.hasOwnProperty.call(SOURCE_LABELS, s) ? SOURCE_LABELS[s] : undefined
+  return key ? t(key) : s
 }

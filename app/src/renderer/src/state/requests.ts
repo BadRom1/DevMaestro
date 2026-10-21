@@ -2,17 +2,24 @@
  * Demandes en attente (permissions, questions) : résumé de l'outil, règles
  * proposées pour « Toujours », réponses aux questions.
  */
+import { t, type PlainKey } from '../../../shared/i18n'
 import type { PendingRequest, Question, QuestionAnswers } from '../../../shared/protocol'
 import { str, summarizeToolInput, truncate } from '../../../shared/summary'
 
 export { summarizeToolInput }
 
-const DESTINATIONS: Record<string, string> = {
-  localSettings: 'réglages locaux du projet',
-  projectSettings: 'réglages partagés du projet',
-  userSettings: 'réglages de l’utilisateur',
-  session: 'cette session',
-  cliArg: 'ligne de commande',
+/** Destinations d'une règle ; libellés traduits à l'usage (langue courante). */
+const DESTINATIONS: Record<string, PlainKey> = {
+  localSettings: 'conversation.request.dest.localSettings',
+  projectSettings: 'conversation.request.dest.projectSettings',
+  userSettings: 'conversation.request.dest.userSettings',
+  session: 'conversation.request.dest.session',
+  cliArg: 'conversation.request.dest.cliArg',
+}
+
+function destinationLabel(d: string): string {
+  const key = Object.prototype.hasOwnProperty.call(DESTINATIONS, d) ? DESTINATIONS[d] : undefined
+  return key ? t(key) : d
 }
 
 /**
@@ -46,10 +53,10 @@ export function canAllowAlways(req: PendingRequest): boolean {
 /** L'app peut-elle répondre ? Non sans détail, ni quand aucun relais n'attend la décision. */
 export function answerability(req: PendingRequest): { ok: true } | { ok: false; why: string } {
   if ('detailed' in req.pending && req.pending.detailed === false) {
-    return { ok: false, why: 'Détails inconnus (signalée par une notification) : réponds dans le terminal.' }
+    return { ok: false, why: t('conversation.request.notifiedOnly') }
   }
   if (req.answerable === false) {
-    return { ok: false, why: 'Aucun relais n’attend cette réponse : réponds dans le terminal.' }
+    return { ok: false, why: t('conversation.request.noRelay') }
   }
   return { ok: true }
 }
@@ -57,7 +64,7 @@ export function answerability(req: PendingRequest): { ok: true } | { ok: false; 
 function describeSuggestion(s: unknown): string {
   if (!s || typeof s !== 'object') return String(s)
   const o = s as Record<string, unknown>
-  const where = typeof o.destination === 'string' ? ` (${DESTINATIONS[o.destination] ?? o.destination})` : ''
+  const where = typeof o.destination === 'string' ? ` (${destinationLabel(o.destination)})` : ''
   if (o.type === 'addRules' && Array.isArray(o.rules)) {
     const rules = o.rules.map((r) => {
       const rr = (r ?? {}) as Record<string, unknown>
@@ -65,12 +72,17 @@ function describeSuggestion(s: unknown): string {
       const content = str(rr.ruleContent)
       return content ? `${tool}(${content})` : tool
     })
-    const verb = o.behavior === 'deny' ? 'refuser' : o.behavior === 'ask' ? 'demander' : 'autoriser'
-    return `${verb} ${rules.join(', ')}${where}`
+    const key =
+      o.behavior === 'deny'
+        ? 'conversation.request.rule.deny'
+        : o.behavior === 'ask'
+          ? 'conversation.request.rule.ask'
+          : 'conversation.request.rule.allow'
+    return t(key, { rules: rules.join(', '), where })
   }
-  if (o.type === 'setMode' && typeof o.mode === 'string') return `passer en mode ${o.mode}${where}`
+  if (o.type === 'setMode' && typeof o.mode === 'string') return t('conversation.request.rule.setMode', { mode: o.mode, where })
   if (o.type === 'addDirectories' && Array.isArray(o.directories)) {
-    return `ajouter ${o.directories.join(', ')} aux dossiers autorisés${where}`
+    return t('conversation.request.rule.addDirectories', { directories: o.directories.join(', '), where })
   }
   return JSON.stringify(s)
 }

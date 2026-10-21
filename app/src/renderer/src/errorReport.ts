@@ -47,7 +47,9 @@ export function reportRendererError(context: string, error: unknown, componentSt
 export function installErrorReporting(): void {
   window.addEventListener('error', (e) => {
     if (benignError(e.message ?? '')) return
+    // i18n-exempt: journal technique
     reportRendererError('erreur non rattrapée', e.error ?? e.message)
   })
+  // i18n-exempt: journal technique
   window.addEventListener('unhandledrejection', (e) => reportRendererError('promesse rejetée sans gestionnaire', e.reason))
 }

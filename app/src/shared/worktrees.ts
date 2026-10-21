@@ -4,6 +4,7 @@
  * proposé, slug du dossier et chemin calculé, mêmes règles que le démon
  * (docs/v0.2.md, « Contrat du lot 6 »).
  */
+import { t } from './i18n'
 import type { WorktreeInfo } from './protocol'
 
 export type WorktreeLocation = 'sibling' | 'in_repo' | 'managed' | 'custom'
@@ -12,11 +13,20 @@ export type DefaultWorktreeLocation = Exclude<WorktreeLocation, 'custom'>
 export const WORKTREE_LOCATIONS: readonly WorktreeLocation[] = ['sibling', 'in_repo', 'managed', 'custom']
 export const DEFAULT_WORKTREE_LOCATIONS: readonly DefaultWorktreeLocation[] = ['sibling', 'in_repo', 'managed']
 
-export const LOCATION_LABELS: Record<WorktreeLocation, string> = {
-  sibling: 'À côté du dépôt',
-  in_repo: 'Dans .worktrees du dépôt',
-  managed: 'Dossier géré par l’app',
-  custom: 'Autre dossier…',
+/** Libellés des emplacements, lus à l'usage dans la langue courante (accesseurs). */
+export const LOCATION_LABELS: Readonly<Record<WorktreeLocation, string>> = {
+  get sibling() {
+    return t('sessions.location.sibling')
+  },
+  get in_repo() {
+    return t('sessions.location.inRepo')
+  },
+  get managed() {
+    return t('sessions.location.managed')
+  },
+  get custom() {
+    return t('sessions.location.custom')
+  },
 }
 
 /** Longueur maximale du slug d'un dossier de worktree (règle du démon). */
@@ -60,17 +70,17 @@ export function branchFromName(name: string, prefix = ''): string {
 /**
  * Nom de branche acceptable (sous-ensemble prudent de `git check-ref-format
  * --branch`, que le démon applique de toute façon) : `null` si valide, sinon
- * la raison en français.
+ * la raison dans la langue courante (page et processus principal).
  */
 export function branchNameProblem(name: string): string | null {
-  if (name.trim() === '') return 'le nom de branche est vide'
-  if ([...name].length > MAX_BRANCH) return `le nom de branche est trop long (${MAX_BRANCH} caractères au plus)`
-  if (/[\u0000- \u007f~^:?*[\\]/.test(name)) return 'le nom de branche contient un espace ou un caractère interdit (~ ^ : ? * [ \\)'
-  if (name.startsWith('-')) return 'le nom de branche ne doit pas commencer par « - »'
-  if (name.startsWith('/') || name.endsWith('/') || name.includes('//')) return 'le nom de branche contient une barre oblique mal placée'
-  if (name.includes('..') || name.includes('@{') || name === '@') return 'le nom de branche contient « .. » ou « @{ »'
-  if (name.endsWith('.') || name.endsWith('.lock')) return 'le nom de branche ne doit pas finir par « . » ni « .lock »'
-  if (name.split('/').some((part) => part.startsWith('.'))) return 'une partie du nom de branche commence par « . »'
+  if (name.trim() === '') return t('sessions.branch.empty')
+  if ([...name].length > MAX_BRANCH) return t('sessions.branch.tooLong', { max: MAX_BRANCH })
+  if (/[\u0000- \u007f~^:?*[\\]/.test(name)) return t('sessions.branch.badChar')
+  if (name.startsWith('-')) return t('sessions.branch.dash')
+  if (name.startsWith('/') || name.endsWith('/') || name.includes('//')) return t('sessions.branch.slash')
+  if (name.includes('..') || name.includes('@{') || name === '@') return t('sessions.branch.dots')
+  if (name.endsWith('.') || name.endsWith('.lock')) return t('sessions.branch.end')
+  if (name.split('/').some((part) => part.startsWith('.'))) return t('sessions.branch.partDot')
   return null
 }
 
@@ -91,15 +101,16 @@ export function nextFreeBranch(branch: string, taken: (b: string) => boolean): s
 
 /** Refus du lancement parce que la branche ou son dossier est déjà pris (message du démon ou de git). */
 export function branchTakenError(message: string): boolean {
+  // i18n-exempt: motifs des messages du démon (en français) et de git
   return /est déjà extraite|le dossier existe déjà|already exists|already checked out|is already used by worktree/i.test(message)
 }
 
 /** Préfixe de branche (réglage) : vide, ou un début de nom de branche valide (« romain/ », « feat- »). */
 export function branchPrefixProblem(prefix: string): string | null {
   if (prefix === '') return null
-  if ([...prefix].length > MAX_BRANCH_PREFIX) return `le préfixe est trop long (${MAX_BRANCH_PREFIX} caractères au plus)`
+  if ([...prefix].length > MAX_BRANCH_PREFIX) return t('sessions.branch.prefixTooLong', { max: MAX_BRANCH_PREFIX })
   // Un préfixe suivi d'un nom simple doit donner une branche valide.
-  return branchNameProblem(`${prefix}x`) ? 'le préfixe contient un caractère interdit dans un nom de branche' : null
+  return branchNameProblem(`${prefix}x`) ? t('sessions.branch.prefixBadChar') : null
 }
 
 function trimSlash(p: string): string {

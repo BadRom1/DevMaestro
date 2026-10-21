@@ -9,8 +9,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { promptDef, renderPrompt, resolvePrompt, type PromptSettings } from '../../../shared/prompts'
 import { ErrorCode, type DiffFile, type Session } from '../../../shared/protocol'
 import { CallError, call, errorCode, errorText } from '../api'
+import { useI18n, useT } from '../i18n'
 import { usePromptScope } from '../promptScope'
 import { useOptionalSettings } from '../settings'
+import { daemonText } from '../state/errors'
 import { awaitingAnswer } from '../state/status'
 import {
   MAX_COMMENTS,
@@ -42,8 +44,8 @@ export function CommentBox({
   onText,
   onSave,
   onCancel,
-  placeholder = 'Ton commentaire sur cette ligne… (Entrée : ajouter, Maj+Entrée : nouvelle ligne, Échap : annuler)',
-  label = 'Commentaire sur la ligne',
+  placeholder,
+  label,
   title,
   max = MAX_COMMENT_CHARS,
 }: {
@@ -58,6 +60,7 @@ export function CommentBox({
   /** Longueur maximale (compteur affiché près de la limite). */
   max?: number
 }) {
+  const t = useT()
   const ref = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
     ref.current?.focus()
@@ -70,8 +73,8 @@ export function CommentBox({
       <textarea
         ref={ref}
         value={text}
-        placeholder={placeholder}
-        aria-label={label}
+        placeholder={placeholder ?? t('files.review.boxPlaceholder')}
+        aria-label={label ?? t('files.review.boxLabel')}
         onChange={(e) => onText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey) {
@@ -89,10 +92,10 @@ export function CommentBox({
           {n > max * 0.9 ? `${n}/${max}` : ''}
         </span>
         <button type="button" className="btn sm ghost" onClick={onCancel}>
-          Annuler
+          {t('files.cancel')}
         </button>
         <button type="button" className="btn sm pri" onClick={onSave}>
-          Ajouter à la revue
+          {t('files.review.add')}
         </button>
       </div>
     </div>
@@ -117,12 +120,13 @@ function FileCommentList({
   /** Extrait refusé par le démon au dernier envoi. */
   rejected: number | null
 }) {
+  const t = useT()
   const list = fileComments(draft)
   if (list.length === 0) return null
   return (
     <details className="fcomments" open={rejected !== null && list.some((c) => c.id === rejected) ? true : undefined}>
       <summary>
-        {list.length} extrait{list.length > 1 ? 's' : ''} de fichier{list.length > 1 ? 's' : ''} dans la revue
+        {t('files.review.fileExcerpts', { count: list.length })}
       </summary>
       <ul role="list">
         {list.map((c) => (
@@ -137,13 +141,13 @@ function FileCommentList({
               </span>
             )}
             <span className={c.text ? 'ctext' : 'ctext hint'}>
-              {c.id === rejected && <b className="rej">refusé · </b>}
-              {c.text || 'sans commentaire'}
+              {c.id === rejected && <b className="rej">{t('files.review.rejectedTag')}</b>}
+              {c.text || t('files.review.noComment')}
             </span>
             <button
               type="button"
               className="btn sm ghost"
-              aria-label={`Retirer l’extrait ${c.path}:${linesLabel(c.line, c.lineEnd)} de la revue`}
+              aria-label={t('files.review.removeExcerpt', { ref: `${c.path}:${linesLabel(c.line, c.lineEnd)}` })}
               onClick={() => review({ type: 'delete', id: c.id })}
             >
               ×
@@ -167,12 +171,13 @@ function CommitCommentList({
   onOpen?: (sha: string, path: string) => void
   rejected: number | null
 }) {
+  const t = useT()
   const list = commitComments(draft)
   if (list.length === 0) return null
   return (
     <details className="fcomments" open={rejected !== null && list.some((c) => c.id === rejected) ? true : undefined}>
       <summary>
-        {list.length} commentaire{list.length > 1 ? 's' : ''} de commit dans la revue
+        {t('files.review.commitComments', { count: list.length })}
       </summary>
       <ul role="list">
         {list.map((c) => (
@@ -187,13 +192,13 @@ function CommitCommentList({
               </span>
             )}
             <span className="ctext">
-              {c.id === rejected && <b className="rej">refusé · </b>}
+              {c.id === rejected && <b className="rej">{t('files.review.rejectedTag')}</b>}
               {c.text}
             </span>
             <button
               type="button"
               className="btn sm ghost"
-              aria-label={`Retirer le commentaire ${commitCommentLabel(c)} de la revue`}
+              aria-label={t('files.review.removeCommitComment', { ref: commitCommentLabel(c) })}
               onClick={() => review({ type: 'delete', id: c.id })}
             >
               ×
@@ -229,6 +234,7 @@ export function ReviewBar({
   /** Clic sur un commentaire de commit de la liste. */
   onOpenCommit?: (sha: string, path: string) => void
 }) {
+  const { t, rich } = useI18n()
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   /** Commentaire refusé par le démon au dernier envoi (identifiant dans le brouillon). */
@@ -248,9 +254,9 @@ export function ReviewBar({
     try {
       return { id, text: renderPrompt(id, template, { ...vars, branch: session.branch ?? null }) }
     } catch (e) {
-      return { id, error: `Consigne « ${promptDef(id).label} » invalide : ${(e as Error).message} (à corriger dans Réglages → Consignes).` }
+      return { id, error: t('files.review.invalidInstruction', { label: promptDef(id).label, message: (e as Error).message }) }
     }
-  }, [built, prompts, scope.projectKey, session.branch])
+  }, [built, prompts, scope.projectKey, session.branch, t])
   const count = activeComments(draft).length
   const waiting = awaitingAnswer(session)
   const full = count >= MAX_COMMENTS
@@ -279,10 +285,10 @@ export function ReviewBar({
       }
       setSendError(
         code === ErrorCode.MethodNotFound
-          ? 'Le démon ne sait pas encore envoyer une revue : mets orchd à jour.'
+          ? t('files.review.oldDaemon')
           : code === ErrorCode.InvalidState
-            ? `Revue non envoyée : Claude attend une réponse (permission ou question), ou la session ne tourne plus. Réponds d’abord à la demande en attente, puis renvoie la revue. (${e instanceof Error ? e.message : ''})`
-            : `Revue non envoyée : ${errorText(e)}`,
+            ? t('files.review.invalidState', { detail: e instanceof Error ? daemonText(e.message) : '' })
+            : t('files.review.notSent', { text: errorText(e) }),
       )
     } finally {
       setSending(false)
@@ -293,11 +299,10 @@ export function ReviewBar({
     <div className="dfoot">
       {built && built.dropped.length > 0 && (
         <span className="hint warnline">
-          {built.dropped.length} commentaire{built.dropped.length > 1 ? 's' : ''} ne {built.dropped.length > 1 ? 'seront' : 'sera'} pas
-          envoyé{built.dropped.length > 1 ? 's' : ''} (ligne modifiée, ou fichier qui n’est plus dans le diff) : ils restent ici.
+          {t('files.review.dropped', { count: built.dropped.length })}
         </span>
       )}
-      {full && <span className="hint warnline">Limite de {MAX_COMMENTS} commentaires atteinte.</span>}
+      {full && <span className="hint warnline">{t('files.review.limit', { max: MAX_COMMENTS })}</span>}
       <CommitCommentList draft={draft} review={review} rejected={rejected} {...(onOpenCommit ? { onOpen: onOpenCommit } : {})} />
       <FileCommentList draft={draft} review={review} rejected={rejected} {...(onOpenFile ? { onOpen: onOpenFile } : {})} />
       <input
@@ -310,8 +315,8 @@ export function ReviewBar({
           e.preventDefault()
           if (e.ctrlKey || e.metaKey) void send()
         }}
-        placeholder="Commentaire général (facultatif)"
-        aria-label="Commentaire général de la revue"
+        placeholder={t('files.review.generalPlaceholder')}
+        aria-label={t('files.review.generalLabel')}
         aria-describedby="review-send-hint"
       />
       {[...draft.general].length > MAX_COMMENT_CHARS * 0.9 && (
@@ -321,19 +326,23 @@ export function ReviewBar({
       )}
       {hasDraft(draft) && (
         <button type="button" className="btn ghost" onClick={() => setConfirmClear(true)} disabled={sending}>
-          Effacer
+          {t('files.review.clear')}
         </button>
       )}
       <span className="hint" id="review-send-hint">
-        <kbd>Ctrl</kbd>+<kbd>Entrée</kbd> pour envoyer
+        {rich('files.review.sendHint', {
+          // i18n-exempt: nom de touche
+          ctrl: <kbd>Ctrl</kbd>,
+          enter: <kbd>{t('files.key.enter')}</kbd>,
+        })}
       </span>
       {instruction && 'text' in instruction && (
-        <span className="hint review-instr" title="Consigne tapée devant la revue collée (Réglages → Consignes)">
+        <span className="hint review-instr" title={t('files.review.instructionTitle')}>
           {scope.reviewInstruction === false ? (
-            <>Démon ancien : la consigne par défaut du démon sera tapée (redémarrer orchd pour la tienne).</>
+            <>{t('files.review.oldDaemonInstruction')}</>
           ) : (
             <>
-              Consigne : <span className="mono">{instruction.text}</span>
+              {rich('files.review.instruction', { text: <span className="mono">{instruction.text}</span> })}
             </>
           )}
         </span>
@@ -352,24 +361,26 @@ export function ReviewBar({
           blockedReason
             ? blockedReason
             : !session.alive
-            ? 'La session ne tourne pas : reprends-la pour lui envoyer la revue.'
+            ? t('files.review.notRunning')
             : waiting
-              ? 'Réponds d’abord à la demande en attente (permission ou question).'
+              ? t('files.review.answerFirst')
               : undefined
         }
       >
-        {sending ? 'Envoi…' : `Envoyer la revue à Claude${count ? ` (${count})` : ''}`}
+        {sending ? t('files.review.sending') : `${t('files.review.send')}${count ? ` (${count})` : ''}`}
       </button>
       {sendError && (
         <span className="inline-err" role="alert">
           {rejectedFile && (
             <>
-              Extrait refusé : <b className="mono">{`${rejectedFile.path}:${linesLabel(rejectedFile.line, rejectedFile.lineEnd)}`}</b>.{' '}
+              {rich('files.review.excerptRejected', {
+                ref: <b className="mono">{`${rejectedFile.path}:${linesLabel(rejectedFile.line, rejectedFile.lineEnd)}`}</b>,
+              })}{' '}
             </>
           )}
           {rejectedCommit && (
             <>
-              Commentaire de commit refusé : <b className="mono">{commitCommentLabel(rejectedCommit)}</b>.{' '}
+              {rich('files.review.commitCommentRejected', { ref: <b className="mono">{commitCommentLabel(rejectedCommit)}</b> })}{' '}
             </>
           )}
           {sendError}
@@ -383,7 +394,7 @@ export function ReviewBar({
                 setSendError(null)
               }}
             >
-              Retirer ce commentaire
+              {t('files.review.removeThisComment')}
             </button>
           )}
           {rejectedFile && (
@@ -396,17 +407,20 @@ export function ReviewBar({
                 setSendError(null)
               }}
             >
-              Retirer cet extrait
+              {t('files.review.removeThisExcerpt')}
             </button>
           )}
         </span>
       )}
       {confirmClear && (
         <ConfirmBar
-          message={`Effacer la revue en cours (${draft.comments.length} commentaire${draft.comments.length > 1 ? 's' : ''}${draft.general.trim() ? ' et le commentaire général' : ''}) ?`}
-          confirmLabel="Effacer"
-          busyLabel="Effacement…"
-          errorPrefix="Effacement impossible"
+          message={t('files.review.clearConfirm', {
+            comments: t('files.commentsCount', { count: draft.comments.length }),
+            general: draft.general.trim() ? t('files.review.andGeneral') : '',
+          })}
+          confirmLabel={t('files.review.clear')}
+          busyLabel={t('files.review.clearing')}
+          errorPrefix={t('files.review.clearFailed')}
           onConfirm={async () => {
             review({ type: 'clear' })
             setConfirmClear(false)

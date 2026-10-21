@@ -22,10 +22,14 @@
  */
 import type { RunnerConfirmation } from '../shared/bridge'
 import { readRunnerFiles } from '../shared/runnerFiles'
+import { t } from '../shared/i18n'
 import { ErrorCode } from '../shared/protocol'
 import { RpcError } from './daemon/rpc'
 
 const FINGERPRINT_RE = /^[0-9a-f]{64}$/
+
+/** Refus produit par l'app (pas par le démon) : `data.origin = "app"` (lot 20), message dans la langue courante. */
+const APP_ORIGIN = { origin: 'app' } as const
 
 export interface GuardDeps {
   request(method: string, params: unknown): Promise<unknown>
@@ -42,7 +46,7 @@ function isObj(v: unknown): v is Record<string, unknown> {
 export async function describeRunner(deps: GuardDeps, sessionId: string, runnerId: string): Promise<RunnerConfirmation> {
   const got = await deps.request('sessions.get', { id: sessionId })
   const cwd = isObj(got) && isObj(got.session) ? got.session.cwd : undefined
-  if (typeof cwd !== 'string' || !cwd.startsWith('/')) throw new RpcError(ErrorCode.UnknownSession, 'session inconnue du démon')
+  if (typeof cwd !== 'string' || !cwd.startsWith('/')) throw new RpcError(ErrorCode.UnknownSession, t('main.error.unknownSession'), APP_ORIGIN)
   const project = await deps.request('projects.resolve', { path: cwd })
   const root = isObj(project) ? project.worktree_root : undefined
   const worktree = typeof root === 'string' && root.startsWith('/') ? root : cwd
@@ -51,11 +55,11 @@ export async function describeRunner(deps: GuardDeps, sessionId: string, runnerI
   const r = runners.find((x): x is Record<string, unknown> => isObj(x) && x.id === runnerId)
   const command = r?.command
   if (!r || !Array.isArray(command) || command.length === 0 || !command.every((a) => typeof a === 'string')) {
-    throw new RpcError(ErrorCode.RunnerUnknown, 'cette commande n’est plus détectée dans le worktree')
+    throw new RpcError(ErrorCode.RunnerUnknown, t('main.error.runnerGone'), APP_ORIGIN)
   }
   const fingerprint = r.fingerprint
   if (typeof fingerprint !== 'string' || !FINGERPRINT_RE.test(fingerprint)) {
-    throw new RpcError(ErrorCode.MethodNotFound, 'le démon ne donne pas l’empreinte des runners : mets orchd à jour pour lancer une commande')
+    throw new RpcError(ErrorCode.MethodNotFound, t('main.error.noFingerprint'), APP_ORIGIN)
   }
   return {
     worktree,
@@ -80,8 +84,9 @@ export async function checkStart(deps: GuardDeps, sessionId: string, runnerId: s
   if (deps.isConfirmed(d.worktree, d.fingerprint)) return d.fingerprint
   throw new RpcError(
     ErrorCode.RunnerConfirmationRequired,
-    'confirmation nécessaire : cette commande vient du dépôt et va s’exécuter sur ta machine',
-    d,
+    t('main.error.runnerConfirm'),
+    // Charge utile lue par la page (`readConfirmation`, qui ignore `origin`).
+    { ...d, ...APP_ORIGIN },
   )
 }
 
@@ -89,7 +94,7 @@ export async function checkStart(deps: GuardDeps, sessionId: string, runnerId: s
 export async function confirmRunner(deps: GuardDeps, sessionId: string, runnerId: string, fingerprint: string): Promise<void> {
   const d = await describeRunner(deps, sessionId, runnerId)
   if (d.fingerprint !== fingerprint) {
-    throw new RpcError(ErrorCode.RunnerConfirmationRequired, 'la commande a changé depuis son affichage : relis-la', d)
+    throw new RpcError(ErrorCode.RunnerConfirmationRequired, t('main.error.runnerChanged'), { ...d, ...APP_ORIGIN })
   }
   await deps.remember(d.worktree, d.fingerprint)
 }

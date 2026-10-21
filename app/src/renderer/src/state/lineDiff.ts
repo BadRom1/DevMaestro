@@ -8,6 +8,7 @@
  * donnée en bloc (tout supprimé puis tout ajouté) : diff exact mais pas
  * minimal, signalé par `approximate`.
  */
+import { t } from '../../../shared/i18n'
 import type { DiffHunk, DiffLine, FileDiff } from '../../../shared/protocol'
 
 /** Distance d'édition (lignes ajoutées + supprimées) au-delà de laquelle on renonce au diff minimal. */
@@ -175,7 +176,7 @@ function toHunks(ops: readonly Op[], left: readonly string[], right: readonly st
 function eolLabel(text: string): string {
   const crlf = text.includes('\r\n')
   const lf = /(^|[^\r])\n/.test(text)
-  return crlf && lf ? 'LF et CRLF mélangés' : crlf ? 'CRLF' : lf ? 'LF' : 'aucune'
+  return crlf && lf ? t('files.lineDiff.mixedEol') : crlf ? 'CRLF' : lf ? 'LF' : t('files.lineDiff.noEol')
 }
 
 /**
@@ -187,11 +188,12 @@ export function invisibleDifference(before: string, after: string): string | nul
   const parts: string[] = []
   const eolBefore = eolLabel(before)
   const eolAfter = eolLabel(after)
-  if (eolBefore !== eolAfter) parts.push(`les fins de ligne diffèrent (${eolBefore} → ${eolAfter})`)
+  if (eolBefore !== eolAfter) parts.push(t('files.lineDiff.eolDiffer', { before: eolBefore, after: eolAfter }))
   const finalBefore = /\r?\n$/.test(before)
   const finalAfter = /\r?\n$/.test(after)
-  if (finalBefore !== finalAfter) parts.push(`le saut de ligne final diffère (${finalBefore ? 'présent' : 'absent'} → ${finalAfter ? 'présent' : 'absent'})`)
-  if (parts.length === 0) parts.push('les fins de ligne diffèrent')
-  const msg = parts.join(' ; ')
-  return `Aucune différence de lignes, mais ${msg}.`
+  const presence = (b: boolean) => t(b ? 'files.lineDiff.present' : 'files.lineDiff.absent')
+  if (finalBefore !== finalAfter) parts.push(t('files.lineDiff.finalDiffers', { before: presence(finalBefore), after: presence(finalAfter) }))
+  if (parts.length === 0) parts.push(t('files.lineDiff.eolDifferShort'))
+  const msg = parts.join(t('files.lineDiff.separator'))
+  return t('files.lineDiff.invisible', { details: msg })
 }

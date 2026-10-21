@@ -30,24 +30,24 @@ import { firstFile } from '../state/diffTree'
 import { oneLine } from '../state/forge'
 import {
   DEFAULT_PULL_FILTERS,
-  EVENT_LABELS,
-  FORGE_DESTINATION,
   MAX_FORGE_COMMENTS,
   MAX_FORGE_TEXT,
-  OLD_DAEMON_PULLS,
-  PULL_FILTER_LABELS,
   activeForgeComments,
   buildForgeReview,
   checkDuration,
   checkRunLabel,
   checksLabel,
   confirmStep,
+  eventLabel,
   forgeCommentsAt,
+  forgeDestination,
   forgeDraftKey,
   forgeDrafts,
   forgeEditingAt,
   movedLabel,
+  oldDaemonPulls,
   pullFileErrorText,
+  pullFilterLabel,
   reloadForReview,
   onlyRepoPulls,
   publishForgeReview,
@@ -66,6 +66,7 @@ import {
   type PullFilters,
 } from '../state/forgePulls'
 import { relativeTime, shortAgo } from '../state/format'
+import { useI18n, useT } from '../i18n'
 import { AiReviewButton, AiReviewConfirm, useAiReview } from './AiReview'
 import { DiffFileList, DiffTable, FileHeadCounts, fileKeys, useFileNav, useListMode } from './DiffReader'
 import { ForgeMarkdown, IssueLabels } from './ForgeContent'
@@ -125,6 +126,7 @@ export function PullsTab({
   /** Publication ou rechargement en cours : liste, filtres et fermeture désactivés. */
   const [busy, setBusy] = useState(false)
   const uid = useId()
+  const t = useT()
   function busyChange(b: boolean) {
     setBusy(b)
     onBusy(b)
@@ -170,7 +172,7 @@ export function PullsTab({
         if (alive) setDetail({ phase: 'ready', pull })
       } catch (e) {
         if (!alive) return
-        const msg = pullsErrorKind(errorCode(e)) === 'old-daemon' ? OLD_DAEMON_PULLS : errorText(e)
+        const msg = pullsErrorKind(errorCode(e)) === 'old-daemon' ? oldDaemonPulls() : errorText(e)
         setDetail({ phase: 'error', number: selected, message: msg })
       }
     })()
@@ -195,7 +197,7 @@ export function PullsTab({
   if (list.phase === 'old') {
     return (
       <div className="forge-off" role="status">
-        <p>{OLD_DAEMON_PULLS}</p>
+        <p>{oldDaemonPulls()}</p>
       </div>
     )
   }
@@ -203,44 +205,44 @@ export function PullsTab({
   return (
     <div className="issues pulls">
       <div className="ifilters-wrap">
-        <fieldset className="ifilters" aria-label="Filtres des demandes de fusion" disabled={busy}>
+        <fieldset className="ifilters" aria-label={t('forge.pulls.filters.aria')} disabled={busy}>
           <label className="field ifield-state">
-            <span className="lbl">État</span>
+            <span className="lbl">{t('forge.pulls.filters.state')}</span>
             <select value={filters.state} onChange={(e) => setFilters((f) => ({ ...f, state: e.target.value as PullStateFilter }))}>
               {PULL_STATE_FILTERS.map((s) => (
                 <option key={s} value={s}>
-                  {PULL_FILTER_LABELS[s]}
+                  {pullFilterLabel(s)}
                 </option>
               ))}
             </select>
           </label>
           <label className="optrow imine">
             <input type="checkbox" checked={filters.mine} onChange={(e) => setFilters((f) => ({ ...f, mine: e.target.checked }))} />
-            <span>Les miennes</span>
+            <span>{t('forge.pulls.filters.mine')}</span>
           </label>
           <label className="field grow">
-            <span className="lbl">Recherche</span>
+            <span className="lbl">{t('forge.pulls.filters.search')}</span>
             <input
               type="search"
               value={filters.search}
               maxLength={256}
-              placeholder="Titre, texte…"
+              placeholder={t('forge.pulls.filters.searchPlaceholder')}
               onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
             />
           </label>
-          <button type="button" className="btn ghost ictl" onClick={refresh} title="Redemander à la forge (sans le cache)">
-            Actualiser
+          <button type="button" className="btn ghost ictl" onClick={refresh} title={t('forge.pulls.filters.refreshTitle')}>
+            {t('forge.pulls.filters.refresh')}
           </button>
         </fieldset>
       </div>
-      <section className="ilist" aria-label="Liste des demandes de fusion">
-        {list.phase === 'loading' && <p className="hint">Chargement des demandes de fusion…</p>}
+      <section className="ilist" aria-label={t('forge.pulls.list.aria')}>
+        {list.phase === 'loading' && <p className="hint">{t('forge.pulls.list.loading')}</p>}
         {list.phase === 'error' && (
           <p className="inline-err" role="alert">
-            Liste indisponible : {list.message}
+            {t('forge.pulls.list.error', { message: list.message })}
           </p>
         )}
-        {list.phase === 'ready' && shown.pulls.length === 0 && <p className="empty-note">Aucune demande de fusion pour ces filtres.</p>}
+        {list.phase === 'ready' && shown.pulls.length === 0 && <p className="empty-note">{t('forge.pulls.list.empty')}</p>}
         {list.phase === 'ready' && shown.pulls.length > 0 && (
           <ul className="irows" role="list" aria-describedby={`${uid}-n`}>
             {shown.pulls.map((p) => (
@@ -264,7 +266,7 @@ export function PullsTab({
                       {oneLine(p.head?.branch ?? '')}
                     </span>
                     <span className="hint">{pullCounters(p)}</span>
-                    <span className="hint iago" title={p.updated_at ? `mise à jour ${relativeTime(p.updated_at)}` : undefined}>
+                    <span className="hint iago" title={p.updated_at ? t('forge.pulls.list.updated', { when: relativeTime(p.updated_at) }) : undefined}>
                       {shortAgo(p.updated_at)}
                     </span>
                   </span>
@@ -275,18 +277,18 @@ export function PullsTab({
         )}
         {list.phase === 'ready' && (
           <p className="hint" id={`${uid}-n`}>
-            {shown.pulls.length} demande{shown.pulls.length > 1 ? 's' : ''}
-            {list.truncated ? ' (liste coupée : affine les filtres)' : ''}
-            {shown.dropped > 0 ? ` · ${shown.dropped} élément${shown.dropped > 1 ? 's' : ''} hors du dépôt écarté${shown.dropped > 1 ? 's' : ''}` : ''}
+            {t('forge.pulls.list.count', { count: shown.pulls.length })}
+            {list.truncated ? t('forge.pulls.list.truncated') : ''}
+            {shown.dropped > 0 ? t('forge.pulls.list.dropped', { count: shown.dropped }) : ''}
           </p>
         )}
       </section>
-      <section className="idetail" aria-label="Détail de la demande de fusion" aria-live="polite">
-        {selected === null && <p className="empty">Choisis une demande de fusion pour voir son détail.</p>}
-        {detail?.phase === 'loading' && <p className="hint">Chargement de la demande #{detail.number}…</p>}
+      <section className="idetail" aria-label={t('forge.pulls.detail.aria')} aria-live="polite">
+        {selected === null && <p className="empty">{t('forge.pulls.detail.choose')}</p>}
+        {detail?.phase === 'loading' && <p className="hint">{t('forge.pulls.detail.loading', { number: detail.number })}</p>}
         {detail?.phase === 'error' && (
           <p className="inline-err" role="alert">
-            Demande #{detail.number} indisponible : {detail.message}
+            {t('forge.pulls.detail.error', { number: detail.number, message: detail.message })}
           </p>
         )}
         {current && (
@@ -334,6 +336,7 @@ function PullDetailView({
   /** Demande relue (« Recharger la demande de fusion »). */
   onPull: (p: PullDetail) => void
 }) {
+  const { t, rich } = useI18n()
   const [tab, setTab] = useState<DetailTab>('desc')
   /** Raccourcis du lecteur (onglet « Fichiers ») : écoutés sur tout le détail, le focus pouvant être sur l'onglet lui-même. */
   const fileKeysRef = useRef<((e: KeyboardEvent<HTMLElement>) => void) | null>(null)
@@ -367,12 +370,18 @@ function PullDetailView({
   const n = activeForgeComments(draft).length
   const decision = reviewDecisionLabel(pull.review_decision)
   const url = safeHttps(pull.url)
+  const tabs: readonly (readonly [DetailTab, string])[] = [
+    ['desc', t('forge.pulls.tab.desc')],
+    ['checks', t('forge.pulls.tab.checks', { n: runs.length })],
+    ['threads', open ? t('forge.pulls.tab.threadsOpen', { n: threads.length, count: open }) : t('forge.pulls.tab.threads', { n: threads.length })],
+    ['files', t('forge.pulls.tab.files', { n: files.length })],
+  ]
 
   if (assist && aiReview) {
     return (
-      <article className="iissue pdetail" aria-label={`Revue assistée de la demande #${pull.number}`}>
+      <article className="iissue pdetail" aria-label={t('forge.pulls.detail.assistAria', { number: pull.number })}>
         <h3 className="ih">
-          Revue assistée de <span className="inum mono">#{pull.number}</span> {oneLine(pull.title)}
+          {rich('forge.pulls.detail.assistTitle', { number: <span className="inum mono">#{pull.number}</span>, title: oneLine(pull.title) })}
         </h3>
         <AiReviewConfirm
           target={assist}
@@ -416,17 +425,17 @@ function PullDetailView({
         {decision && <ForgeBadge b={decision} />}
         <ForgeBadge b={checksLabel(pull.checks)} />
         <IssueLabels labels={pull.labels ?? []} />
-        {pull.author && <span className="hint">par {oneLine(pull.author)}</span>}
+        {pull.author && <span className="hint">{t('forge.pulls.detail.by', { author: oneLine(pull.author) })}</span>}
         <span className="hint mono">
           {oneLine(pull.head?.branch ?? '')} → {oneLine(pull.base?.branch ?? '')}
         </span>
         <span className="hint">{pullCounters(pull)}</span>
-        {pull.updated_at && <span className="hint">mise à jour {relativeTime(pull.updated_at)}</span>}
+        {pull.updated_at && <span className="hint">{t('forge.pulls.list.updated', { when: relativeTime(pull.updated_at) })}</span>}
       </div>
       <div className="iacts">
         {url && (
           <button type="button" className="btn sm ghost" onClick={() => onLink(url)} title={url}>
-            Voir sur la forge ↗
+            {t('forge.pulls.detail.viewOnForge')}
           </button>
         )}
         <AiReviewButton
@@ -435,15 +444,8 @@ function PullDetailView({
           buttonRef={assistBtn}
         />
       </div>
-      <div className="ptabs" role="tablist" aria-label="Vues de la demande">
-        {(
-          [
-            ['desc', 'Description'],
-            ['checks', `Vérifications (${runs.length})`],
-            ['threads', `Fils de revue (${threads.length}${open ? `, ${open} non résolu${open > 1 ? 's' : ''}` : ''})`],
-            ['files', `Fichiers (${files.length})`],
-          ] as const
-        ).map(([id, label]) => (
+      <div className="ptabs" role="tablist" aria-label={t('forge.pulls.detail.tabsAria')}>
+        {tabs.map(([id, label]) => (
           <button key={id} type="button" role="tab" className="ptab" aria-selected={tab === id} onClick={() => setTab(id)}>
             {label}
           </button>
@@ -455,7 +457,7 @@ function PullDetailView({
         <>
           {pull.review_threads_truncated && (
             <p className="ag-cut" role="note">
-              Plus de 100 fils de revue : les suivants ne sont visibles que sur la forge.
+              {t('forge.pulls.detail.threadsCut')}
             </p>
           )}
           <ThreadsList threads={threads} number={pull.number} onLink={onLink} />
@@ -463,39 +465,40 @@ function PullDetailView({
       )}
       {tab === 'files' && pull.files_truncated && (
         <p className="ag-cut" role="note">
-          Liste des fichiers coupée par GitHub (3 000 au plus) : les suivants ne sont visibles que sur la forge.
+          {t('forge.pulls.detail.filesCut')}
         </p>
       )}
       {tab === 'files' && (
         <PullFiles root={root} pull={pull} files={files} draft={draft} dispatch={dispatch} canReview={canReview} keysRef={fileKeysRef} />
       )}
-      <section className="fdraft" aria-label="Brouillon de revue de la forge">
+      <section className="fdraft" aria-label={t('forge.pulls.draft.title')}>
         <div className="fdraft-h">
-          <b>Brouillon de revue de la forge</b>
+          <b>{t('forge.pulls.draft.title')}</b>
           <span className="fdest" role="note">
             <span aria-hidden="true">⚠ </span>
-            {FORGE_DESTINATION}
+            {forgeDestination()}
           </span>
           <span className="hint">
-            {n} commentaire{n > 1 ? 's' : ''} de ligne{draft.general.trim() ? ' · commentaire général' : ''} · distinct du brouillon de revue pour
-            Claude
+            {t('forge.pulls.draft.summary', { count: n, general: draft.general.trim() ? t('forge.pulls.draft.general') : '' })}
           </span>
         </div>
-        {!reviewSupported && <p className="hint">Le démon ne sait pas encore publier de revue : mets orchd à jour (lecture seule).</p>}
-        {reviewSupported && pull.state !== 'open' && <p className="hint">Demande fermée : plus de revue possible.</p>}
+        {!reviewSupported && <p className="hint">{t('forge.pulls.draft.oldDaemon')}</p>}
+        {reviewSupported && pull.state !== 'open' && <p className="hint">{t('forge.pulls.draft.closed')}</p>}
         {stale.length > 0 && (
           <div className="stale-comments" role="note">
-            <p className="hint">
-              {stale.length} commentaire{stale.length > 1 ? 's' : ''} sur une ligne (ou un fichier) qui n’est plus dans le diff : non publié
-              {stale.length > 1 ? 's' : ''}. Supprime-les ou recopie-les sur la bonne ligne.
-            </p>
+            <p className="hint">{t('forge.pulls.draft.stale', { count: stale.length })}</p>
             {stale.map((c) => (
               <div key={c.id} className="cbox">
                 <div className="who">
                   <span className="mono">
-                    {c.path}:{c.line} ({c.side === 'new' ? 'nouvelle' : 'ancienne'} version) · <code>{c.lineText}</code>
+                    {c.path}:{c.line} ({c.side === 'new' ? t('forge.pulls.version.new') : t('forge.pulls.version.old')}) · <code>{c.lineText}</code>
                   </span>
-                  <button type="button" className="btn sm ghost" aria-label={`Supprimer le commentaire de ${c.path}:${c.line}`} onClick={() => dispatch({ type: 'delete', id: c.id })}>
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    aria-label={t('forge.pulls.draft.deleteAria', { where: `${c.path}:${c.line}` })}
+                    onClick={() => dispatch({ type: 'delete', id: c.id })}
+                  >
                     ×
                   </button>
                 </div>
@@ -505,10 +508,10 @@ function PullDetailView({
           </div>
         )}
         {moved.length > 0 && (
-          <ul className="fmoved" role="list" aria-label="Commentaires replacés">
+          <ul className="fmoved" role="list" aria-label={t('forge.pulls.draft.movedAria')}>
             {moved.map((c) => (
               <li key={c.id} className="hint">
-                <span className="mono">{c.path}</span> : {movedLabel(c)} (même texte de ligne : <code>{c.lineText}</code>)
+                {rich('forge.pulls.draft.movedItem', { path: <span className="mono">{c.path}</span>, moved: movedLabel(c), line: <code>{c.lineText}</code> })}
               </li>
             ))}
           </ul>
@@ -516,7 +519,7 @@ function PullDetailView({
         {canReview && (
           <div className="iacts">
             <button type="button" className="btn sm pri" onClick={() => setPublish({ phase: 'compose' })}>
-              Publier la revue…
+              {t('forge.pulls.draft.publish')}
             </button>
           </div>
         )}
@@ -526,7 +529,8 @@ function PullDetailView({
 }
 
 function ChecksList({ runs, onLink }: { runs: PullDetail['check_runs']; onLink: (url: string) => void }) {
-  if (runs.length === 0) return <p className="hint">Aucune vérification de CI.</p>
+  const t = useT()
+  if (runs.length === 0) return <p className="hint">{t('forge.pulls.checks.empty')}</p>
   return (
     <ul className="pchecks" role="list">
       {runs.map((r, i) => {
@@ -543,7 +547,7 @@ function ChecksList({ runs, onLink }: { runs: PullDetail['check_runs']; onLink: 
             {d && <span className="hint">{d}</span>}
             {url && (
               <button type="button" className="btn sm ghost" onClick={() => onLink(url)} title={url}>
-                Voir ↗
+                {t('forge.pulls.checks.view')}
               </button>
             )}
           </li>
@@ -554,39 +558,48 @@ function ChecksList({ runs, onLink }: { runs: PullDetail['check_runs']; onLink: 
 }
 
 function ThreadsList({ threads, number, onLink }: { threads: PullDetail['review_threads']; number: number; onLink: (url: string) => void }) {
-  if (threads.length === 0) return <p className="hint">Aucun fil de revue.</p>
+  const t = useT()
+  if (threads.length === 0) return <p className="hint">{t('forge.pulls.threads.empty')}</p>
   return (
     <div className="pthreads">
-      <p className="hint">Fils de revue existants, en lecture seule (écrits sur la forge : contenu non fiable).</p>
-      {threads.map((t, i) => (
-        <section key={i} className="pthread" aria-label={`Fil sur ${t.path}`}>
+      <p className="hint">{t('forge.pulls.threads.intro')}</p>
+      {threads.map((th, i) => (
+        <section key={i} className="pthread" aria-label={t('forge.pulls.threads.aria', { path: th.path })}>
           <div className="pthread-h">
             <ForgeBadge
               b={
-                t.resolved
-                  ? { glyph: '✓', text: 'résolu', tone: 'ok', label: 'Fil résolu' }
-                  : { glyph: '○', text: 'non résolu', tone: 'pend', label: 'Fil non résolu' }
+                th.resolved
+                  ? { glyph: '✓', text: t('forge.pulls.threads.resolved'), tone: 'ok', label: t('forge.pulls.threads.resolvedLabel') }
+                  : { glyph: '○', text: t('forge.pulls.threads.unresolved'), tone: 'pend', label: t('forge.pulls.threads.unresolvedLabel') }
               }
             />
             <span className="mono">
-              {t.path}
-              {typeof t.line === 'number' ? `:${t.line}` : ' (version dépassée)'}
-              {t.side === 'old' ? ' (ancienne version)' : ''}
+              {th.path}
+              {typeof th.line === 'number' ? `:${th.line}` : ` (${t('forge.pulls.threads.outdatedLine')})`}
+              {th.side === 'old' ? ` (${t('forge.pulls.version.old')})` : ''}
             </span>
-            {t.outdated && <ForgeBadge b={{ glyph: '⌛', text: 'périmé', tone: 'muted', label: 'Fil sur une version dépassée du diff' }} />}
+            {th.outdated && (
+              <ForgeBadge b={{ glyph: '⌛', text: t('forge.pulls.threads.outdated'), tone: 'muted', label: t('forge.pulls.threads.outdatedLabel') }} />
+            )}
           </div>
-          {(t.comments ?? []).map((c, j) => (
+          {(th.comments ?? []).map((c, j) => (
             <div key={j} className="cbox">
               <div className="who">
                 <span>
-                  {c.author ? oneLine(c.author) : 'inconnu'}
+                  {c.author ? oneLine(c.author) : t('forge.pulls.threads.unknownAuthor')}
                   {c.created_at ? ` · ${relativeTime(c.created_at)}` : ''}
                 </span>
               </div>
-              <ForgeMarkdown text={c.body} idPrefix={`pull-${number}-t${i}-c${j}`} onLink={onLink} empty="(vide)" what="du commentaire" />
+              <ForgeMarkdown
+                text={c.body}
+                idPrefix={`pull-${number}-t${i}-c${j}`}
+                onLink={onLink}
+                empty={t('forge.pulls.threads.emptyComment')}
+                what={t('forge.pulls.threads.whatComment')}
+              />
             </div>
           ))}
-          {t.comments_truncated && <p className="hint">Plus de 50 commentaires dans ce fil : les suivants sont sur la forge.</p>}
+          {th.comments_truncated && <p className="hint">{t('forge.pulls.threads.commentsCut')}</p>}
         </section>
       ))}
     </div>
@@ -611,6 +624,7 @@ function PullFiles({
   /** Reçoit le gestionnaire des raccourcis, posé par le détail de la demande. */
   keysRef: { current: ((e: KeyboardEvent<HTMLElement>) => void) | null }
 }) {
+  const t = useT()
   const [listMode] = useListMode()
   const [selected, setSelected] = useState<string | null>(() => firstFile(files, listMode))
   const [fileDiff, setFileDiff] = useState<{ path: string; sha: string; data: FileDiff } | null>(null)
@@ -641,7 +655,7 @@ function PullFiles({
       .catch((e: unknown) => {
         if (!alive) return
         setFileDiff(null)
-        setError(pullsErrorKind(errorCode(e)) === 'old-daemon' ? OLD_DAEMON_PULLS : pullFileErrorText(errorText(e)))
+        setError(pullsErrorKind(errorCode(e)) === 'old-daemon' ? oldDaemonPulls() : pullFileErrorText(errorText(e)))
       })
     return () => {
       alive = false
@@ -666,8 +680,8 @@ function PullFiles({
         onSelect={setSelected}
         listRef={listRef}
         nav={nav}
-        label="Fichiers de la demande"
-        empty="Aucun fichier."
+        label={t('forge.pulls.files.aria')}
+        empty={t('forge.pulls.files.empty')}
         comments={(path) => draft.comments.filter((c) => c.path === path && !c.stale).length}
         head={<span className="lbl">{pullCounters(pull)}</span>}
       />
@@ -682,20 +696,20 @@ function PullFiles({
               <FileHeadCounts file={file} fileDiff={fileDiff?.path === file.path ? fileDiff.data : null} />
               <span className="hint">
                 {STATUS_LABELS[file.status]}
-                {canReview ? ' · clique sur + pour commenter (brouillon de la forge)' : ''}
+                {canReview ? t('forge.pulls.files.clickToComment') : ''}
               </span>
             </>
           )}
         </div>
-        <div className="dscroll" tabIndex={0} aria-label={file ? `Diff de ${file.path}` : 'Diff'}>
+        <div className="dscroll" tabIndex={0} aria-label={file ? t('forge.pulls.files.diffOf', { path: file.path }) : t('forge.pulls.files.diff')}>
           {error && (
             <p className="inline-err pad" role="alert">
               {error}
             </p>
           )}
-          {file && fileDiff?.path === file.path && fileDiff.data.binary && <p className="empty">Fichier binaire : pas de diff ligne à ligne.</p>}
-          {file && fileDiff?.path === file.path && fileDiff.data.too_large && <p className="empty">Fichier trop volumineux pour être affiché ici.</p>}
-          {file && !fileDiff && !error && <p className="empty">Chargement…</p>}
+          {file && fileDiff?.path === file.path && fileDiff.data.binary && <p className="empty">{t('forge.pulls.files.binary')}</p>}
+          {file && fileDiff?.path === file.path && fileDiff.data.too_large && <p className="empty">{t('forge.pulls.files.tooLarge')}</p>}
+          {file && !fileDiff && !error && <p className="empty">{t('forge.pulls.files.loading')}</p>}
           {rows.length > 0 && selected && (
             <DiffTable
               rows={rows}
@@ -703,7 +717,7 @@ function PullFiles({
               review={dispatch}
               full={full}
               readOnly={!canReview}
-              pendingLabel={`Toi · en attente · ${FORGE_DESTINATION.toLowerCase()}`}
+              pendingLabel={t('forge.pulls.files.pending')}
               maxChars={MAX_FORGE_TEXT}
               commentsAt={(a) => forgeCommentsAt(draft, selected, a).map((c) => ({ id: c.id, line: c.line, text: c.text }))}
               editingAt={(a) => forgeEditingAt(draft, selected, a)}
@@ -747,7 +761,9 @@ function PublishReview({
   onBusy: (busy: boolean) => void
   onPull: (p: PullDetail) => void
 }) {
-  const built = useMemo(() => buildForgeReview(draft, pull.number, files), [draft, pull.number, files])
+  const { t, rich, locale } = useI18n()
+  // Le problème éventuel est un texte : recalculé si la langue change.
+  const built = useMemo(() => buildForgeReview(draft, pull.number, files), [draft, pull.number, files, locale])
   const [reloading, setReloading] = useState<string | null>(null)
   const [reloadError, setReloadError] = useState<string | null>(null)
   const byId = useMemo(() => new Map(draft.comments.map((c) => [c.id, c])), [draft.comments])
@@ -785,7 +801,7 @@ function PublishReview({
    * tout relu ; une panne garde l'ancienne tête et le brouillon tel quel.
    */
   async function reload() {
-    setReloading('Lecture de la demande de fusion et des lignes commentées…')
+    setReloading(t('forge.pulls.publish.reloading'))
     setReloadError(null)
     onBusy(true)
     try {
@@ -798,7 +814,7 @@ function PublishReview({
       onPull(out.pull)
       setState({ phase: 'compose' })
     } catch (e) {
-      if (alive.current) setReloadError(`Rechargement impossible (${errorText(e)}) : le brouillon garde l’ancienne tête ; réessaie.`)
+      if (alive.current) setReloadError(t('forge.pulls.publish.reloadError', { error: errorText(e) }))
     } finally {
       onBusy(false)
       if (alive.current) setReloading(null)
@@ -809,36 +825,38 @@ function PublishReview({
   const doneUrl = state.phase === 'done' ? safeHttps(state.url) : null
 
   return (
-    <article className="iissue ppublish" aria-label="Publier la revue">
+    <article className="iissue ppublish" aria-label={t('forge.pulls.publish.aria')}>
       <h3 className="ih">
-        Publier la revue de <span className="inum mono">#{pull.number}</span> {oneLine(pull.title)}
+        {rich('forge.pulls.publish.title', { number: <span className="inum mono">#{pull.number}</span>, title: oneLine(pull.title) })}
       </h3>
       <p className="fdest big" role="note">
         <span aria-hidden="true">⚠ </span>
-        {FORGE_DESTINATION}
+        {forgeDestination()}
         {' · '}
         <span className="mono">{oneLine(`${pull.url ?? ''}`)}</span>
       </p>
       {state.phase === 'compose' && (
         <>
           <fieldset className="pevents">
-            <legend className="lbl">Décision</legend>
+            <legend className="lbl">{t('forge.pulls.publish.decision')}</legend>
             {FORGE_REVIEW_EVENTS.map((ev) => (
               <label key={ev} className="optrow">
                 <input type="radio" name="forge-event" value={ev} checked={draft.event === ev} onChange={() => dispatch({ type: 'event', event: ev })} />
-                <span>{EVENT_LABELS[ev]}</span>
+                <span>{eventLabel(ev)}</span>
               </label>
             ))}
           </fieldset>
           <label className="field">
             <span className="lbl">
-              Commentaire général (Markdown, mis en forme par GitHub){draft.event !== 'approve' ? ' : obligatoire pour cette décision' : ' : facultatif'}
+              {draft.event !== 'approve' ? t('forge.pulls.publish.generalRequired') : t('forge.pulls.publish.generalOptional')}
             </span>
             <textarea value={draft.general} rows={5} onChange={(e) => dispatch({ type: 'general', text: e.target.value })} />
           </label>
           <p className="hint">
-            {built.payload.comments.length} commentaire{built.payload.comments.length > 1 ? 's' : ''} de ligne
-            {stale.length > 0 ? ` · ${stale.length} sur des lignes disparues, non publié${stale.length > 1 ? 's' : ''}` : ''}
+            {t('forge.pulls.publish.lineComments', {
+              count: built.payload.comments.length,
+              stale: stale.length > 0 ? t('forge.pulls.publish.stale', { count: stale.length }) : '',
+            })}
           </p>
           {built.problem && (
             <p className="inline-err" role="alert">
@@ -847,7 +865,7 @@ function PublishReview({
           )}
           <div className="iacts">
             <button type="button" className="btn ghost" onClick={() => setState(null)}>
-              Retour au brouillon
+              {t('forge.pulls.publish.back')}
             </button>
             <button
               type="button"
@@ -858,32 +876,30 @@ function PublishReview({
                 if (s) setState(s)
               }}
             >
-              Voir l’aperçu…
+              {t('forge.pulls.publish.preview')}
             </button>
           </div>
         </>
       )}
       {(state.phase === 'confirm' || state.phase === 'publishing') && (
         <>
-          <section className="ppreview" aria-label="Aperçu exact de ce qui sera publié">
+          <section className="ppreview" aria-label={t('forge.pulls.publish.previewAria')}>
             <p>
-              <b>Décision :</b> {EVENT_LABELS[state.payload.event]}
+              <b>{t('forge.pulls.publish.decisionColon')}</b> {eventLabel(state.payload.event)}
             </p>
-            <p className="lbl">Commentaire général</p>
-            <pre className="forge-pre">{state.payload.body || '(aucun)'}</pre>
-            <p className="lbl">
-              Commentaires de ligne ({state.payload.comments.length})
-            </p>
-            {state.payload.comments.length === 0 && <p className="hint">(aucun)</p>}
+            <p className="lbl">{t('forge.pulls.publish.general')}</p>
+            <pre className="forge-pre">{state.payload.body || t('forge.pulls.publish.none')}</pre>
+            <p className="lbl">{t('forge.pulls.publish.lineCommentsCount', { n: state.payload.comments.length })}</p>
+            {state.payload.comments.length === 0 && <p className="hint">{t('forge.pulls.publish.none')}</p>}
             <ol className="ppreview-c">
               {state.payload.comments.map((c, i) => {
                 const d = byId.get(state.ids[i] ?? -1)
                 return (
                   <li key={i}>
                     <span className="mono">
-                      {c.path}:{c.line} ({c.side === 'new' ? 'nouvelle' : 'ancienne'} version)
+                      {c.path}:{c.line} ({c.side === 'new' ? t('forge.pulls.version.new') : t('forge.pulls.version.old')})
                     </span>
-                    {d && movedLabel(d) && <span className="hint"> · replacé : {movedLabel(d)}</span>}
+                    {d && movedLabel(d) && <span className="hint">{t('forge.pulls.publish.moved', { moved: movedLabel(d) })}</span>}
                     {d && <code className="pline">{d.lineText}</code>}
                     <pre className="forge-pre">{c.body}</pre>
                   </li>
@@ -891,20 +907,18 @@ function PublishReview({
               })}
             </ol>
             <p className="hint">
-              Tête de la demande : <span className="mono">{state.payload.expected_head_sha.slice(0, 12)}</span> ; si elle a changé, rien n’est publié.
+              {rich('forge.pulls.publish.head', { sha: <span className="mono">{state.payload.expected_head_sha.slice(0, 12)}</span> })}
             </p>
           </section>
-          <div className="forget wt-confirm" role="group" aria-label="Confirmation">
-            <span>
-              Publier cette revue sur GitHub ? Elle sera <b>visible par tous</b> ceux qui voient la demande de fusion.
-            </span>
+          <div className="forget wt-confirm" role="group" aria-label={t('forge.pulls.publish.confirmAria')}>
+            <span>{rich('forge.pulls.publish.confirm', { visible: <b>{t('forge.pulls.publish.confirmVisible')}</b> })}</span>
           </div>
           <div className="iacts">
             <button type="button" className="btn ghost" disabled={state.phase === 'publishing'} onClick={() => setState({ phase: 'compose' })} autoFocus>
-              Modifier
+              {t('forge.pulls.publish.edit')}
             </button>
             <button type="button" className="btn pri" disabled={state.phase === 'publishing'} onClick={() => void publishConfirmed()}>
-              {state.phase === 'publishing' ? 'Publication…' : 'Publier sur GitHub'}
+              {state.phase === 'publishing' ? t('forge.pulls.publish.publishing') : t('forge.pulls.publish.send')}
             </button>
           </div>
         </>
@@ -912,16 +926,17 @@ function PublishReview({
       {state.phase === 'done' && (
         <>
           <p role="status">
-            <span aria-hidden="true">✓ </span>Revue publiée.
+            <span aria-hidden="true">✓ </span>
+            {t('forge.pulls.publish.done')}
           </p>
           <div className="iacts">
             {doneUrl && (
               <button type="button" className="btn sm ghost" onClick={() => onLink(doneUrl)} title={doneUrl}>
-                Voir sur la forge ↗
+                {t('forge.pulls.detail.viewOnForge')}
               </button>
             )}
             <button type="button" className="btn" onClick={() => setState(null)}>
-              Retour à la demande
+              {t('forge.pulls.publish.backToPull')}
             </button>
           </div>
         </>
@@ -929,15 +944,14 @@ function PublishReview({
       {state.phase === 'conflict' && (
         <>
           <p className="inline-err" role="alert">
-            La demande de fusion a changé depuis son ouverture (nouveaux commits) : rien n’a été publié. Ton brouillon est gardé ; recharge la
-            demande pour revérifier les lignes commentées.
+            {t('forge.pulls.publish.conflict')}
           </p>
           <div className="iacts">
             <button type="button" className="btn ghost" disabled={!!reloading} onClick={() => setState(null)}>
-              Retour au brouillon
+              {t('forge.pulls.publish.back')}
             </button>
             <button type="button" className="btn pri" disabled={!!reloading} onClick={() => void reload()}>
-              Recharger la demande de fusion
+              {t('forge.pulls.publish.reload')}
             </button>
           </div>
           {reloading && (
@@ -955,21 +969,23 @@ function PublishReview({
       {state.phase === 'rejected' && (
         <>
           <p className="inline-err" role="alert">
-            Revue refusée, rien n’a été publié : {state.message}
+            {t('forge.pulls.publish.rejected', { message: state.message })}
             {state.commentId !== null && byId.get(state.commentId) && (
               <>
                 {' '}
-                (commentaire sur{' '}
-                <span className="mono">
-                  {byId.get(state.commentId)!.path}:{byId.get(state.commentId)!.line}
-                </span>
-                )
+                {rich('forge.pulls.publish.rejectedOn', {
+                  where: (
+                    <span className="mono">
+                      {byId.get(state.commentId)!.path}:{byId.get(state.commentId)!.line}
+                    </span>
+                  ),
+                })}
               </>
             )}
           </p>
           <div className="iacts">
             <button type="button" className="btn" onClick={() => setState({ phase: 'compose' })}>
-              Modifier
+              {t('forge.pulls.publish.edit')}
             </button>
           </div>
         </>
@@ -978,12 +994,12 @@ function PublishReview({
         <>
           <p className="inline-err" role="alert">
             {state.uncertain
-              ? `Résultat incertain (${state.message}) : la revue a pu être publiée. Vérifie sur la forge avant de republier.`
-              : `Publication impossible : ${state.message}`}
+              ? t('forge.pulls.publish.uncertain', { message: state.message })
+              : t('forge.pulls.publish.failed', { message: state.message })}
           </p>
           <div className="iacts">
             <button type="button" className="btn" onClick={() => setState({ phase: 'compose' })}>
-              Modifier
+              {t('forge.pulls.publish.edit')}
             </button>
           </div>
         </>

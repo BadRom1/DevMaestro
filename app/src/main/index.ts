@@ -24,6 +24,7 @@ import {
 
 import { Ipc, type CallResult, type PortDown, type RpcFailure } from '../shared/bridge'
 import { validHome } from '../shared/home'
+import { getLocale, resolveLocale, setLocale, t, type KeyWith, type PlainKey } from '../shared/i18n'
 import {
   ErrorCode,
   FORGE_METHODS,
@@ -97,6 +98,29 @@ const relay = new TerminalRelay(client, { log })
 const runnerRelay = new TerminalRelay(client, { log: (m) => log(`runner : ${m}`), methods: RUNNER_STREAM })
 const settings = new SettingsStore(app.getPath('userData'), log)
 const settingsLoaded = settings.load()
+
+/**
+ * Langues du système, par ordre de préférence (lues après `ready` : avant,
+ * `app.getLocale()` est vide sous Linux) ; transmises à la page (lot 20).
+ */
+let systemLocales: string[] = []
+
+function readSystemLocales(): string[] {
+  const out: string[] = []
+  try {
+    out.push(...app.getPreferredSystemLanguages())
+  } catch {
+    /* plateforme sans liste : la langue de l'app suffit */
+  }
+  const own = app.getLocale()
+  if (own) out.push(own)
+  return out.filter((l) => typeof l === 'string' && l.length > 0 && l.length <= 64).slice(0, 16)
+}
+
+/** Langue du processus principal (notifications, dialogues) : réglage, sinon système, sinon français. */
+function applyLocale(): void {
+  setLocale(resolveLocale(settings.settings.ui.language, systemLocales))
+}
 /** Confirmation des commandes du dépôt (lot 14a) : détection relue au démon, réglages du processus principal. */
 const runnerGuard: GuardDeps = {
   request: (method, params) => client.request(method, params),
@@ -423,6 +447,7 @@ async function changeZoom(dir: ZoomDirection): Promise<number> {
   const saving = settings.update({ ui: { zoom: next } })
   applyZoom()
   toPage(Ipc.zoomChanged, next)
+  // i18n-exempt: journal technique
   await saving.catch((err: unknown) => log(`taille de l’interface non enregistrée : ${(err as Error).message}`))
   return next
 }
@@ -491,14 +516,14 @@ function createWindow(): BrowserWindow {
     if (key.step) void changeZoom(key.step)
   })
   win.webContents.on('did-finish-load', () => void settingsLoaded.then(applyZoom))
-  // La page refuse de se décharger (fichier modifié non enregistré, lot 7) : dialogue natif, en français.
+  // La page refuse de se décharger (fichier modifié non enregistré, lot 7) : dialogue natif, dans la langue de l'interface.
   win.webContents.on('will-prevent-unload', (e) => {
     const choice = dialog.showMessageBoxSync(win, {
       type: 'warning',
-      title: 'Modifications non enregistrées',
-      message: 'Un fichier modifié n’est pas enregistré.',
-      detail: 'Si tu quittes maintenant, tes modifications seront perdues.',
-      buttons: ['Rester', 'Quitter sans enregistrer'],
+      title: t('main.unsaved.title'),
+      message: t('main.unsaved.message'),
+      detail: t('main.unsaved.detail'),
+      buttons: [t('main.unsaved.stay'), t('main.unsaved.quit')],
       defaultId: 0,
       cancelId: 0,
       noLink: true,
@@ -561,6 +586,7 @@ function guardFrame(
     pageUrl: contents.getURL(),
   })
   if (allowed) return
+  // i18n-exempt: journal technique
   if (!ev.isMainFrame) log(`${what} d'un cadre refusée : ${ev.url.slice(0, 200)}`)
   ev.preventDefault()
 }
@@ -612,25 +638,43 @@ function trusted(e: IpcMainEvent | IpcMainInvokeEvent): boolean {
   return !!wc && e.sender === wc && e.senderFrame === wc.mainFrame
 }
 
-const UNTRUSTED: { ok: false; error: RpcFailure } = {
-  ok: false,
-  error: { code: ErrorCode.InvalidRequest, message: 'appelant inconnu' },
+/** Erreur produite par l'app elle-même, pas par le démon : jamais marquée « message du démon » (lot 20). */
+const APP_ORIGIN = { origin: 'app' } as const
+
+/** Appel refusé : l'appelant n'est pas le cadre principal de la fenêtre (message dans la langue courante). */
+function untrusted(): { ok: false; error: RpcFailure } {
+  return { ok: false, error: { code: ErrorCode.InvalidRequest, message: t('main.error.untrusted'), data: APP_ORIGIN } }
+}
+
+/**
+ * Refus de validation (paramètres, réglages) : son détail technique est en
+ * français. En français il suit le message ; dans une autre langue il va au
+ * journal et le message traduit le dit (jamais de français dans une phrase anglaise).
+ */
+function refusal(withDetail: KeyWith<'detail'>, logged: PlainKey, detail: string): string {
+  if (getLocale() === 'fr') return t(withDetail, { detail })
+  // i18n-exempt: journal technique (détail du refus de validation)
+  log(`refus de validation : ${detail}`)
+  return t(logged)
 }
 
 function failure(err: unknown): { ok: false; error: RpcFailure } {
   if (err instanceof ValidationError) {
-    return { ok: false, error: { code: ErrorCode.InvalidParams, message: `paramètres refusés par l'app : ${err.message}` } }
+    return { ok: false, error: { code: ErrorCode.InvalidParams, message: refusal('main.error.invalidParams', 'main.error.invalidParamsLogged', err.message), data: APP_ORIGIN } }
   }
-  const r = err instanceof RpcError ? err : new RpcError(ErrorCode.Internal, (err as Error).message)
-  return { ok: false, error: { code: r.code, message: r.message, ...(r.data !== undefined ? { data: r.data } : {}) } }
+  // Exception qui n'est pas une erreur du démon : produite par l'app, jamais présentée comme un texte d'orchd.
+  if (!(err instanceof RpcError)) {
+    return { ok: false, error: { code: ErrorCode.Internal, message: err instanceof Error ? err.message : String(err), data: APP_ORIGIN } }
+  }
+  return { ok: false, error: { code: err.code, message: err.message, ...(err.data !== undefined ? { data: err.data } : {}) } }
 }
 
 function registerIpc(): void {
   const allowed = new Set<string>(RENDERER_METHODS)
   ipcMain.handle(Ipc.call, async (e, method: unknown, params: unknown): Promise<CallResult<MethodName>> => {
-    if (!trusted(e)) return UNTRUSTED
+    if (!trusted(e)) return untrusted()
     if (typeof method !== 'string' || !allowed.has(method)) {
-      return { ok: false, error: { code: ErrorCode.MethodNotFound, message: `méthode non autorisée : ${String(method)}` } }
+      return { ok: false, error: { code: ErrorCode.MethodNotFound, message: t('main.error.methodNotAllowed', { method: String(method) }), data: APP_ORIGIN } }
     }
     try {
       const clean = validateParams(method as MethodName, params)
@@ -653,7 +697,7 @@ function registerIpc(): void {
     }
   })
   ipcMain.handle(Ipc.view, async (e, req: unknown) => {
-    if (!trusted(e)) return UNTRUSTED
+    if (!trusted(e)) return untrusted()
     try {
       await relay.view(validateView(req))
       return { ok: true }
@@ -662,7 +706,7 @@ function registerIpc(): void {
     }
   })
   ipcMain.handle(Ipc.viewRunner, async (e, req: unknown) => {
-    if (!trusted(e)) return UNTRUSTED
+    if (!trusted(e)) return untrusted()
     try {
       const r = validateRunnerView(req)
       await runnerRelay.view(
@@ -674,7 +718,7 @@ function registerIpc(): void {
     }
   })
   ipcMain.handle(Ipc.confirmRunner, async (e, req: unknown) => {
-    if (!trusted(e)) return UNTRUSTED
+    if (!trusted(e)) return untrusted()
     try {
       const r = validateRunnerConfirm(req)
       await settingsLoaded
@@ -702,20 +746,21 @@ function registerIpc(): void {
   ipcMain.handle(Ipc.settingsGet, async (e) => {
     if (!trusted(e)) return null
     await settingsLoaded
-    return { settings: settings.settings, fresh: settings.fresh }
+    return { settings: settings.settings, fresh: settings.fresh, systemLocales }
   })
   ipcMain.handle(Ipc.settingsSet, async (e, patch: unknown) => {
-    if (!trusted(e)) return UNTRUSTED
+    if (!trusted(e)) return untrusted()
     await settingsLoaded
     try {
       // `update` change la valeur en mémoire avant d'écrire : la taille est appliquée sans attendre le disque.
       const saving = settings.update(patch)
       applyZoom()
+      applyLocale()
       syncForgeEnabled()
       return { ok: true, settings: await saving }
     } catch (err) {
       if (err instanceof SettingsError) {
-        return { ok: false, error: { code: ErrorCode.InvalidParams, message: `réglages refusés : ${err.message}` } }
+        return { ok: false, error: { code: ErrorCode.InvalidParams, message: refusal('main.error.settingsRejected', 'main.error.settingsRejectedLogged', err.message), data: APP_ORIGIN } }
       }
       return failure(err)
     }
@@ -729,8 +774,10 @@ function registerIpc(): void {
         .update(patch)
         .then(() => {
           applyZoom()
+          applyLocale()
           syncForgeEnabled()
         })
+        // i18n-exempt: journal technique
         .catch((err: unknown) => log(`réglages de fermeture non enregistrés : ${(err as Error).message}`)),
     )
   })
@@ -757,7 +804,7 @@ function registerIpc(): void {
   ipcMain.handle(Ipc.pickFolder, async (e) => {
     if (!trusted(e) || !mainWindow) return null
     const r = await dialog.showOpenDialog(mainWindow, {
-      title: 'Dossier de la session',
+      title: t('main.pickFolder.title'),
       properties: ['openDirectory', 'dontAddToRecent'],
     })
     const p = r.canceled ? null : (r.filePaths[0] ?? null)
@@ -770,7 +817,7 @@ function registerIpc(): void {
     return true
   })
   ipcMain.handle(Ipc.openExternal, async (e, url: unknown) => {
-    if (!trusted(e)) return UNTRUSTED
+    if (!trusted(e)) return untrusted()
     try {
       await shell.openExternal(validateExternalUrl(url))
       return { ok: true }
@@ -791,12 +838,15 @@ app.on('second-instance', () => {
 })
 
 void app.whenReady().then(async () => {
+  // i18n-exempt: journal technique
   log(`Electron ${process.versions.electron}, Chromium ${process.versions.chrome}, socket ${socket}, orchd « ${orchdBin} »`)
   hardenSessions()
   registerIpc()
   client.start()
   // Réglages lus avant la fenêtre : la page s'affiche directement à la bonne taille.
   await settingsLoaded
+  systemLocales = readSystemLocales()
+  applyLocale()
   mainWindow = createWindow()
   // Le processus GPU tourne une fois la première image prête.
   mainWindow.once('ready-to-show', () => setTimeout(logDisplayPlatform, 300))

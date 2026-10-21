@@ -7,6 +7,7 @@ import { actionLabel, primaryAction, type DeliveryAction } from '../../../shared
 import { renderPrompt, type PromptId } from '../../../shared/prompts'
 import type { ChecksState, DeliveryMode, DeliveryState, Run, Session, SessionCi, SessionDelivery } from '../../../shared/protocol'
 import { ErrorCode } from '../../../shared/protocol'
+import { t } from '../../../shared/i18n'
 import type { Badge } from './forgePulls'
 
 export { actionLabel, primaryAction }
@@ -32,14 +33,19 @@ export function deliveryBadge(delivery: SessionDelivery | null | undefined, inte
   if (state === 'merged') {
     return {
       glyph: '✓',
-      text: 'Livrée',
+      text: t('forge.delivery.badge.delivered'),
       tone: 'ok',
-      label: integrated && delivery?.state !== 'merged' ? 'Livrée : branche intégrée dans la référence' : 'Livrée',
+      label: t(integrated && delivery?.state !== 'merged' ? 'forge.delivery.badge.deliveredIntegrated' : 'forge.delivery.badge.delivered'),
     }
   }
   if (state === 'pr_open') {
     const n = delivery?.pull?.number
-    return { glyph: '⇄', text: n ? `PR #${n} ouverte` : 'PR ouverte', tone: 'pend', label: `Demande de fusion${n ? ` #${n}` : ''} ouverte` }
+    return {
+      glyph: '⇄',
+      text: n ? t('forge.delivery.badge.prOpenNumber', { number: n }) : t('forge.delivery.badge.prOpen'),
+      tone: 'pend',
+      label: n ? t('forge.delivery.badge.pullOpenNumberLabel', { number: n }) : t('forge.delivery.badge.pullOpenLabel'),
+    }
   }
   return null
 }
@@ -48,11 +54,11 @@ export function deliveryBadge(delivery: SessionDelivery | null | undefined, inte
 export function ciBadge(state: ChecksState | null | undefined): Badge | null {
   switch (state) {
     case 'success':
-      return { glyph: '✓', text: 'CI réussie', tone: 'ok', label: 'CI réussie' }
+      return { glyph: '✓', text: t('forge.delivery.ci.success'), tone: 'ok', label: t('forge.delivery.ci.success') }
     case 'failure':
-      return { glyph: '✗', text: 'CI en échec', tone: 'bad', label: 'CI en échec' }
+      return { glyph: '✗', text: t('forge.delivery.ci.failure'), tone: 'bad', label: t('forge.delivery.ci.failure') }
     case 'pending':
-      return { glyph: '◔', text: 'CI en cours', tone: 'pend', label: 'CI en cours' }
+      return { glyph: '◔', text: t('forge.delivery.ci.pending'), tone: 'pend', label: t('forge.delivery.ci.pending') }
     default:
       return null
   }
@@ -70,10 +76,12 @@ export function deliveryBlocker(
   state: DeliveryState,
   pullNumber: number | null,
 ): string | null {
-  if (!session.alive) return 'La session ne tourne pas : reprends-la pour livrer.'
-  if (session.status.state === 'waiting' || session.pending.length > 0) return 'Réponds d’abord à la demande en attente dans la session.'
-  if (state === 'merged') return 'Ce travail est déjà livré.'
-  if (action === 'pr' && state === 'pr_open') return `Une demande de fusion est déjà ouverte${pullNumber ? ` (#${pullNumber})` : ''}.`
+  if (!session.alive) return t('forge.delivery.blocker.notAlive')
+  if (session.status.state === 'waiting' || session.pending.length > 0) return t('forge.delivery.blocker.pending')
+  if (state === 'merged') return t('forge.delivery.blocker.delivered')
+  if (action === 'pr' && state === 'pr_open') {
+    return pullNumber ? t('forge.delivery.blocker.pullOpenNumber', { number: pullNumber }) : t('forge.delivery.blocker.pullOpen')
+  }
   return null
 }
 
@@ -92,7 +100,7 @@ export function deliveryPrompt(
   try {
     return { text: renderPrompt(deliveryPromptId(action), template, { branch: session.branch ?? null, base, issue: session.issue?.number ?? null }) }
   } catch (e) {
-    return { error: `Modèle de consigne invalide : ${(e as Error).message} (à corriger dans Réglages → Consignes).` }
+    return { error: t('forge.delivery.invalidTemplate', { message: (e as Error).message }) }
   }
 }
 
@@ -112,7 +120,7 @@ export function failedRuns(runs: readonly Run[] | null | undefined): Run[] {
 
 /** Libellé d'une exécution (nom du workflow, numéro). */
 export function runLabel(r: Pick<Run, 'id' | 'name' | 'workflow'>): string {
-  return `${r.workflow ?? r.name} (n° ${r.id})`
+  return t('forge.delivery.runLabel', { name: r.workflow ?? r.name, id: r.id })
 }
 
 /** Mode retenu pour la session : celui du projet. */

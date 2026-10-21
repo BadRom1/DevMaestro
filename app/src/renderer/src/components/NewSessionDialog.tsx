@@ -20,10 +20,11 @@ import {
   type WorktreeLocation,
 } from '../../../shared/worktrees'
 import { api, call, errorCode, errorText } from '../api'
-import { UNCERTAIN_TEXT, outcomeUncertain } from '../state/errors'
+import { useI18n } from '../i18n'
+import { daemonText, outcomeUncertain, uncertainText } from '../state/errors'
 import { modeLabel, pastDisplayName, sessionDisplayName, shortAgo, tildify } from '../state/format'
 import {
-  MODEL_ALIASES,
+  modelAliases,
   buildProjectChoices,
   mergeExtraChoices,
   profileKeyOf,
@@ -34,7 +35,7 @@ import {
   type ProjectChoice,
   type ResumeCandidate,
 } from '../state/newSession'
-import { FORGE_CONTENT_WARNING, initialOf, invisibleNote, type IssuePrefill } from '../state/forge'
+import { forgeContentWarning, initialOf, invisibleNote, type IssuePrefill } from '../state/forge'
 import type { PastEntry } from '../state/projects'
 import { folderName } from '../state/projects'
 import type { WorktreeLists } from '../state/worktrees'
@@ -98,6 +99,7 @@ export function NewSessionDialog({
   /** « Depuis une issue… » : ouvre les issues du projet choisi (absent : forge masquée). */
   onOpenIssues?: (project: { root: string; name: string; key: string }) => void
 }) {
+  const { t, rich } = useI18n()
   const known = useMemo(() => buildProjectChoices({ sessions, past, projects, home }), [sessions, past, projects, home])
   /** Dossiers choisis par « Autre dossier… » (fusionnés dans leur projet s'il est connu). */
   const [extras, setExtras] = useState<ProjectChoice[]>([])
@@ -177,13 +179,13 @@ export function NewSessionDialog({
   const wtProblem: string | null = !wtOn
     ? null
     : branchNameProblem(effBranch.trim()) ??
-      (base !== null && base.trim() !== '' ? branchNameProblem(base.trim()) && `base : ${branchNameProblem(base.trim())}` : null) ??
-      (effLocation === 'custom' && !customParent ? 'choisis le dossier où créer le worktree' : null) ??
-      (wtPath && wtList?.worktrees.some((w) => w.path === wtPath) ? `le dossier existe déjà : ${tildify(wtPath, home)}` : null) ??
-      (refused.has(effBranch.trim()) ? `la branche ${effBranch.trim()} est déjà prise (refusée au lancement)` : null) ??
+      (base !== null && base.trim() !== '' ? branchNameProblem(base.trim()) && t('sessions.new.baseProblem', { problem: branchNameProblem(base.trim()) }) : null) ??
+      (effLocation === 'custom' && !customParent ? t('sessions.new.pickParent') : null) ??
+      (wtPath && wtList?.worktrees.some((w) => w.path === wtPath) ? t('sessions.new.dirExists', { path: tildify(wtPath, home) }) : null) ??
+      (refused.has(effBranch.trim()) ? t('sessions.new.branchRefused', { branch: effBranch.trim() }) : null) ??
       ((() => {
         const other = wtList?.worktrees.find((w) => w.branch === effBranch.trim())
-        return other ? `la branche ${effBranch.trim()} est déjà extraite dans ${tildify(other.path, home)}` : null
+        return other ? t('sessions.new.branchCheckedOut', { branch: effBranch.trim(), path: tildify(other.path, home) }) : null
       })())
 
   /** Branche déjà prise : refusée au lancement, extraite dans un worktree, ou dont le dossier existe. */
@@ -215,7 +217,7 @@ export function NewSessionDialog({
         setLocation('custom')
       }
     } catch (e) {
-      setError(`Choix du dossier impossible : ${errorText(e)}`)
+      setError(t('sessions.new.pickFailed', { error: errorText(e) }))
     }
   }
 
@@ -310,7 +312,7 @@ export function NewSessionDialog({
       setLocation(null)
       setCustomParent(null)
     } catch (e) {
-      setError(`Choix du dossier impossible : ${errorText(e)}`)
+      setError(t('sessions.new.pickFailed', { error: errorText(e) }))
     } finally {
       setPicking(false)
     }
@@ -319,9 +321,9 @@ export function NewSessionDialog({
   const issueProblem =
     fromIssue && tab === 'prompt'
       ? !initialSupported
-        ? 'Le démon ne sait pas encore taper la consigne puis coller le contenu de l’issue : mets orchd à jour pour lancer depuis une issue.'
+        ? t('sessions.new.initialUnsupported')
         : instruction.trim() === ''
-          ? 'La consigne est vide.'
+          ? t('sessions.new.instructionEmpty')
           : null
       : null
   const canGo = !busy && (tab === 'prompt' ? dir.startsWith('/') && !wtProblem && !issueProblem : !!chosen)
@@ -355,17 +357,18 @@ export function NewSessionDialog({
           ...(worktree ? { worktree } : {}),
           ...(issue ? { issue } : {}),
         })
-        const warnings = [...(r.warnings ?? [])]
+        // Avertissements du démon : texte libre (marqué en anglais) ; ceux de l'app, traduits.
+        const warnings = (r.warnings ?? []).map(daemonText)
         // Démon trop ancien : il ignore la demande et lance dans le dossier choisi.
         if (worktree && !r.worktree) {
-          warnings.push(`Le démon n’a pas créé de worktree (version trop ancienne ?) : la session tourne dans ${r.session.cwd}.`)
+          warnings.push(t('sessions.new.noWorktree', { cwd: r.session.cwd }))
         }
         let session = r.session
         if (name.trim()) {
           try {
             session = (await call('sessions.update', { id: session.id, title: name.trim() })).session
           } catch (e) {
-            warnings.push(`Nom de la session non enregistré : ${errorText(e)}`)
+            warnings.push(t('sessions.new.titleFailed', { error: errorText(e) }))
           }
         }
         onLaunched(session, warnings)
@@ -377,7 +380,7 @@ export function NewSessionDialog({
           ...common,
           ...first,
         })
-        onLaunched(r.session, r.warnings ?? [])
+        onLaunched(r.session, (r.warnings ?? []).map(daemonText))
       } else if (chosen?.kind === 'past') {
         const r = await call('sessions.resume', {
           claude_session_id: chosen.past.claude_session_id,
@@ -386,7 +389,7 @@ export function NewSessionDialog({
           ...common,
           ...first,
         })
-        onLaunched(r.session, r.warnings ?? [])
+        onLaunched(r.session, (r.warnings ?? []).map(daemonText))
       }
     } catch (e) {
       const uncertain = outcomeUncertain(errorCode(e))
@@ -399,8 +402,8 @@ export function NewSessionDialog({
         if (free) applyBranch(free)
         setError(
           free
-            ? `La branche « ${taken} » est déjà utilisée (extraite dans un autre worktree, ou son dossier existe) : je propose « ${free} », modifiable ci-dessus. Relance pour l’utiliser ; aucune session n’a été lancée.`
-            : `La branche « ${taken} » est déjà utilisée : choisis un autre nom. Aucune session n’a été lancée.`,
+            ? t('sessions.new.branchTakenFree', { branch: taken, free })
+            : t('sessions.new.branchTaken', { branch: taken }),
         )
         if (repoRoot) loadWorktrees(repoRoot)
         setBusy(false)
@@ -409,9 +412,11 @@ export function NewSessionDialog({
       setError(
         tab === 'prompt' && wtOn
           ? uncertain
-            ? `Création du worktree sans réponse (${errorText(e)}) : ${UNCERTAIN_TEXT} des sessions et des worktrees avant de relancer.`
-            : `Worktree ou lancement impossible : ${errorText(e)}. Aucune session n’a été lancée.`
-          : `${tab === 'prompt' ? 'Lancement' : 'Reprise'} impossible : ${errorText(e)}`,
+            ? t('sessions.new.wtUncertain', { error: errorText(e), uncertain: uncertainText() })
+            : t('sessions.new.wtFailed', { error: errorText(e) })
+          : tab === 'prompt'
+            ? t('sessions.new.launchFailed', { error: errorText(e) })
+            : t('sessions.new.resumeFailed', { error: errorText(e) }),
       )
       // La création a pu aboutir : listes redemandées.
       if (uncertain && wtOn && repoRoot) loadWorktrees(repoRoot)
@@ -424,25 +429,25 @@ export function NewSessionDialog({
     tab === 'resume'
       ? !chosen
         ? resumeProfile === null
-          ? 'profil par défaut du projet'
-          : 'profil choisi pour la reprise'
+          ? t('sessions.new.hint.projectDefault')
+          : t('sessions.new.hint.resumeChosen')
         : resumeBlind
-        ? 'ce profil ne voit pas cette conversation : la reprise échouera probablement'
+        ? t('sessions.new.hint.blind')
         : chosenOrigin && effectiveResumeProfile !== chosenOrigin
-          ? `reprise sous ${label(effectiveResumeProfile).long} (session lancée sous ${label(chosenOrigin).long})`
+          ? t('sessions.new.hint.resumeOther', { profile: label(effectiveResumeProfile).long, origin: label(chosenOrigin).long })
           : chosen?.kind === 'past' && !chosenOrigin
-            ? 'conversation visible par plusieurs profils : au choix'
-            : 'profil de la session'
+            ? t('sessions.new.hint.anyProfile')
+            : t('sessions.new.hint.sessionProfile')
       : profile !== null && profile !== resolved.profile
-        ? `remplace le défaut (${label(resolved.profile).long})`
+        ? t('sessions.new.hint.override', { profile: label(resolved.profile).long })
         : resolved.source === 'project'
-          ? 'profil par défaut du projet'
+          ? t('sessions.new.hint.projectDefault')
           : resolved.source === 'recent'
-            ? 'dernier profil utilisé dans ce projet'
-            : 'aucun profil réglé pour ce projet'
+            ? t('sessions.new.hint.recent')
+            : t('sessions.new.hint.none')
 
   return (
-    <Modal title="Nouvelle session" onClose={onClose} width={760} busy={busy}>
+    <Modal title={t('sessions.new.title')} onClose={onClose} width={760} busy={busy}>
       <form
         onSubmit={(e) => {
           e.preventDefault()
@@ -458,23 +463,23 @@ export function NewSessionDialog({
         <div className="mb">
           <div className="grid2">
             <label className="field">
-              <span className="lbl">Projet</span>
+              <span className="lbl">{t('sessions.new.project')}</span>
               <select
                 value={project ? project.key : ''}
                 autoFocus
                 onChange={(e) => (e.target.value === OTHER ? void pickOther() : pickProject(e.target.value))}
                 disabled={picking}
               >
-                {choices.length === 0 && <option value="">Aucun projet connu</option>}
+                {choices.length === 0 && <option value="">{t('sessions.new.noProject')}</option>}
                 {choices.map((c) => (
                   <option key={c.key} value={c.key}>
                     {c.name}
                     {c.latest ? ` · ${shortAgo(new Date(c.latest).toISOString())}` : ''}
                   </option>
                 ))}
-                <option value={OTHER}>Autre dossier…</option>
+                <option value={OTHER}>{t('sessions.new.otherDir')}</option>
               </select>
-              <span className="hint mono">{project ? tildify(project.root, home) : 'Choisis un projet ou un dossier.'}</span>
+              <span className="hint mono">{project ? tildify(project.root, home) : t('sessions.new.pickProject')}</span>
               {onOpenIssues && project?.isGit && (
                 <span className="hint">
                   <button
@@ -482,13 +487,13 @@ export function NewSessionDialog({
                     className="linkish"
                     onClick={() => onOpenIssues({ root: project.root, name: project.name, key: project.key })}
                   >
-                    Depuis une issue…
+                    {t('sessions.new.fromIssue')}
                   </button>
                 </span>
               )}
             </label>
             <label className="field">
-              <span className="lbl">Dossier</span>
+              <span className="lbl">{t('sessions.new.dir')}</span>
               <select value={dir} onChange={(e) => setDir(e.target.value)} disabled={!project || tab === 'resume'}>
                 {/* Le choix affiché est toujours le dossier qui sera lancé. */}
                 {dir && !(project?.dirs ?? []).some((d) => d.path === dir) && <option value={dir}>{tildify(dir, home)}</option>}
@@ -501,18 +506,19 @@ export function NewSessionDialog({
               </select>
               <span className="hint">
                 <button type="button" className="linkish" onClick={() => void pickOther()} disabled={picking}>
-                  {picking ? 'Choix en cours…' : 'Autre dossier…'}
+                  {picking ? t('sessions.new.picking') : t('sessions.new.otherDir')}
                 </button>
               </span>
             </label>
           </div>
           <div className="grid3">
             <label className="field">
-              <span className="lbl">Profil</span>
+              <span className="lbl">{t('sessions.new.profile')}</span>
               <select
                 value={shownProfile}
                 onChange={(e) => (tab === 'resume' ? setResumeProfile(e.target.value) : setProfile(e.target.value))}
               >
+                {/* i18n-exempt: nom technique du profil par défaut */}
                 {names.length === 0 && shownProfile !== 'default' && <option value="default">default</option>}
                 {/* Profil d'une session absent de la liste des profils : affiché tel quel. */}
                 {!names.includes(shownProfile) && <option value={shownProfile}>{label(shownProfile).long}</option>}
@@ -527,9 +533,9 @@ export function NewSessionDialog({
               </span>
             </label>
             <label className="field">
-              <span className="lbl">Modèle</span>
+              <span className="lbl">{t('sessions.new.model')}</span>
               <select value={model} onChange={(e) => setModel(e.target.value)}>
-                {MODEL_ALIASES.map((m) => (
+                {modelAliases().map((m) => (
                   <option key={m.value} value={m.value}>
                     {m.label}
                   </option>
@@ -537,9 +543,9 @@ export function NewSessionDialog({
               </select>
             </label>
             <label className="field">
-              <span className="lbl">Mode</span>
+              <span className="lbl">{t('sessions.new.mode')}</span>
               <select value={mode} onChange={(e) => setMode(e.target.value)}>
-                <option value="">Celui du profil</option>
+                <option value="">{t('sessions.new.modeDefault')}</option>
                 {SETTABLE_MODES.map((m) => (
                   <option key={m} value={m}>
                     {modeLabel(m)}
@@ -548,11 +554,13 @@ export function NewSessionDialog({
               </select>
             </label>
           </div>
-          <div className="stabs inline" role="tablist" aria-label="Partir de">
+          <div className="stabs inline" role="tablist" aria-label={t('sessions.new.startFrom')}>
             {(
               [
-                ['prompt', 'Prompt libre'],
-                ['resume', 'Reprendre une session'],
+                // i18n-exempt: identifiant de l'onglet
+                ['prompt', t('sessions.new.tabPrompt')],
+                // i18n-exempt: identifiant de l'onglet
+                ['resume', t('sessions.new.tabResume')],
               ] as const
             ).map(([k, l]) => (
               <button
@@ -581,8 +589,8 @@ export function NewSessionDialog({
           <div role="tabpanel" id={`${tabsId}-panel`} aria-labelledby={`${tabsId}-${tab}`} className="tabpanel">
             {tab === 'resume' && (
               <fieldset className="resume-list">
-                <legend className="lbl">Session à reprendre</legend>
-                {candidates.length === 0 && <p className="hint">Aucune session reprenable dans ce projet.</p>}
+                <legend className="lbl">{t('sessions.new.resumeLegend')}</legend>
+                {candidates.length === 0 && <p className="hint">{t('sessions.new.noResumable')}</p>}
                 {candidates.map((c) => (
                   <label key={c.key} className="rrow">
                     <input
@@ -595,12 +603,14 @@ export function NewSessionDialog({
                     {c.kind === 'session' || c.profiles.length === 1 ? <ProfileBadge profile={c.profile} profiles={profiles} /> : <AnyProfileBadge />}
                     <span className="rname">{c.label}</span>
                     <span className="sr-only">
-                      {c.kind === 'session' || c.profiles.length === 1 ? `profil ${label(c.profile).long}` : 'visible par plusieurs profils'}
+                      {c.kind === 'session' || c.profiles.length === 1
+                        ? t('sessions.new.srProfile', { profile: label(c.profile).long })
+                        : t('sessions.new.srAnyProfile')}
                     </span>
                     <span className="hint">
                       {c.branch ? `${c.branch} · ` : ''}
                       {shortAgo(c.at ? new Date(c.at).toISOString() : null)}
-                      {c.kind === 'session' ? ' · arrêtée' : ''}
+                      {c.kind === 'session' ? t('sessions.new.stoppedSuffix') : ''}
                     </span>
                   </label>
                 ))}
@@ -608,40 +618,38 @@ export function NewSessionDialog({
             )}
             {tab === 'prompt' && issue && (
               <p className="callout issue-linked">
-                Issue liée : <span className="mono">#{issue.number}</span> {issue.title}{' '}
+                {t('sessions.new.issueLinked')} <span className="mono">#{issue.number}</span> {issue.title}{' '}
                 <button type="button" className="linkish" onClick={() => setIssue(null)}>
-                  Retirer le lien
+                  {t('sessions.new.unlinkIssue')}
                 </button>
               </p>
             )}
             {tab === 'prompt' && (
               <label className="field">
-                <span className="lbl">Nom de la session (facultatif)</span>
+                <span className="lbl">{t('sessions.new.name')}</span>
                 <input
                   value={name}
                   maxLength={MAX_TITLE}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="Ex. : Corriger l’export CSV"
+                  placeholder={t('sessions.new.namePlaceholder')}
                 />
               </label>
             )}
             {wtOffered && (
               <fieldset className="wt-new">
-                <legend className="sr-only">Worktree</legend>
+                <legend className="sr-only">{t('sessions.new.worktree')}</legend>
                 <label className="optrow">
                   <input type="checkbox" checked={useWt} onChange={(e) => setUseWt(e.target.checked)} />
                   <span>
-                    Dans un nouveau worktree
-                    <span className="hint optaide">
-                      Une branche à part, dans son propre dossier : la session y est lancée une fois le worktree créé.
-                    </span>
+                    {t('sessions.new.inWorktree')}
+                    <span className="hint optaide">{t('sessions.new.inWorktreeHint')}</span>
                   </span>
                 </label>
                 {useWt && (
                   <>
                     <div className="grid3">
                       <label className="field">
-                        <span className="lbl">Branche</span>
+                        <span className="lbl">{t('sessions.new.branch')}</span>
                         <input
                           className="mono"
                           value={effBranch}
@@ -651,7 +659,7 @@ export function NewSessionDialog({
                             setBranch(e.target.value)
                             setBranchTouched(true)
                           }}
-                          placeholder={`${settings.worktrees.branchPrefix}nom-de-la-branche`}
+                          placeholder={t('sessions.new.branchPlaceholder', { prefix: settings.worktrees.branchPrefix })}
                         />
                         <span className="hint">
                           {branchTouched ? (
@@ -663,47 +671,47 @@ export function NewSessionDialog({
                                 setBranch('')
                               }}
                             >
-                              Reprendre le nom de la session
+                              {t('sessions.new.branchFromName')}
                             </button>
                           ) : (
-                            'tirée du nom de la session (ou du prompt)'
+                            t('sessions.new.branchAuto')
                           )}
                         </span>
                       </label>
                       <label className="field">
-                        <span className="lbl">Base</span>
+                        <span className="lbl">{t('sessions.new.base')}</span>
                         <input
                           className="mono"
                           value={effBase}
                           spellCheck={false}
                           onChange={(e) => setBase(e.target.value)}
-                          placeholder={defaultBase ?? 'branche de référence'}
+                          placeholder={defaultBase ?? t('sessions.new.basePlaceholder')}
                         />
                         <span className="hint">
-                          {defaultBase ? `branche de référence : ${defaultBase}` : 'vide : branche de référence du dépôt'}
+                          {defaultBase ? t('sessions.new.baseIs', { base: defaultBase }) : t('sessions.new.baseEmpty')}
                         </span>
                       </label>
                       <label className="field">
-                        <span className="lbl">Emplacement</span>
+                        <span className="lbl">{t('sessions.new.location')}</span>
                         <select value={effLocation} onChange={(e) => chooseLocation(e.target.value as WorktreeLocation)}>
                           {WORKTREE_LOCATIONS.map((l) => (
                             <option key={l} value={l}>
                               {LOCATION_LABELS[l]}
-                              {l === projectWorktreeLocation(settings.worktrees, project?.profileKey ?? null) ? ' (réglage du projet)' : ''}
+                              {l === projectWorktreeLocation(settings.worktrees, project?.profileKey ?? null) ? t('sessions.new.locationProject') : ''}
                             </option>
                           ))}
                         </select>
                         {effLocation === 'custom' && (
                           <span className="hint">
                             <button type="button" className="linkish" onClick={() => void pickCustomParent()}>
-                              Changer de dossier…
+                              {t('sessions.new.changeDir')}
                             </button>
                           </span>
                         )}
                       </label>
                     </div>
                     <p className="hint wt-path">
-                      Dossier du worktree :{' '}
+                      {t('sessions.new.wtPath')}{' '}
                       <span className="mono">{wtPath ? tildify(wtPath, home) : '—'}</span>
                     </p>
                     {wtProblem && (
@@ -713,7 +721,7 @@ export function NewSessionDialog({
                           <>
                             {' '}
                             <button type="button" className="btn sm" onClick={() => applyBranch(freeBranch)}>
-                              Utiliser « {freeBranch} »
+                              {t('sessions.new.useBranch', { branch: freeBranch })}
                             </button>
                           </>
                         )}
@@ -726,21 +734,23 @@ export function NewSessionDialog({
             {tab === 'prompt' && fromIssue && (
               <>
                 <label className="field">
-                  <span className="lbl">Consigne (tapée)</span>
+                  <span className="lbl">{t('sessions.new.instruction')}</span>
                   <input value={instruction} maxLength={2000} onChange={(e) => setInstruction(e.target.value.replace(/[\r\n]+/g, ' '))} />
-                  <span className="hint">Tapée dans la session, puis le contenu de l’issue est collé à part.</span>
+                  <span className="hint">{t('sessions.new.instructionHint')}</span>
                 </label>
                 <p className="forge-warn" role="note">
                   <span aria-hidden="true">⚠ </span>
-                  {FORGE_CONTENT_WARNING}
+                  {forgeContentWarning()}
                 </p>
                 <details className="forge-pasted">
                   <summary>
-                    Contenu de l’issue, collé après la consigne ({pasted.trim() ? `${[...pasted].length} caractères` : 'vide : rien n’est collé'})
+                    {t('sessions.new.pasted', {
+                      size: pasted.trim() ? t('sessions.new.chars', { n: [...pasted].length }) : t('sessions.new.pastedEmpty'),
+                    })}
                     {invisibleNote(prefill?.invisible ?? 0) && <span className="chip pend">{invisibleNote(prefill?.invisible ?? 0)}</span>}
                   </summary>
                   <label className="field">
-                    <span className="sr-only">Contenu collé</span>
+                    <span className="sr-only">{t('sessions.new.pastedLabel')}</span>
                     <textarea value={pasted} onChange={(e) => setPasted(e.target.value)} spellCheck={false} />
                   </label>
                 </details>
@@ -753,11 +763,11 @@ export function NewSessionDialog({
             )}
             {!(tab === 'prompt' && fromIssue) && (
             <label className="field">
-              <span className="lbl">{tab === 'prompt' ? 'Prompt initial' : 'Message à la reprise (facultatif)'}</span>
+              <span className="lbl">{tab === 'prompt' ? t('sessions.new.prompt') : t('sessions.new.resumeMessage')}</span>
               <textarea
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                placeholder={tab === 'prompt' ? 'Décris la tâche… (facultatif)' : 'Où en étions-nous ?'}
+                placeholder={tab === 'prompt' ? t('sessions.new.promptPlaceholder') : t('sessions.new.resumePlaceholder')}
               />
             </label>
             )}
@@ -770,14 +780,30 @@ export function NewSessionDialog({
             </span>
           ) : (
             <span className="hint" style={{ marginRight: 'auto' }}>
-              <kbd>Ctrl</kbd>+<kbd>Entrée</kbd> pour {tab === 'prompt' ? (wtOn ? 'créer le worktree et lancer' : 'lancer') : 'reprendre'}
+              {rich('sessions.new.shortcut', {
+                // i18n-exempt: nom de touche
+                ctrl: <kbd>Ctrl</kbd>,
+                enter: <kbd>{t('sessions.new.enterKey')}</kbd>,
+                action:
+                  tab === 'prompt'
+                    ? wtOn
+                      ? t('sessions.new.actionWtLaunch')
+                      : t('sessions.new.actionLaunch')
+                    : t('sessions.new.actionResume'),
+              })}
             </span>
           )}
           <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>
-            Annuler
+            {t('sessions.confirm.cancel')}
           </button>
           <button className="btn pri" disabled={!canGo}>
-            {busy ? (tab === 'prompt' ? 'Lancement…' : 'Reprise…') : tab === 'prompt' ? 'Lancer ▶' : 'Reprendre ▶'}
+            {busy
+              ? tab === 'prompt'
+                ? t('sessions.new.launching')
+                : t('sessions.new.resuming')
+              : tab === 'prompt'
+                ? t('sessions.new.launch')
+                : t('sessions.new.resume')}
           </button>
         </div>
       </form>

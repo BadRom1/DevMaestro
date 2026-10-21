@@ -107,8 +107,11 @@ export interface DevMaestroApi {
   openExternal(url: string): Promise<{ ok: true } | { ok: false; error: RpcFailure }>
   /** Dossier personnel de l'utilisateur (lecture seule), `null` si inconnu. */
   home(): Promise<string | null>
-  /** Réglages de l'app (gardés par le processus principal). `fresh` : aucun fichier encore. */
-  settings(): Promise<{ settings: AppSettings; fresh: boolean } | null>
+  /**
+   * Réglages de l'app (gardés par le processus principal). `fresh` : aucun fichier encore.
+   * `systemLocales` (lot 20) : langues du système par ordre de préférence (absent : processus principal plus ancien).
+   */
+  settings(): Promise<{ settings: AppSettings; fresh: boolean; systemLocales?: string[] } | null>
   /** Modifie les réglages (validés par le processus principal) ; renvoie les réglages à jour. */
   updateSettings(patch: SettingsPatch): Promise<{ ok: true; settings: AppSettings } | { ok: false; error: RpcFailure }>
   /** Sélecteur de dossier du système ; `null` si annulé. */

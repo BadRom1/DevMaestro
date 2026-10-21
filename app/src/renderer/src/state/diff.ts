@@ -2,17 +2,40 @@
  * Onglet « Diff » : ordre des fichiers et modèle d'affichage des hunks
  * (numéros de ligne, genre de ligne, ancre de commentaire). Calculs purs.
  */
+import { collator, t, type PlainKey } from '../../../shared/i18n'
 import type { DiffBase, DiffFile, DiffStatus, FileDiff, ReviewSide } from '../../../shared/protocol'
 
-export const STATUS_LABELS: Record<DiffStatus, string> = {
-  A: 'ajouté',
-  M: 'modifié',
-  D: 'supprimé',
-  R: 'renommé',
-  '?': 'non suivi',
+const STATUS_KEYS: Record<DiffStatus, PlainKey> = {
+  A: 'files.status.added',
+  M: 'files.status.modified',
+  D: 'files.status.deleted',
+  R: 'files.status.renamed',
+  '?': 'files.status.untracked',
 }
 
-const collator = new Intl.Collator('fr', { numeric: true, sensitivity: 'base' })
+/** Libellé d'un statut de fichier (« ajouté », « modifié »…), dans la langue courante. */
+export function statusLabel(s: DiffStatus): string {
+  return t(STATUS_KEYS[s])
+}
+
+/** Libellés des statuts, lus à l'usage (accesseurs) : toujours dans la langue courante. */
+export const STATUS_LABELS: Readonly<Record<DiffStatus, string>> = Object.freeze({
+  get A() {
+    return statusLabel('A')
+  },
+  get M() {
+    return statusLabel('M')
+  },
+  get D() {
+    return statusLabel('D')
+  },
+  get R() {
+    return statusLabel('R')
+  },
+  get '?'() {
+    return statusLabel('?')
+  },
+})
 
 /**
  * Ordre de la liste : fichiers suivis par chemin (dossiers et noms dans
@@ -20,7 +43,7 @@ const collator = new Intl.Collator('fr', { numeric: true, sensitivity: 'base' })
  */
 export function sortFiles(files: readonly DiffFile[]): DiffFile[] {
   return [...files].sort(
-    (a, b) => Number(a.status === '?') - Number(b.status === '?') || collator.compare(a.path, b.path) || (a.path < b.path ? -1 : 1),
+    (a, b) => Number(a.status === '?') - Number(b.status === '?') || collator().compare(a.path, b.path) || (a.path < b.path ? -1 : 1),
   )
 }
 
@@ -82,9 +105,11 @@ export function diffRows(fd: FileDiff | null | undefined): DiffRow[] {
 
 /** « depuis origin/main (a1b2c3d) », ou « depuis HEAD (…) » sans branche par défaut. */
 export function baseLabel(base: DiffBase | null | undefined): string {
-  if (!base) return 'base inconnue'
+  if (!base) return t('files.diff.unknownBase')
   const sha = base.sha ? ` (${base.sha.slice(0, 7)})` : ''
-  return base.kind === 'head' ? `depuis le dernier commit ${base.ref || 'HEAD'}${sha}` : `depuis ${base.ref}${sha}`
+  return base.kind === 'head'
+    ? t('files.diff.sinceLastCommit', { ref: base.ref || 'HEAD', sha })
+    : t('files.diff.since', { ref: base.ref, sha })
 }
 
 /** Totaux des compteurs connus ; `unknown` : au moins un fichier non compté (« ? »). */
@@ -108,8 +133,19 @@ export function countLabel(n: number | null | undefined): string {
  * singulier) ; nombre inconnu : « nombre inconnu d'ajouts ».
  */
 export function linesLabel(n: number | null | undefined, word: 'ajout' | 'suppression'): string {
-  if (typeof n !== 'number') return `nombre inconnu ${word === 'ajout' ? 'd’ajouts' : 'de suppressions'}`
-  return `${n} ${word}${n > 1 ? 's' : ''}`
+  const add = word === 'ajout'
+  if (typeof n !== 'number') return t(add ? 'files.unknownAdditions' : 'files.unknownDeletions')
+  return t(add ? 'files.additions' : 'files.deletions', { count: n })
+}
+
+/** « 3 ajouts » (ou nombre inconnu d'ajouts). */
+export function additionsLabel(n: number | null | undefined): string {
+  return linesLabel(n, 'ajout')
+}
+
+/** « 1 suppression » (ou nombre inconnu de suppressions). */
+export function deletionsLabel(n: number | null | undefined): string {
+  return linesLabel(n, 'suppression')
 }
 
 /** Nombre de fichiers ignorés car non UTF-8 (liste ou nombre selon le démon). */

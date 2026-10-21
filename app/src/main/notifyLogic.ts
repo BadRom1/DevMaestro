@@ -9,6 +9,7 @@
  *   affiche cette session (l'utilisateur la voit déjà).
  * - Une demande close (réponse, fin de tour…) retire sa notification.
  */
+import { t } from '../shared/i18n'
 import type { ChecksState, Demand, Session, WorktreeInfo } from '../shared/protocol'
 import { summarizeToolInput } from '../shared/summary'
 import { cleanupCandidate, hasOwnWork } from '../shared/worktrees'
@@ -104,25 +105,25 @@ function basename(p: string): string {
 export const TITLE_MAX = 80
 export const BODY_MAX = 180
 
-/** Titre et texte (français, sur une ligne, tronqués) d'une demande. */
+/** Titre et texte (langue courante du processus principal, sur une ligne, tronqués) d'une demande. */
 export function notificationContent(
   session: Pick<Session, 'id' | 'cwd' | 'project_root' | 'display_name' | 'title' | 'branch'> | null,
   demand: Demand,
 ): { title: string; body: string } {
   const name =
-    session?.display_name?.trim() || session?.title?.trim() || session?.branch?.trim() || (session ? session.id.slice(0, 8) : 'Session')
+    session?.display_name?.trim() || session?.title?.trim() || session?.branch?.trim() || (session ? session.id.slice(0, 8) : t('main.notify.session'))
   const project = session ? basename(session.project_root ?? session.cwd) : null
   const title = oneLine(project && project !== name ? `${name} · ${project}` : name, TITLE_MAX)
   let body: string
   if (demand.detailed === false) {
-    body = demand.kind === 'question' ? 'Claude te pose une question.' : 'Claude attend une permission.'
+    body = demand.kind === 'question' ? t('main.notify.question') : t('main.notify.permission')
   } else if (demand.kind === 'question') {
     const q = demand.questions[0]
     const more = demand.questions.length > 1 ? ` (+${demand.questions.length - 1})` : ''
-    body = q ? `Question : ${q.question}${more}` : 'Claude te pose une question.'
+    body = q ? t('main.notify.questionBody', { question: q.question, more }) : t('main.notify.question')
   } else {
     const what = summarizeToolInput(demand.tool_name, demand.tool_input)
-    body = `Permission : ${demand.tool_name}${what ? ` · ${what}` : ''}`
+    body = t('main.notify.permissionBody', { tool: demand.tool_name, what: what ? ` · ${what}` : '' })
   }
   return { title, body: oneLine(body, BODY_MAX) }
 }
@@ -215,7 +216,7 @@ export class IntegratedNotifier {
 
 /** Texte de la notification « branche intégrée ». */
 export function integratedContent(root: string, w: Pick<WorktreeInfo, 'branch' | 'path'>): { title: string; body: string } {
-  const title = oneLine(`La branche ${w.branch ?? basename(w.path)} est intégrée : nettoyer le worktree ?`, TITLE_MAX * 2)
+  const title = oneLine(t('main.notify.integrated', { branch: w.branch ?? basename(w.path) }), TITLE_MAX * 2)
   const body = oneLine(`${basename(root)} · ${w.path}`, BODY_MAX)
   return { title, body }
 }
@@ -255,9 +256,9 @@ export function ciFailureContent(
   session: Pick<Session, 'id' | 'cwd' | 'project_root' | 'display_name' | 'title' | 'branch'> | null,
 ): { title: string; body: string } {
   const name =
-    session?.display_name?.trim() || session?.title?.trim() || session?.branch?.trim() || (session ? session.id.slice(0, 8) : 'une session')
-  const title = oneLine(`CI en échec sur ${name}`, TITLE_MAX)
+    session?.display_name?.trim() || session?.title?.trim() || session?.branch?.trim() || (session ? session.id.slice(0, 8) : t('main.notify.aSession'))
+  const title = oneLine(t('main.notify.ciFailed', { name }), TITLE_MAX)
   const where = session ? [basename(session.project_root ?? session.cwd), session.branch].filter(Boolean).join(' · ') : ''
-  const body = oneLine(where ? `${where} — « Voir l’échec » dans l’app` : '« Voir l’échec » dans l’app', BODY_MAX)
+  const body = oneLine(where ? t('main.notify.ciWhere', { where }) : t('main.notify.ciSeeFailure'), BODY_MAX)
   return { title, body }
 }

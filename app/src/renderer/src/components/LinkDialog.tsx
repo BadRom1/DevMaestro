@@ -1,11 +1,13 @@
 import { useState } from 'react'
 
 import { api } from '../api'
+import { useT } from '../i18n'
 import { describeError } from '../state/errors'
 import { Modal } from './Modal'
 
 /** Confirmation avant d'ouvrir un lien (terminal, fichier Markdown) dans le navigateur. */
 export function LinkDialog({ url, onClose }: { url: string; onClose: () => void }) {
+  const t = useT()
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   async function open() {
@@ -13,12 +15,12 @@ export function LinkDialog({ url, onClose }: { url: string; onClose: () => void 
     const r = await api.openExternal(url)
     setBusy(false)
     if (r.ok) onClose()
-    else setError(describeError(r.error.code, r.error.message))
+    else setError(describeError(r.error.code, r.error.message, r.error.data))
   }
   return (
-    <Modal title="Ouvrir le lien ?" onClose={onClose} width={560}>
+    <Modal title={t('forge.issues.link.title')} onClose={onClose} width={560}>
       <div className="mb">
-        <p style={{ margin: 0 }}>Ce lien mène hors de DevMaestro. L’ouvrir dans ton navigateur ?</p>
+        <p style={{ margin: 0 }}>{t('forge.issues.link.body')}</p>
         <code className="mono" style={{ overflowWrap: 'anywhere' }}>
           {url}
         </code>
@@ -32,10 +34,10 @@ export function LinkDialog({ url, onClose }: { url: string; onClose: () => void 
           <span style={{ marginRight: 'auto' }} />
         )}
         <button className="btn ghost" onClick={onClose} data-autofocus>
-          Annuler
+          {t('forge.issues.link.cancel')}
         </button>
         <button className="btn pri" disabled={busy} onClick={() => void open()}>
-          Ouvrir
+          {t('forge.issues.link.open')}
         </button>
       </div>
     </Modal>

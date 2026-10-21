@@ -10,12 +10,24 @@
  */
 import { useEffect, useLayoutEffect, useState } from 'react'
 
+import { t as translate } from '../../../shared/i18n'
 import { ErrorCode, type SlashCommand } from '../../../shared/protocol'
 import { CallError, call, errorText } from '../api'
-import { BUILTIN_COMMANDS, conflictLabel, listNote, normalizeCommands, sourceLabel, suggestionsLabel } from '../state/slashCommands'
+import { useT } from '../i18n'
+import {
+  BUILTIN_COMMANDS,
+  commandTexts,
+  conflictLabel,
+  listNote,
+  normalizeCommands,
+  sourceLabel,
+  suggestionsLabel,
+} from '../state/slashCommands'
 
-/** Repli, démon sans la capacité `slash_commands`. */
-export const SLASH_OLD_DAEMON = 'Démon ancien : seules les commandes intégrées sont proposées.'
+/** Repli, démon sans la capacité `slash_commands` (langue courante). */
+export function slashOldDaemon(): string {
+  return translate('conversation.slash.oldDaemon')
+}
 
 /**
  * Commandes proposées pour la session : relues auprès du démon à chaque
@@ -43,16 +55,16 @@ export function useSlashCommands(
         setList(cmds)
         const o = r as { truncated?: unknown; ignored?: unknown }
         const ignored = typeof o.ignored === 'number' && Number.isFinite(o.ignored) ? Math.max(0, Math.floor(o.ignored)) : 0
-        setNote(cmds ? listNote(o.truncated === true, ignored) : 'Réponse illisible du démon : commandes intégrées seulement.')
+        setNote(cmds ? listNote(o.truncated === true, ignored) : translate('conversation.slash.unreadable'))
       })
       .catch((e: unknown) => {
         if (!alive) return
         if (e instanceof CallError && e.failure.code === ErrorCode.MethodNotFound) {
           setRefused(true)
           setList(null)
-          setNote(SLASH_OLD_DAEMON)
+          setNote(slashOldDaemon())
         } else {
-          setNote(`Liste des commandes indisponible (${errorText(e)}) : commandes intégrées seulement.`)
+          setNote(translate('conversation.slash.unavailable', { error: errorText(e) }))
         }
       })
     return () => {
@@ -60,7 +72,7 @@ export function useSlashCommands(
     }
   }, [wanted, supported, sessionId, refused])
 
-  if (supported === false || refused) return { commands: BUILTIN_COMMANDS, note: SLASH_OLD_DAEMON }
+  if (supported === false || refused) return { commands: BUILTIN_COMMANDS, note: slashOldDaemon() }
   return { commands: list ?? BUILTIN_COMMANDS, note: supported === true ? note : null }
 }
 
@@ -85,6 +97,7 @@ export function SlashCommandPopup({
   anchor: HTMLElement | null
   onPick: (index: number) => void
 }) {
+  const t = useT()
   const [maxHeight, setMaxHeight] = useState(320)
   useLayoutEffect(() => {
     const cv = anchor?.closest('.cv')
@@ -98,29 +111,32 @@ export function SlashCommandPopup({
   }, [listId, active])
   return (
     <div className="slash-pop" style={{ maxHeight }}>
-      <ul role="listbox" id={listId} aria-label="Slash commands" className="slash-list">
-        {items.map((c, i) => (
-          <li
-            // Un même nom peut figurer deux fois (intégrée et reprise marquée).
-            key={`${c.source}:${c.plugin ?? ''}:${c.name}`}
-            id={optionId(listId, i)}
-            role="option"
-            aria-selected={i === active}
-            className={i === active ? 'slash-opt on' : 'slash-opt'}
-            // Le focus reste dans le champ.
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => onPick(i)}
-          >
-            <span className="slash-l1">
-              <span className="slash-name">/{c.name}</span>
-              {c.argument_hint && <span className="slash-hint">{c.argument_hint}</span>}
-              <span className="slash-src">{sourceLabel(c)}</span>
-              {conflictLabel(c) && <span className="slash-conflict">{conflictLabel(c)}</span>}
-              {c.interactive && <span className="slash-tui">s’ouvre dans le terminal</span>}
-            </span>
-            {c.description && <span className="slash-desc">{c.description}</span>}
-          </li>
-        ))}
+      <ul role="listbox" id={listId} aria-label={t('conversation.slash.listLabel')} className="slash-list">
+        {items.map((c, i) => {
+          const texts = commandTexts(c)
+          return (
+            <li
+              // Un même nom peut figurer deux fois (intégrée et reprise marquée).
+              key={`${c.source}:${c.plugin ?? ''}:${c.name}`}
+              id={optionId(listId, i)}
+              role="option"
+              aria-selected={i === active}
+              className={i === active ? 'slash-opt on' : 'slash-opt'}
+              // Le focus reste dans le champ.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => onPick(i)}
+            >
+              <span className="slash-l1">
+                <span className="slash-name">/{c.name}</span>
+                {texts.argument_hint && <span className="slash-hint">{texts.argument_hint}</span>}
+                <span className="slash-src">{sourceLabel(c)}</span>
+                {conflictLabel(c) && <span className="slash-conflict">{conflictLabel(c)}</span>}
+                {c.interactive && <span className="slash-tui">{t('conversation.slash.interactive')}</span>}
+              </span>
+              {texts.description && <span className="slash-desc">{texts.description}</span>}
+            </li>
+          )
+        })}
       </ul>
       {note && <p className="slash-note">{note}</p>}
     </div>

@@ -13,17 +13,19 @@ import type { ITheme } from '@xterm/xterm'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { previewLabel } from '../../../shared/preview'
-import type { Runner, RunnerFile, Session } from '../../../shared/protocol'
-import { RUNNER_FILE_STATE_LABELS, openableRunnerFile, riskyRunnerFile } from '../../../shared/runnerFiles'
+import type { Runner, RunnerFile, RunnerFileState, Session } from '../../../shared/protocol'
+import { numberFormat, t as tr, type PlainKey } from '../../../shared/i18n'
+import { openableRunnerFile, riskyRunnerFile } from '../../../shared/runnerFiles'
 import { ErrorCode } from '../../../shared/protocol'
 import type { RunnerConfirmation } from '../../../shared/bridge'
 import { CallError, api, call, errorText, runnerChannel } from '../api'
-import { describeError } from '../state/errors'
+import { useI18n, useT } from '../i18n'
+import { daemonText, describeError } from '../state/errors'
 import { relativeTime } from '../state/format'
 import {
-  CONFIRM_TEXT,
-  FILES_TEXT,
   commandText,
+  confirmText,
+  filesText,
   groupRunners,
   normalizeList,
   normalizeProcess,
@@ -41,6 +43,20 @@ import { Modal } from './Modal'
 /** Origine de la page (refusée dans l'aperçu), `null` pour file://. */
 function pageOrigin(): string | null {
   return window.location.protocol === 'file:' ? null : window.location.origin
+}
+
+/** Libellé de l'état d'un fichier de l'empreinte (texte, jamais la seule couleur). */
+const FILE_STATE_KEYS: Record<RunnerFileState, PlainKey> = {
+  ok: 'sessions.runners.fileState.ok',
+  absent: 'sessions.runners.fileState.absent',
+  outside: 'sessions.runners.fileState.outside',
+  too_large: 'sessions.runners.fileState.tooLarge',
+  unresolved: 'sessions.runners.fileState.unresolved',
+}
+
+/** Erreur produite par l'app (preload trop ancien) : marquée `origin: "app"`, pas un texte du démon. */
+function oldPreload() {
+  return { ok: false, error: { code: ErrorCode.Internal, message: tr('sessions.runners.oldPreload'), data: { origin: 'app' } } } as const
 }
 
 /** Attente de la fin d'une exécution avant de la relancer (SIGKILL au bout de 3 s côté démon). */
@@ -64,6 +80,7 @@ export function RunnersView({
   /** « Voir » un fichier de l'empreinte : onglet « Fichiers », en lecture. */
   onOpenFile?: (path: string) => void
 }) {
+  const { t, rich } = useI18n()
   const [data, setData] = useState<RunnersData | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -142,21 +159,22 @@ export function RunnersView({
     [],
   )
 
+  const termLabel = t('sessions.runners.terminalLabel')
   const stream = useMemo<TerminalStream>(
     () => ({
       channel: runnerChannel,
       view: (id, size) => {
         if (!api.viewRunner) {
-          return Promise.resolve({ ok: false, error: { code: ErrorCode.Internal, message: 'app à redémarrer (preload ancien)' } })
+          return Promise.resolve(oldPreload())
         }
         return id
           ? api.viewRunner({ session_id: sessionId, process_id: id, ...size })
           : api.viewRunner({ session_id: null, process_id: null })
       },
       resize: (id, cols, rows) => api.resizeRunner?.({ process_id: id, cols, rows }),
-      label: 'Terminal du runner',
+      label: termLabel,
     }),
-    [sessionId],
+    [sessionId, termLabel],
   )
 
   const runnerOf = (id: string): Runner | undefined => data?.runners.find((r) => r.id === id)
@@ -188,7 +206,7 @@ export function RunnersView({
         setBusy(null)
         await load()
         return start(runner, true)
-      } else setActionError(`Lancement de « ${runner.label} » impossible : ${errorText(e)}`)
+      } else setActionError(t('sessions.runners.startFailed', { label: runner.label, error: errorText(e) }))
     } finally {
       setBusy(null)
     }
@@ -199,14 +217,14 @@ export function RunnersView({
     setBusy(c.runner_id)
     const r = api.confirmRunner
       ? await api.confirmRunner({ session_id: sessionId, runner_id: c.runner_id, fingerprint: c.fingerprint })
-      : ({ ok: false, error: { code: ErrorCode.Internal, message: 'app à redémarrer (preload ancien)' } } as const)
+      : oldPreload()
     setBusy(null)
     if (!r.ok) {
       const next = r.error.code === ErrorCode.RunnerConfirmationRequired ? readConfirmation(r.error.data) : null
       if (next) setConfirm({ c: next, changed: true })
       else {
         setConfirm(null)
-        setActionError(`Lancement de « ${c.label} » impossible : ${describeError(r.error.code, r.error.message)}`)
+        setActionError(t('sessions.runners.startFailed', { label: c.label, error: describeError(r.error.code, r.error.message, r.error.data) }))
       }
       return
     }
@@ -220,7 +238,7 @@ export function RunnersView({
     try {
       await call('runners.stop', { id: sessionId, process_id: p.processId })
     } catch (e) {
-      setActionError(`Arrêt impossible : ${errorText(e)}`)
+      setActionError(t('sessions.runners.stopFailed', { error: errorText(e) }))
     } finally {
       setBusy(null)
     }
@@ -230,7 +248,7 @@ export function RunnersView({
   async function restart(p: RunnerProc) {
     const runner = runnerOf(p.runnerId)
     if (!runner) {
-      setActionError('Ce runner n’est plus détecté dans le worktree : impossible de le relancer.')
+      setActionError(t('sessions.runners.restartGone'))
       return
     }
     if (p.state === 'running') {
@@ -243,11 +261,11 @@ export function RunnersView({
           const r = await load()
           const still = r?.running.find((x) => x.processId === p.processId)
           if (!still || still.state !== 'running') break
-          if (Date.now() > until) throw new Error('l’exécution ne s’est pas arrêtée à temps')
+          if (Date.now() > until) throw new Error(t('sessions.runners.stopTimeout'))
           await new Promise((ok) => setTimeout(ok, 400))
         }
       } catch (e) {
-        setActionError(`Relance impossible : ${errorText(e)}`)
+        setActionError(t('sessions.runners.restartFailed', { error: errorText(e) }))
         setBusy(null)
         return
       }
@@ -259,10 +277,10 @@ export function RunnersView({
   if (loadError && !data) {
     return (
       <div className="empty" role="alert">
-        <b>Runners indisponibles</b>
+        <b>{t('sessions.runners.unavailable')}</b>
         <span className="hint">{loadError}</span>
         <button className="btn sm" onClick={() => void load()}>
-          Réessayer
+          {t('sessions.runners.retry')}
         </button>
       </div>
     )
@@ -270,7 +288,7 @@ export function RunnersView({
   if (!data) {
     return (
       <p className="empty" role="status">
-        Recherche des commandes du dépôt…
+        {t('sessions.runners.searching')}
       </p>
     )
   }
@@ -280,14 +298,14 @@ export function RunnersView({
     <div className="runners-view">
       <div className="rn-list">
         <div className="cap">
-          <b>Commandes détectées</b>
-          <button className="btn sm ghost" onClick={() => void load()} title="Relire les fichiers du worktree">
-            Actualiser
+          <b>{t('sessions.runners.detected')}</b>
+          <button className="btn sm ghost" onClick={() => void load()} title={t('sessions.runners.refreshTitle')}>
+            {t('sessions.runners.refresh')}
           </button>
         </div>
         {groups.length === 0 && (
           <p className="hint pad">
-            Aucune commande trouvée (package.json, Makefile, justfile, Cargo.toml, go.mod, compose.yaml, pyproject.toml).
+            {t('sessions.runners.none')}
           </p>
         )}
         {groups.map((g) => (
@@ -301,7 +319,7 @@ export function RunnersView({
                     <div className="rn-l1">
                       <span className="rn-name">{r.label}</span>
                       {live > 0 && (
-                        <span className="chip ag-chip" title={`${live} en cours`}>
+                        <span className="chip ag-chip" title={t('sessions.runners.liveTitle', { count: live })}>
                           <span className="st running" aria-hidden="true" /> {live}
                         </span>
                       )}
@@ -309,12 +327,12 @@ export function RunnersView({
                         className="btn sm"
                         disabled={busy !== null}
                         onClick={() => void start(r)}
-                        aria-label={`Lancer « ${r.label} » : ${commandText(r)}`}
+                        aria-label={t('sessions.runners.startLabel', { label: r.label, command: commandText(r) })}
                       >
-                        Lancer
+                        {t('sessions.runners.start')}
                       </button>
                     </div>
-                    <code className="mono rn-cmd" title={r.source ? `Depuis ${r.source}` : undefined}>
+                    <code className="mono rn-cmd" title={r.source ? t('sessions.runners.from', { source: r.source }) : undefined}>
                       {commandText(r)}
                     </code>
                   </li>
@@ -324,8 +342,8 @@ export function RunnersView({
           </section>
         ))}
         {running.length > 0 && (
-          <section className="rn-group" aria-label="Exécutions">
-            <h3 className="rn-gt">Exécutions</h3>
+          <section className="rn-group" aria-label={t('sessions.runners.procs')}>
+            <h3 className="rn-gt">{t('sessions.runners.procs')}</h3>
             <ul role="list">
               {running.map((p) => {
                 const r = runnerOf(p.runnerId)
@@ -352,7 +370,7 @@ export function RunnersView({
         {actionError && (
           <div className="rn-err err" role="alert">
             {actionError}
-            <button className="btn sm ghost" onClick={() => setActionError(null)} aria-label="Fermer le message">
+            <button className="btn sm ghost" onClick={() => setActionError(null)} aria-label={t('sessions.runners.closeMessage')}>
               ×
             </button>
           </div>
@@ -364,28 +382,29 @@ export function RunnersView({
             <span className={`rn-state ${stateTone(current)}`} role="status">
               {stateLabel(current)}
             </span>
+            {/* i18n-exempt: nom de variable d'environnement */}
             {current.port !== null && <span className="hint">PORT={current.port}</span>}
             <span className="rn-acts">
               {current.state === 'running' && (
                 <button className="btn sm danger" disabled={busy !== null} onClick={() => void stop(current)}>
-                  Arrêter
+                  {t('sessions.runners.stop')}
                 </button>
               )}
               <button
                 className="btn sm"
                 disabled={busy !== null || !runnerOf(current.runnerId)}
                 onClick={() => void restart(current)}
-                title={runnerOf(current.runnerId) ? undefined : 'Ce runner n’est plus détecté dans le worktree'}
+                title={runnerOf(current.runnerId) ? undefined : t('sessions.runners.goneTitle')}
               >
-                Relancer
+                {t('sessions.runners.restart')}
               </button>
             </span>
           </div>
         ) : (
-          <p className="hint rn-none">Aucune exécution : lance une commande à gauche.</p>
+          <p className="hint rn-none">{t('sessions.runners.noProc')}</p>
         )}
         {current && urls.length > 0 && (
-          <ul className="rn-urls" role="list" aria-label="Adresses repérées">
+          <ul className="rn-urls" role="list" aria-label={t('sessions.runners.urls')}>
             {urls.map((u) => {
               // Adresse normalisée si l'aperçu l'accepte (sinon : navigateur seulement).
               const target = previewable([u], origin)[0] ?? null
@@ -397,13 +416,13 @@ export function RunnersView({
                     className="btn sm"
                     disabled={!ok}
                     aria-pressed={!!target && preview?.url === target}
-                    title={ok ? 'Afficher dans un panneau de l’onglet' : 'Aperçu limité à http://localhost, 127.0.0.1 et [::1]'}
+                    title={ok ? t('sessions.runners.previewTitle') : t('sessions.runners.previewLimited')}
                     onClick={() => target && setPreview((p) => (p?.url === target ? null : { url: target, n: 0 }))}
                   >
-                    Aperçu
+                    {t('sessions.runners.preview')}
                   </button>
                   <button className="btn sm ghost" onClick={() => onLink(u)}>
-                    Ouvrir dans le navigateur
+                    {t('sessions.runners.openBrowser')}
                   </button>
                 </li>
               )
@@ -418,20 +437,20 @@ export function RunnersView({
               alive={current?.state === 'running'}
               theme={theme}
               onLink={onLink}
-              emptyText="Le terminal de l’exécution choisie s’affiche ici."
+              emptyText={t('sessions.runners.termEmpty')}
             />
           </div>
           {preview && (
-            <div className="rn-preview" aria-label="Aperçu web">
+            <div className="rn-preview" aria-label={t('sessions.runners.webPreview')}>
               <div className="rn-pbar">
                 <code className="mono">{previewLabel(preview.url)}</code>
                 <button className="btn sm ghost" onClick={() => setPreview((p) => (p ? { ...p, n: p.n + 1 } : p))}>
-                  Recharger
+                  {t('sessions.runners.reload')}
                 </button>
                 <button className="btn sm ghost" onClick={() => onLink(preview.url)}>
-                  Ouvrir dans le navigateur
+                  {t('sessions.runners.openBrowser')}
                 </button>
-                <button className="btn sm ghost" onClick={() => setPreview(null)} aria-label="Fermer l’aperçu">
+                <button className="btn sm ghost" onClick={() => setPreview(null)} aria-label={t('sessions.runners.closePreview')}>
                   ×
                 </button>
               </div>
@@ -439,7 +458,7 @@ export function RunnersView({
               <iframe
                 key={`${preview.url}#${preview.n}`}
                 src={preview.url}
-                title={`Aperçu de ${previewLabel(preview.url)}`}
+                title={t('sessions.runners.previewOf', { url: previewLabel(preview.url) })}
                 sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
                 referrerPolicy="no-referrer"
                 allow=""
@@ -449,26 +468,26 @@ export function RunnersView({
         </div>
       </div>
       {confirm && (
-        <Modal title="Lancer une commande du dépôt ?" onClose={() => setConfirm(null)} width={600} busy={busy !== null}>
+        <Modal title={t('sessions.runners.confirmTitle')} onClose={() => setConfirm(null)} width={600} busy={busy !== null}>
           <div className="mb">
             {confirm.changed && (
               <p className="err" role="alert" style={{ margin: 0 }}>
-                La commande a changé depuis son affichage (fichier du dépôt modifié) : relis-la.
+                {t('sessions.runners.changed')}
               </p>
             )}
-            <p style={{ margin: 0 }}>{CONFIRM_TEXT}</p>
+            <p style={{ margin: 0 }}>{confirmText()}</p>
             <code className="mono" style={{ overflowWrap: 'anywhere' }}>
               {commandText(confirm.c)}
             </code>
             {confirm.c.body && (
               <>
-                <span className="hint">Ce qui sera exécuté (contenu du dépôt) :</span>
+                <span className="hint">{t('sessions.runners.body')}</span>
                 <pre className="mono rn-body-src">
                   <code>{confirm.c.body}</code>
                 </pre>
                 {confirm.c.body_truncated && (
                   <p className="hint rn-cut" role="note" style={{ margin: 0 }}>
-                    Extrait coupé : la suite n’est pas montrée. Ouvre le fichier pour tout lire.
+                    {t('sessions.runners.bodyCut')}
                   </p>
                 )}
               </>
@@ -487,18 +506,19 @@ export function RunnersView({
               />
             )}
             <p className="hint" style={{ margin: 0 }}>
-              Dans <span className="mono">{confirm.c.worktree}</span>
-              {confirm.c.source ? ` · depuis ${confirm.c.source}` : ''}. Ta réponse est retenue pour cette commande dans ce
-              worktree ; si elle change, elle te sera redemandée.
+              {rich('sessions.runners.confirmWhere', {
+                worktree: <span className="mono">{confirm.c.worktree}</span>,
+                source: confirm.c.source ? t('sessions.runners.confirmSource', { source: confirm.c.source }) : '',
+              })}
             </p>
           </div>
           <div className="mf">
             <span style={{ marginRight: 'auto' }} />
             <button className="btn ghost" onClick={() => setConfirm(null)} data-autofocus>
-              Annuler
+              {t('sessions.confirm.cancel')}
             </button>
             <button className="btn pri" disabled={busy !== null} onClick={() => void accept(confirm.c)}>
-              Lancer
+              {t('sessions.runners.start')}
             </button>
           </div>
         </Modal>
@@ -513,35 +533,43 @@ export function RunnersView({
  * en entier (trop gros, non résolu, hors du worktree).
  */
 function RunnerFiles({ files, onOpen }: { files: readonly RunnerFile[]; onOpen?: (path: string) => void }) {
+  const t = useT()
   const risky = files.filter(riskyRunnerFile)
   return (
     <div className="rn-files">
-      <span className="hint">Fichiers lus pour cette commande :</span>
+      <span className="hint">{t('sessions.runners.filesRead')}</span>
       <ul role="list">
         {files.map((f) => (
           <li key={f.path} className={`rn-file ${f.state}`}>
             <span className="mono rn-file-p">{f.path}</span>
             <span className={`fbadge sm${riskyRunnerFile(f) ? ' pend' : f.state === 'absent' ? ' muted' : ' ok'}`}>
               {riskyRunnerFile(f) && <span aria-hidden="true">⚠ </span>}
-              {RUNNER_FILE_STATE_LABELS[f.state]}
+              {t(FILE_STATE_KEYS[f.state])}
             </span>
             {f.size !== null && <span className="hint">{formatBytes(f.size)}</span>}
-            {f.note && <span className="hint rn-file-note">{f.note}</span>}
+            {f.note && <span className="hint rn-file-note">{daemonText(f.note)}</span>}
             {onOpen && openableRunnerFile(f) && (
-              <button type="button" className="btn sm ghost" onClick={() => onOpen(f.path)} aria-label={`Voir ${f.path} dans l’onglet Fichiers`}>
-                Voir
+              <button type="button" className="btn sm ghost" onClick={() => onOpen(f.path)} aria-label={t('sessions.runners.seeLabel', { path: f.path })}>
+                {t('sessions.runners.see')}
               </button>
             )}
           </li>
         ))}
       </ul>
-      <p style={{ margin: 0 }}>{FILES_TEXT}</p>
+      <p style={{ margin: 0 }}>{filesText()}</p>
       {risky.length > 0 && (
         <p className="forge-warn" role="alert">
           <span aria-hidden="true">⚠ </span>
-          {risky.length > 1 ? `${risky.length} fichiers n’ont pas pu être lus en entier` : `${risky[0]!.path} n’a pas pu être lu en entier`} (
-          {risky.map((f) => RUNNER_FILE_STATE_LABELS[f.state]).filter((v, i, a) => a.indexOf(v) === i).join(', ')}) : une partie de ce qui
-          s’exécute n’est pas couverte par ta confirmation. Relis-les avant de lancer.
+          {t('sessions.runners.riskyWarn', {
+            lead:
+              risky.length > 1
+                ? t('sessions.runners.riskyMany', { count: risky.length })
+                : t('sessions.runners.riskyOne', { path: risky[0]!.path }),
+            states: risky
+              .map((f) => t(FILE_STATE_KEYS[f.state]))
+              .filter((v, i, a) => a.indexOf(v) === i)
+              .join(', '),
+          })}
         </p>
       )}
     </div>
@@ -550,8 +578,9 @@ function RunnerFiles({ files, onOpen }: { files: readonly RunnerFile[]; onOpen?:
 
 /** Taille lisible : « 812 o », « 4,2 Kio », « 1,3 Mio ». */
 function formatBytes(n: number): string {
-  if (n < 1024) return `${n} o`
+  if (n < 1024) return tr('sessions.runners.bytes', { n })
   const k = n / 1024
-  if (k < 1024) return `${k.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} Kio`
-  return `${(k / 1024).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} Mio`
+  const nf = numberFormat({ maximumFractionDigits: 1 })
+  if (k < 1024) return tr('sessions.runners.kib', { n: nf.format(k) })
+  return tr('sessions.runners.mib', { n: nf.format(k / 1024) })
 }

@@ -12,6 +12,7 @@
  * état et l'effet à lancer (arrêt ou reprise) ; le composant exécute les
  * effets et fournit l'heure et les instantanés de la session.
  */
+import { t } from '../../../shared/i18n'
 import { ErrorCode, type PastSession, type Profile, type Session } from '../../../shared/protocol'
 import { QUOTA_CRIT_PCT, type QuotaView } from './quotas'
 
@@ -51,25 +52,25 @@ export function busyReason(s: Pick<Session, 'alive' | 'status' | 'pending' | 'ac
   if (!s.alive) return null
   const asks = s.pending.map((p) => p.pending.kind)
   if (asks.includes('question') || (s.status.state === 'waiting' && s.status.wait === 'question')) {
-    return 'une question attend ta réponse'
+    return t('sessions.switch.busy.question')
   }
-  if (asks.length > 0 || s.status.state === 'waiting') return 'une demande de permission attend ta réponse'
+  if (asks.length > 0 || s.status.state === 'waiting') return t('sessions.switch.busy.permission')
   const a = s.activity
   if (a && a.kind !== 'idle') {
     switch (a.kind) {
       case 'tool':
-        return a.tool ? `Claude utilise l’outil ${a.tool}` : 'Claude utilise un outil'
+        return a.tool ? t('sessions.switch.busy.toolNamed', { tool: a.tool }) : t('sessions.switch.busy.tool')
       case 'subagents':
-        return 'des sous-agents travaillent'
+        return t('sessions.switch.busy.subagents')
       case 'compacting':
-        return 'Claude compacte la conversation'
+        return t('sessions.switch.busy.compacting')
       case 'waiting':
-        return 'une demande attend ta réponse'
+        return t('sessions.switch.busy.waiting')
       default:
-        return 'Claude répond'
+        return t('sessions.switch.busy.responding')
     }
   }
-  if (s.status.state === 'running' || s.status.state === 'starting') return 'Claude travaille'
+  if (s.status.state === 'running' || s.status.state === 'starting') return t('sessions.switch.busy.working')
   return null
 }
 
@@ -286,7 +287,7 @@ export function switchStep(state: SwitchState | null, ev: SwitchEvent): SwitchRe
           kind: 'failed',
           step: 'stop',
           profile: state.target,
-          message: `la session ne s’est pas arrêtée en ${Math.round(STOP_TIMEOUT_MS / 1000)} s`,
+          message: t('sessions.switch.stopTimeout', { seconds: Math.round(STOP_TIMEOUT_MS / 1000) }),
           code: null,
         })
       }
@@ -346,7 +347,7 @@ export function switchInFlight(s: SwitchState | null | undefined): boolean {
 /** Message d'un échec de reprise : `-32015` dit que le profil ne voit pas la conversation. */
 export function resumeFailureText(code: number | null, message: string, profileLabel: string): string {
   if (code === -32015) {
-    return `le profil ${profileLabel} ne voit pas cette conversation (dossier projects/ distinct, ou pas encore de transcript) : ${message}`
+    return t('sessions.switch.resumeNotVisible', { profile: profileLabel, message })
   }
   return message
 }
@@ -354,10 +355,10 @@ export function resumeFailureText(code: number | null, message: string, profileL
 /** Ce qui risque de faire échouer aussi « Reprendre sous <origine> » après cet échec. */
 export function originRetryCaveat(code: number | null, originLabel: string): string {
   if (code === -32005) {
-    return `« Reprendre sous ${originLabel} » échouera aussi tant que le démon n’autorise pas ce mode (allow_dangerous_modes).`
+    return t('sessions.switch.caveatMode', { profile: originLabel })
   }
   if (code === -32015) {
-    return `« Reprendre sous ${originLabel} » peut aussi échouer si la conversation n’a pas encore de transcript.`
+    return t('sessions.switch.caveatTranscript', { profile: originLabel })
   }
-  return `« Reprendre sous ${originLabel} » peut échouer pour la même raison.`
+  return t('sessions.switch.caveatSame', { profile: originLabel })
 }

@@ -10,15 +10,6 @@ export const RUNNER_FILE_STATES: readonly RunnerFileState[] = ['ok', 'absent', '
 /** Fichiers gardés au plus (au-delà : ignorés, un avertissement le dit). */
 export const MAX_RUNNER_FILES = 64
 
-/** Libellé de l'état d'un fichier (texte, jamais la seule couleur). */
-export const RUNNER_FILE_STATE_LABELS: Record<RunnerFileState, string> = {
-  ok: 'lu en entier',
-  absent: 'absent',
-  outside: 'hors du worktree',
-  too_large: 'trop gros : pas lu en entier',
-  unresolved: 'non résolu',
-}
-
 /** États qui demandent un avertissement : le fichier n'a pas pu être lu en entier. */
 export function riskyRunnerFile(f: Pick<RunnerFile, 'state'>): boolean {
   return f.state === 'too_large' || f.state === 'unresolved' || f.state === 'outside'

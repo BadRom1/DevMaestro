@@ -7,6 +7,7 @@
  */
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 
+import { t } from '../../../shared/i18n'
 import { DEFAULT_ZOOM, defaultSettings } from '../../../shared/settings'
 import { api } from '../api'
 import { reportRendererError } from '../errorReport'
@@ -23,7 +24,9 @@ export class AppBoundary extends Component<{ children: ReactNode; reload?: () =>
   }
 
   override componentDidCatch(error: unknown, info: ErrorInfo): void {
+    // i18n-exempt: journal technique
     console.error('[devmaestro] erreur d’affichage :', error, info.componentStack)
+    // i18n-exempt: journal technique
     reportRendererError('erreur d’affichage (interface entière)', error, info.componentStack)
   }
 
@@ -34,6 +37,7 @@ export class AppBoundary extends Component<{ children: ReactNode; reload?: () =>
     try {
       await api?.updateSettings?.({ theme: defaultSettings().theme, ui: { zoom: DEFAULT_ZOOM } })
     } catch (e) {
+      // i18n-exempt: journal technique
       reportRendererError('réinitialisation de l’apparence', e)
     }
     this.reload()
@@ -41,26 +45,25 @@ export class AppBoundary extends Component<{ children: ReactNode; reload?: () =>
 
   override render(): ReactNode {
     if (!this.state.error) return this.props.children
+    // Composant de classe au-dessus des fournisseurs : langue globale (celle du dernier rendu).
     return (
       <div className="app-crash" role="alert">
-        <h1>Une erreur d’affichage est survenue</h1>
+        <h1>{t('shell.appBoundary.title')}</h1>
         <p className="mono">{this.state.error.message}</p>
-        <p className="hint">
-          Les sessions continuent de tourner dans le démon et tes réglages sont enregistrés : recharger l’interface ne perd rien.
-        </p>
+        <p className="hint">{t('shell.appBoundary.hint')}</p>
         <div className="row-inline">
           <button className="btn pri" autoFocus onClick={this.reload}>
-            Recharger l’interface
+            {t('shell.appBoundary.reload')}
           </button>
           <button
             className="btn"
-            title="Thème par défaut (modes, palettes, couleurs) et taille du texte à 100 %, puis rechargement"
+            title={t('shell.appBoundary.resetTitle')}
             onClick={() => void this.resetAppearance()}
           >
-            Réinitialiser l’apparence
+            {t('shell.appBoundary.reset')}
           </button>
         </div>
-        <p className="hint">« Réinitialiser l’apparence » si l’erreur revient à chaque démarrage (thème ou taille du texte en cause).</p>
+        <p className="hint">{t('shell.appBoundary.resetHint')}</p>
       </div>
     )
   }

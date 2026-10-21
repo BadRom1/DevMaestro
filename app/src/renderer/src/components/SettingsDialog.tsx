@@ -7,6 +7,7 @@
  */
 import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react'
 
+import { LANGUAGE_PREFS, type LanguagePref, type PlainKey } from '../../../shared/i18n'
 import type { Profile } from '../../../shared/protocol'
 import {
   DEFAULT_ZOOM,
@@ -39,6 +40,7 @@ import {
 import type { DeliveryMode } from '../../../shared/protocol'
 import type { ProjectDelivery } from '../../../shared/settings'
 import { api } from '../api'
+import { useI18n, useT } from '../i18n'
 import { useSettings } from '../settings'
 import type { ProjectChoice } from '../state/newSession'
 import { BASE, PALETTES, TOKEN_LABELS, paletteValue, schemeTokens, themeJson, tokenValue, type Scheme } from '../state/themeTokens'
@@ -47,52 +49,61 @@ import { Meter, ProfileBadge, StatusGlyph } from './common'
 import { ConfirmBar } from './ForgetConfirm'
 import { Modal } from './Modal'
 import { PromptSettings } from './PromptSettings'
-import { AUTO_TITLE, THEMES } from './TopBar'
+import { THEMES, autoTitle } from './TopBar'
 
 type Tab = 'apparence' | 'general' | 'consignes'
 
 const PREVIEW_GLYPHS = [
-  { kind: 'waiting', label: 'À répondre' },
-  { kind: 'running', label: 'En cours' },
-  { kind: 'idle', label: 'Inactive' },
-  { kind: 'stopped', label: 'Arrêtée' },
-  { kind: 'error', label: 'Erreur' },
-] as const
+  { kind: 'waiting', key: 'common.status.waiting' },
+  { kind: 'running', key: 'common.status.running' },
+  { kind: 'idle', key: 'common.status.idle' },
+  { kind: 'stopped', key: 'common.status.stopped' },
+  { kind: 'error', key: 'common.status.error' },
+] as const satisfies readonly { kind: string; key: PlainKey }[]
 
-const SCHEME_LABELS: Record<Scheme, string> = { light: 'Clair', dark: 'Sombre' }
+/** Nom d'un mode dans une phrase (« mode clair »). */
+const SCHEME_INLINE: Record<Scheme, PlainKey> = { light: 'settings.scheme.light.inline', dark: 'settings.scheme.dark.inline' }
+/** Titre d'un mode (« Mode clair »). */
+const SCHEME_TITLE: Record<Scheme, PlainKey> = { light: 'settings.scheme.light.title', dark: 'settings.scheme.dark.title' }
 
 /** Aperçu d'un mode (glyphes, diff, jauges, boutons) avec ses jetons, quel que soit le mode affiché. */
 function ThemePreview({ tokens, label }: { tokens: Record<string, string>; label: string }) {
+  const t = useT()
   const style = Object.fromEntries(Object.entries(tokens).map(([k, v]) => [`--${k}`, v])) as CSSProperties
   return (
     <div className="preview" style={style} aria-label={label} role="group">
       <div className="row">
-        {PREVIEW_GLYPHS.map((g) => (
-          <span key={g.kind} className="pv">
-            <StatusGlyph glyph={g} /> {g.label}
-          </span>
-        ))}
+        {PREVIEW_GLYPHS.map((g) => {
+          const glyph = { kind: g.kind, label: t(g.key) }
+          return (
+            <span key={g.kind} className="pv">
+              <StatusGlyph glyph={glyph} /> {glyph.label}
+            </span>
+          )
+        })}
       </div>
       <div className="diff" aria-hidden="true">
+        {/* i18n-exempt: extrait de code d'exemple (décoratif) */}
         <div className="del">− token := r.URL.Query().Get("code")</div>
+        {/* i18n-exempt: extrait de code d'exemple (décoratif) */}
         <div className="add">+ code, err := parseCode(r, sessions)</div>
       </div>
       <div className="row">
         <span className="pv">
-          <Meter pct={45} label="Exemple 45 %" /> 45 %
+          <Meter pct={45} label={t('settings.preview.meter', { pct: 45 })} /> {t('settings.preview.pct', { pct: 45 })}
         </span>
         <span className="pv">
-          <Meter pct={80} label="Exemple 80 %" /> 80 %
+          <Meter pct={80} label={t('settings.preview.meter', { pct: 80 })} /> {t('settings.preview.pct', { pct: 80 })}
         </span>
         <span className="pv">
-          <Meter pct={95} label="Exemple 95 %" /> 95 %
+          <Meter pct={95} label={t('settings.preview.meter', { pct: 95 })} /> {t('settings.preview.pct', { pct: 95 })}
         </span>
       </div>
       <div className="row">
-        <span className="chip pend">peut-être obsolète</span>
-        <span className="chip bad">dossier supprimé</span>
+        <span className="chip pend">{t('settings.preview.maybeStale')}</span>
+        <span className="chip bad">{t('settings.preview.folderDeleted')}</span>
         <button type="button" className="btn pri sm" tabIndex={-1}>
-          Bouton principal
+          {t('settings.preview.primaryButton')}
         </button>
       </div>
     </div>
@@ -102,11 +113,12 @@ function ThemePreview({ tokens, label }: { tokens: Record<string, string>; label
 /** Bloc d'un mode affiché (clair ou sombre) : sa palette, ses couleurs et son aperçu. */
 function SchemeBlock({ target, active, followsSystem }: { target: Scheme; active: boolean; followsSystem: boolean }) {
   const { settings, update } = useSettings()
+  const t = useT()
   const own = settings.theme[target]
   const id = useId()
   const custom = own.custom
   const customCount = Object.keys(custom).length
-  const modeName = target === 'dark' ? 'sombre' : 'clair'
+  const modeName = t(SCHEME_INLINE[target])
 
   function setColor(token: ThemeToken, value: string | null) {
     const next = { ...custom }
@@ -119,12 +131,12 @@ function SchemeBlock({ target, active, followsSystem }: { target: Scheme; active
   return (
     <section className={`scheme-block${active ? ' on' : ''}`} aria-labelledby={`${id}-h`}>
       <h3 id={`${id}-h`}>
-        Mode {modeName}
-        {active && <span className="chip">{followsSystem ? 'Affiché (suit le système)' : 'Affiché'}</span>}
+        {t(SCHEME_TITLE[target])}
+        {active && <span className="chip">{followsSystem ? t('settings.scheme.shownSystem') : t('settings.scheme.shown')}</span>}
       </h3>
       <div className="field">
         <span className="lbl" id={`${id}-pal`}>
-          Palette
+          {t('settings.scheme.palette')}
         </span>
         <div className="presets" role="group" aria-labelledby={`${id}-pal`}>
           {PALETTE_NAMES.map((name) => {
@@ -140,8 +152,9 @@ function SchemeBlock({ target, active, followsSystem }: { target: Scheme; active
               >
                 <b>{p.name}</b>
                 <span className="sw" aria-hidden="true">
-                  {(['accent', 'wait', 'run', 'done', 'err'] as const).map((t) => (
-                    <i key={t} style={{ background: values[t] }} />
+                  {/* i18n-exempt: identifiants de jetons de couleur */}
+                  {(['accent', 'wait', 'run', 'done', 'err'] as const).map((k) => (
+                    <i key={k} style={{ background: values[k] }} />
                   ))}
                 </span>
                 <small>{p.description}</small>
@@ -152,34 +165,34 @@ function SchemeBlock({ target, active, followsSystem }: { target: Scheme; active
       </div>
       <div className="field">
         <span className="lbl" id={`${id}-colors`}>
-          Couleurs
+          {t('settings.scheme.colors')}
           {customCount > 0 && (
             <span className="hint">
               {' '}
-              · {customCount} personnalisée{customCount > 1 ? 's' : ''}
+              {t('settings.scheme.customCount', { count: customCount })}
             </span>
           )}
         </span>
         <div className="colors" role="group" aria-labelledby={`${id}-colors`}>
-          {THEME_TOKENS.map((t) => {
-            const v = tokenValue(settings.theme, target, t)
+          {THEME_TOKENS.map((tok) => {
+            const v = tokenValue(settings.theme, target, tok)
             return (
-              <div className="crow" key={t}>
+              <div className="crow" key={tok}>
                 <input
                   type="color"
                   value={v}
-                  aria-label={`${TOKEN_LABELS[t]} (mode ${modeName})`}
-                  onChange={(e) => setColor(t, e.target.value)}
+                  aria-label={t('settings.scheme.colorLabel', { token: TOKEN_LABELS[tok], mode: modeName })}
+                  onChange={(e) => setColor(tok, e.target.value)}
                 />
-                <span className="nm">{TOKEN_LABELS[t]}</span>
+                <span className="nm">{TOKEN_LABELS[tok]}</span>
                 <span className="hex">{v}</span>
-                {custom[t] && (
+                {custom[tok] && (
                   <button
                     type="button"
                     className="btn sm ghost"
-                    aria-label={`Couleur de la palette pour « ${TOKEN_LABELS[t]} » (mode ${modeName})`}
-                    title="Revenir à la couleur de la palette"
-                    onClick={() => setColor(t, null)}
+                    aria-label={t('settings.scheme.colorReset', { token: TOKEN_LABELS[tok], mode: modeName })}
+                    title={t('settings.scheme.colorResetTitle')}
+                    onClick={() => setColor(tok, null)}
                   >
                     ↺
                   </button>
@@ -195,11 +208,11 @@ function SchemeBlock({ target, active, followsSystem }: { target: Scheme; active
             onClick={() => update({ theme: { [target]: { ...own, custom: {} } } })}
             disabled={customCount === 0}
           >
-            Réinitialiser les couleurs du mode {modeName}
+            {t('settings.scheme.resetColors', { mode: modeName })}
           </button>
         </div>
       </div>
-      <ThemePreview tokens={schemeTokens(settings.theme, target)} label={`Aperçu du mode ${modeName}`} />
+      <ThemePreview tokens={schemeTokens(settings.theme, target)} label={t('settings.scheme.preview', { mode: modeName })} />
     </section>
   )
 }
@@ -207,19 +220,20 @@ function SchemeBlock({ target, active, followsSystem }: { target: Scheme; active
 /** « Taille du texte » : toute l'interface, terminal compris (zoom appliqué par le processus principal). */
 function TextSize() {
   const { settings, update } = useSettings()
+  const { t, rich } = useI18n()
   const zoom = settings.ui.zoom
   const set = (z: number) => update({ ui: { zoom: z } })
   return (
     <div className="field">
       <label className="lbl" htmlFor="st-zoom">
-        Taille du texte
+        {t('settings.zoom.label')}
       </label>
       <div className="row-inline">
         <div className="zoomctl">
           <button
             type="button"
             className="btn"
-            aria-label="Texte plus petit"
+            aria-label={t('settings.zoom.smaller')}
             disabled={zoom === ZOOM_STEPS[0]}
             onClick={() => set(stepZoom(zoom, 'out'))}
           >
@@ -228,14 +242,14 @@ function TextSize() {
           <select id="st-zoom" value={zoom} onChange={(e) => set(Number(e.target.value))}>
             {ZOOM_STEPS.map((z) => (
               <option key={z} value={z}>
-                {z} %{z === DEFAULT_ZOOM ? ' (par défaut)' : ''}
+                {z === DEFAULT_ZOOM ? t('settings.zoom.optionDefault', { zoom: z }) : t('settings.zoom.option', { zoom: z })}
               </option>
             ))}
           </select>
           <button
             type="button"
             className="btn"
-            aria-label="Texte plus grand"
+            aria-label={t('settings.zoom.larger')}
             disabled={zoom === ZOOM_STEPS[ZOOM_STEPS.length - 1]}
             onClick={() => set(stepZoom(zoom, 'in'))}
           >
@@ -243,23 +257,28 @@ function TextSize() {
           </button>
         </div>
         <span className="hint">
-          Toute l’interface, terminal compris. Raccourcis : <kbd>Ctrl</kbd> + <kbd>+</kbd>, <kbd>Ctrl</kbd> + <kbd>−</kbd>,{' '}
-          <kbd>Ctrl</kbd> + <kbd>0</kbd>, ou <kbd>Ctrl</kbd> + molette.
+          {rich('settings.zoom.hint', {
+            ctrl: <kbd>{t('settings.zoom.ctrl')}</kbd>,
+            plus: <kbd>+</kbd>,
+            minus: <kbd>−</kbd>,
+            zero: <kbd>0</kbd>,
+          })}
         </span>
       </div>
     </div>
   )
 }
 
-const SESSION_TAB_LABELS: Record<SessionTab, string> = { terminal: 'Terminal', conversation: 'Conversation' }
+const SESSION_TAB_LABELS: Record<SessionTab, PlainKey> = { terminal: 'settings.sessionTab.terminal', conversation: 'settings.sessionTab.conversation' }
 
 /** « Onglet par défaut d'une session » : celui ouvert en arrivant sur une session. */
 function SessionTabField() {
   const { settings, update } = useSettings()
+  const t = useT()
   return (
     <div className="field">
       <label className="lbl" htmlFor="st-session-tab">
-        Onglet par défaut d’une session
+        {t('settings.sessionTab.label')}
       </label>
       <div className="row-inline">
         <select
@@ -267,13 +286,13 @@ function SessionTabField() {
           value={settings.ui.sessionTab}
           onChange={(e) => update({ ui: { sessionTab: e.target.value as SessionTab } })}
         >
-          {SESSION_TABS.map((t) => (
-            <option key={t} value={t}>
-              {SESSION_TAB_LABELS[t]}
+          {SESSION_TABS.map((tab) => (
+            <option key={tab} value={tab}>
+              {t(SESSION_TAB_LABELS[tab])}
             </option>
           ))}
         </select>
-        <span className="hint">Onglet ouvert en arrivant sur une session ; les autres restent à un clic.</span>
+        <span className="hint">{t('settings.sessionTab.hint')}</span>
       </div>
     </div>
   )
@@ -288,6 +307,7 @@ type Parsed = { ok: true; theme: ThemeImport } | { ok: false; error: string } | 
  */
 function ThemeImportPanel({ onDone, onCancel }: { onDone: (message: string) => void; onCancel: () => void }) {
   const { settings, update } = useSettings()
+  const t = useT()
   const [text, setText] = useState('')
   const [fileError, setFileError] = useState<string | null>(null)
   /** « Abandonner le JSON saisi ? » affiché (Échap ou Annuler avec un texte non appliqué). */
@@ -314,17 +334,17 @@ function ThemeImportPanel({ onDone, onCancel }: { onDone: (message: string) => v
     setFileError(null)
     if (!f) return
     if (f.size > MAX_THEME_IMPORT) {
-      setFileError(`Fichier trop gros : ${Math.round(MAX_THEME_IMPORT / 1024)} Kio au plus.`)
+      setFileError(t('settings.import.fileTooBig', { kib: Math.round(MAX_THEME_IMPORT / 1024) }))
       return
     }
     try {
       setText(await f.text())
     } catch (e) {
-      setFileError(`Lecture impossible : ${(e as Error).message}`)
+      setFileError(t('settings.import.readFailed', { error: (e as Error).message }))
     }
   }
 
-  const error = fileError ?? (parsed && !parsed.ok ? `Thème refusé : ${parsed.error}.` : null)
+  const error = fileError ?? (parsed && !parsed.ok ? t('settings.import.rejected', { error: parsed.error }) : null)
   const theme = parsed?.ok ? parsed.theme : null
   const pair: Record<'light' | 'dark', SchemeTheme> | null = theme ? { light: theme.light, dark: theme.dark } : null
 
@@ -349,15 +369,16 @@ function ThemeImportPanel({ onDone, onCancel }: { onDone: (message: string) => v
         else cancel()
       }}
     >
-      <h3 id={`${id}-h`}>Importer un thème (JSON)</h3>
+      <h3 id={`${id}-h`}>{t('settings.import.title')}</h3>
       <label className="field">
-        <span className="lbl">JSON du thème</span>
+        <span className="lbl">{t('settings.import.json')}</span>
         <textarea
           autoFocus
           value={text}
           spellCheck={false}
           aria-invalid={error ? true : undefined}
           aria-describedby={`${id}-st`}
+          // i18n-exempt: exemple de JSON (format technique)
           placeholder={'{ "mode": "system", "light": { "palette": "okabe", "custom": {} }, "dark": { … } }'}
           onChange={(e) => {
             setFileError(null)
@@ -367,7 +388,7 @@ function ThemeImportPanel({ onDone, onCancel }: { onDone: (message: string) => v
       </label>
       <div className="row-inline">
         <button type="button" className="btn sm" onClick={() => file.current?.click()}>
-          Choisir un fichier…
+          {t('settings.import.chooseFile')}
         </button>
         <input
           ref={file}
@@ -381,15 +402,15 @@ function ThemeImportPanel({ onDone, onCancel }: { onDone: (message: string) => v
             e.target.value = ''
           }}
         />
-        <span className="hint">Format de « Copier le thème (JSON) », ou ancien format à palette unique.</span>
+        <span className="hint">{t('settings.import.formatHint')}</span>
       </div>
       <p id={`${id}-st`} className={error ? 'inline-err' : 'hint'} role="status">
-        {error ?? (theme ? `Thème valide${theme.mode ? '' : ' (le mode actuel est gardé)'} : aperçu ci-dessous.` : 'Colle un thème ou choisis un fichier.')}
+        {error ?? (theme ? (theme.mode ? t('settings.import.valid') : t('settings.import.validKeepMode')) : t('settings.import.empty'))}
       </p>
       {pair && (
         <div className="schemes">
           {SCHEMES.map((sc) => (
-            <ThemePreview key={sc} tokens={schemeTokens(pair, sc)} label={`Aperçu du thème importé, mode ${SCHEME_LABELS[sc].toLowerCase()}`} />
+            <ThemePreview key={sc} tokens={schemeTokens(pair, sc)} label={t('settings.import.preview', { mode: t(SCHEME_INLINE[sc]) })} />
           ))}
         </div>
       )}
@@ -401,21 +422,21 @@ function ThemeImportPanel({ onDone, onCancel }: { onDone: (message: string) => v
           onClick={() => {
             if (!theme) return
             update({ theme: { mode: theme.mode ?? settings.theme.mode, light: theme.light, dark: theme.dark } })
-            onDone('Thème importé.')
+            onDone(t('settings.import.done'))
           }}
         >
-          Appliquer
+          {t('settings.import.apply')}
         </button>
         <button type="button" className="btn ghost" onClick={cancel}>
-          Annuler
+          {t('settings.import.cancel')}
         </button>
       </div>
       {confirmDrop && (
         <ConfirmBar
-          message="Abandonner le thème saisi ? Le JSON collé sera perdu."
-          confirmLabel="Abandonner"
-          busyLabel="Abandon…"
-          errorPrefix="Abandon impossible"
+          message={t('settings.import.dropMessage')}
+          confirmLabel={t('settings.import.drop')}
+          busyLabel={t('settings.import.dropping')}
+          errorPrefix={t('settings.import.dropFailed')}
           onConfirm={async () => onCancel()}
           onCancel={() => setConfirmDrop(false)}
         />
@@ -426,6 +447,7 @@ function ThemeImportPanel({ onDone, onCancel }: { onDone: (message: string) => v
 
 function Appearance({ scheme }: { scheme: Scheme }) {
   const { settings, update } = useSettings()
+  const t = useT()
   const theme = settings.theme
   const [copied, setCopied] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
@@ -433,7 +455,7 @@ function Appearance({ scheme }: { scheme: Scheme }) {
 
   async function copy() {
     const ok = await api.copyText(themeJson(theme)).catch(() => false)
-    setCopied(ok ? 'Thème copié (JSON).' : 'Copie impossible.')
+    setCopied(ok ? t('settings.appearance.copied') : t('settings.appearance.copyFailed'))
   }
 
   function closeImport(message: string | null) {
@@ -450,7 +472,7 @@ function Appearance({ scheme }: { scheme: Scheme }) {
         <SessionTabField />
         <div className="field">
           <span className="lbl" id="st-mode">
-            Mode
+            {t('settings.appearance.mode')}
           </span>
           <div className="row-inline">
             <div className="seg" role="group" aria-labelledby="st-mode">
@@ -459,7 +481,7 @@ function Appearance({ scheme }: { scheme: Scheme }) {
                   key={m}
                   type="button"
                   aria-pressed={theme.mode === m}
-                  title={m === 'system' ? AUTO_TITLE : undefined}
+                  title={m === 'system' ? autoTitle() : undefined}
                   onClick={() => update({ theme: { mode: m } })}
                 >
                   {l}
@@ -467,8 +489,9 @@ function Appearance({ scheme }: { scheme: Scheme }) {
               ))}
             </div>
             <span className="hint">
-              Chaque mode a sa palette et ses couleurs. Auto suit le système
-              {theme.mode === 'system' ? `, actuellement en mode ${SCHEME_LABELS[scheme].toLowerCase()}.` : '.'}
+              {theme.mode === 'system'
+                ? t('settings.appearance.modeHintSystem', { mode: t(SCHEME_INLINE[scheme]) })
+                : t('settings.appearance.modeHint')}
             </span>
           </div>
         </div>
@@ -477,14 +500,11 @@ function Appearance({ scheme }: { scheme: Scheme }) {
             <SchemeBlock key={s} target={s} active={s === scheme} followsSystem={theme.mode === 'system'} />
           ))}
         </div>
-        <p className="callout">
-          Les statuts ne reposent jamais sur la couleur seule : chacun a sa forme (carré « ! », anneau qui tourne, cercle vide,
-          coche, croix), et les lignes de diff gardent leurs signes + et −.
-        </p>
+        <p className="callout">{t('settings.appearance.callout')}</p>
       </div>
       <div className="mf">
         <span className="hint" role="status" style={{ marginRight: 'auto' }}>
-          {copied ?? 'Les réglages sont propres à ton compte sur ce poste.'}
+          {copied ?? t('settings.footer')}
         </span>
         <button
           type="button"
@@ -496,10 +516,10 @@ function Appearance({ scheme }: { scheme: Scheme }) {
             setImporting((v) => !v)
           }}
         >
-          Importer un thème (JSON)
+          {t('settings.appearance.import')}
         </button>
         <button type="button" className="btn" onClick={() => void copy()}>
-          Copier le thème (JSON)
+          {t('settings.appearance.copy')}
         </button>
       </div>
     </>
@@ -508,6 +528,7 @@ function Appearance({ scheme }: { scheme: Scheme }) {
 
 function LabelRow({ profile, profiles }: { profile: Profile; profiles: Profile[] }) {
   const { settings, update } = useSettings()
+  const t = useT()
   const current = profileLabel(profile.name, settings.profileLabels)
   const custom = settings.profileLabels[profile.name]
   const [long, setLong] = useState(current.long)
@@ -532,7 +553,7 @@ function LabelRow({ profile, profiles }: { profile: Profile; profiles: Profile[]
         {profile.name}
       </span>
       <label className="field">
-        <span className="sr-only">Libellé long du profil {profile.name}</span>
+        <span className="sr-only">{t('settings.label.long', { profile: profile.name })}</span>
         <input
           value={long}
           maxLength={MAX_LONG_LABEL * 2}
@@ -542,11 +563,11 @@ function LabelRow({ profile, profiles }: { profile: Profile; profiles: Profile[]
             setLong(e.target.value)
             commit(e.target.value, short)
           }}
-          placeholder="Libellé"
+          placeholder={t('settings.label.placeholder')}
         />
       </label>
       <label className="field short">
-        <span className="sr-only">Libellé court du profil {profile.name} (1 à 3 caractères)</span>
+        <span className="sr-only">{t('settings.label.short', { profile: profile.name })}</span>
         <input
           value={short}
           aria-invalid={error ? true : undefined}
@@ -562,7 +583,7 @@ function LabelRow({ profile, profiles }: { profile: Profile; profiles: Profile[]
         type="button"
         className="btn sm ghost"
         disabled={!custom}
-        title="Revenir aux libellés par défaut"
+        title={t('settings.label.resetTitle')}
         onClick={() => {
           const d = profileLabel(profile.name, {})
           setLong(d.long)
@@ -571,7 +592,7 @@ function LabelRow({ profile, profiles }: { profile: Profile; profiles: Profile[]
           update({ profileLabels: { [profile.name]: null } })
         }}
       >
-        Par défaut
+        {t('settings.label.reset')}
       </button>
       {error && (
         <span id={`${id}-err`} className="inline-err" role="alert">
@@ -582,14 +603,16 @@ function LabelRow({ profile, profiles }: { profile: Profile; profiles: Profile[]
   )
 }
 
-const LOCATION_HINTS: Record<DefaultWorktreeLocation, string> = {
-  sibling: '<parent du dépôt>/<dépôt>-<branche>',
-  in_repo: '<dépôt>/.worktrees/<branche> (exclu de git localement)',
-  managed: '~/.local/share/devmaestro/worktrees/…',
+/** Forme du chemin d'un worktree selon l'emplacement (langue de l'interface). */
+function locationHint(l: DefaultWorktreeLocation, t: (key: PlainKey) => string): string {
+  if (l === 'sibling') return t('settings.worktrees.hintSibling')
+  if (l === 'in_repo') return t('settings.worktrees.hintInRepo')
+  return '~/.local/share/devmaestro/worktrees/…'
 }
 
 function Worktrees({ projects, home }: { projects: ProjectChoice[]; home: string | null }) {
   const { settings, update } = useSettings()
+  const t = useT()
   const w = settings.worktrees
   const [prefix, setPrefix] = useState(w.branchPrefix)
   const [prefixError, setPrefixError] = useState<string | null>(null)
@@ -597,10 +620,10 @@ function Worktrees({ projects, home }: { projects: ProjectChoice[]; home: string
   const repos = projects.filter((c) => c.isGit)
   return (
     <div className="field">
-      <span className="lbl">Worktrees</span>
-      <span className="hint">Option « Dans un nouveau worktree » de « Nouvelle session », et nettoyage des branches intégrées.</span>
+      <span className="lbl">{t('settings.worktrees.title')}</span>
+      <span className="hint">{t('settings.worktrees.hint')}</span>
       <label className="wtrow">
-        <span>Emplacement par défaut</span>
+        <span>{t('settings.worktrees.location')}</span>
         <select
           value={w.location}
           onChange={(e) => update({ worktrees: { location: e.target.value as DefaultWorktreeLocation } })}
@@ -613,17 +636,17 @@ function Worktrees({ projects, home }: { projects: ProjectChoice[]; home: string
           ))}
         </select>
         <span id={`${id}-loc`} className="hint mono">
-          {LOCATION_HINTS[w.location]}
+          {locationHint(w.location, t)}
         </span>
       </label>
       <label className="wtrow">
-        <span>Préfixe des branches</span>
+        <span>{t('settings.worktrees.prefix')}</span>
         <input
           className="mono"
           value={prefix}
           maxLength={MAX_BRANCH_PREFIX}
           spellCheck={false}
-          placeholder="ex. romain/"
+          placeholder={t('settings.worktrees.prefixPlaceholder')}
           aria-invalid={prefixError ? true : undefined}
           aria-describedby={`${id}-pre`}
           onChange={(e) => {
@@ -635,7 +658,7 @@ function Worktrees({ projects, home }: { projects: ProjectChoice[]; home: string
           }}
         />
         <span id={`${id}-pre`} className={prefixError ? 'inline-err' : 'hint mono'} role={prefixError ? 'alert' : undefined}>
-          {prefixError ?? `ex. ${branchFromName('Corriger l’export', prefix || '')}`}
+          {prefixError ?? t('settings.worktrees.example', { branch: branchFromName(t('settings.worktrees.sampleName'), prefix || '') })}
         </span>
       </label>
       <label className="optrow">
@@ -645,15 +668,13 @@ function Worktrees({ projects, home }: { projects: ProjectChoice[]; home: string
           onChange={(e) => update({ worktrees: { notifyIntegrated: e.target.checked } })}
         />
         <span>
-          Notification du bureau quand une branche est intégrée
-          <span className="hint optaide">
-            Une seule fois par worktree, quand aucune session n’y tourne : « La branche X est intégrée : nettoyer le worktree ? »
-          </span>
+          {t('settings.worktrees.notify')}
+          <span className="hint optaide">{t('settings.worktrees.notifyHint')}</span>
         </span>
       </label>
       {repos.length > 0 && (
         <>
-          <span className="hint">Emplacement par projet (remplace le défaut) :</span>
+          <span className="hint">{t('settings.worktrees.perProject')}</span>
           <div className="pprofiles">
             {repos.map((c) => {
               const set = w.projectLocations[c.profileKey] ?? ''
@@ -664,7 +685,7 @@ function Worktrees({ projects, home }: { projects: ProjectChoice[]; home: string
                   </span>
                   <select
                     value={set}
-                    aria-label={`Emplacement des worktrees de ${c.name}`}
+                    aria-label={t('settings.worktrees.projectLabel', { name: c.name })}
                     onChange={(e) =>
                       update({
                         worktrees: {
@@ -673,7 +694,7 @@ function Worktrees({ projects, home }: { projects: ProjectChoice[]; home: string
                       })
                     }
                   >
-                    <option value="">Par défaut ({LOCATION_LABELS[w.location]})</option>
+                    <option value="">{t('settings.worktrees.projectDefault', { location: LOCATION_LABELS[w.location] })}</option>
                     {DEFAULT_WORKTREE_LOCATIONS.map((l) => (
                       <option key={l} value={l}>
                         {LOCATION_LABELS[l]}
@@ -690,20 +711,18 @@ function Worktrees({ projects, home }: { projects: ProjectChoice[]; home: string
   )
 }
 
-const MODE_LABELS: Record<DeliveryMode, string> = { pr: 'Demande de fusion (PR)', trunk: 'Trunk-based (fusion sur la branche par défaut)' }
+const MODE_LABELS: Record<DeliveryMode, PlainKey> = { pr: 'settings.delivery.mode.pr', trunk: 'settings.delivery.mode.trunk' }
 
 function Delivery({ projects, home }: { projects: ProjectChoice[]; home: string | null }) {
   const { settings, update } = useSettings()
+  const t = useT()
   const d = settings.delivery
   const repos = projects.filter((c) => c.isGit)
   const setProject = (key: string, next: ProjectDelivery) => update({ delivery: { projects: { [key]: next } } })
   return (
     <div className="field">
-      <span className="lbl">Livraison</span>
-      <span className="hint">
-        Boutons « Ouvrir une demande de fusion » et « Fusionner dans … » d’une session : la consigne est montrée, puis tapée dans la
-        session ; Claude livre lui-même. Leurs textes se modifient dans l’onglet « Consignes » (globalement ou par projet).
-      </span>
+      <span className="lbl">{t('settings.delivery.title')}</span>
+      <span className="hint">{t('settings.delivery.hint')}</span>
       <label className="optrow">
         <input
           type="checkbox"
@@ -711,17 +730,16 @@ function Delivery({ projects, home }: { projects: ProjectChoice[]; home: string 
           onChange={(e) => update({ delivery: { notifyCiFailure: e.target.checked } })}
         />
         <span>
-          Notification du bureau quand la CI d’une session échoue
-          <span className="hint optaide">
-            « CI en échec sur … », une fois par échec ; la CI n’est suivie que pour les sessions affichées depuis le lancement du démon.
-          </span>
+          {t('settings.delivery.notifyCi')}
+          <span className="hint optaide">{t('settings.delivery.notifyCiHint')}</span>
         </span>
       </label>
       {repos.length > 0 && (
         <>
-          <span className="hint">Par projet : mode (choisit le bouton principal et la CI suivie).</span>
+          <span className="hint">{t('settings.delivery.perProject')}</span>
           <div className="pprofiles">
             {repos.map((c) => {
+              // i18n-exempt: identifiant de mode
               const p: ProjectDelivery = d.projects[c.profileKey] ?? { mode: 'pr' }
               return (
                 <div key={c.key} className="deliv-proj">
@@ -731,12 +749,13 @@ function Delivery({ projects, home }: { projects: ProjectChoice[]; home: string 
                     </span>
                     <select
                       value={p.mode}
-                      aria-label={`Mode de livraison de ${c.name}`}
+                      aria-label={t('settings.delivery.projectLabel', { name: c.name })}
                       onChange={(e) => setProject(c.profileKey, { ...p, mode: e.target.value as DeliveryMode })}
                     >
+                      {/* i18n-exempt: identifiants de modes */}
                       {(['pr', 'trunk'] as const).map((m) => (
                         <option key={m} value={m}>
-                          {MODE_LABELS[m]}
+                          {t(MODE_LABELS[m])}
                         </option>
                       ))}
                     </select>
@@ -753,11 +772,13 @@ function Delivery({ projects, home }: { projects: ProjectChoice[]; home: string 
 
 function General({ profiles, projects, home }: { profiles: Profile[]; projects: ProjectChoice[]; home: string | null }) {
   const { settings, update, label } = useSettings()
+  const t = useT()
   return (
     <>
       <div className="mb">
+        <LanguageField />
         <div className="field">
-          <span className="lbl">Notifications</span>
+          <span className="lbl">{t('settings.notifications.title')}</span>
           <label className="optrow">
             <input
               type="checkbox"
@@ -765,22 +786,20 @@ function General({ profiles, projects, home }: { profiles: Profile[]; projects: 
               onChange={(e) => update({ notifications: { enabled: e.target.checked } })}
             />
             <span>
-              Notification du bureau quand une session attend une réponse
-              <span className="hint optaide">
-                Sans son (tes hooks s’en chargent) ; aucune si la fenêtre a le focus et affiche déjà cette session.
-              </span>
+              {t('settings.notifications.waiting')}
+              <span className="hint optaide">{t('settings.notifications.waitingHint')}</span>
             </span>
           </label>
         </div>
         <div className="field">
-          <span className="lbl">Confirmations</span>
+          <span className="lbl">{t('settings.confirmations.title')}</span>
           <label className="optrow">
             <input type="checkbox" checked={settings.confirmRemoval} onChange={(e) => update({ confirmRemoval: e.target.checked })} />
-            <span>Demander confirmation avant de retirer une session ou de masquer une ancienne session</span>
+            <span>{t('settings.confirmations.removal')}</span>
           </label>
         </div>
         <div className="field">
-          <span className="lbl">Accès aux forges</span>
+          <span className="lbl">{t('settings.forges.title')}</span>
           <label className="optrow">
             <input
               type="checkbox"
@@ -788,27 +807,23 @@ function General({ profiles, projects, home }: { profiles: Profile[]; projects: 
               onChange={(e) => update({ forges: { enabled: e.target.checked } })}
             />
             <span>
-              Lire les issues des projets (GitHub, par la CLI « gh » de ta machine)
-              <span className="hint optaide">
-                Rien n’est demandé à la forge tant que tu n’ouvres pas les issues d’un projet ; l’app ne garde aucun jeton.
-              </span>
+              {t('settings.forges.read')}
+              <span className="hint optaide">{t('settings.forges.readHint')}</span>
             </span>
           </label>
         </div>
         <div className="field">
-          <span className="lbl">Profils</span>
-          <span className="hint">
-            Libellé long (affiché partout) et court (badge de 1 à 3 caractères). Le nom technique reste dans les infobulles.
-          </span>
-          {profiles.length === 0 && <p className="hint">Aucun profil connu du démon.</p>}
+          <span className="lbl">{t('settings.profiles.title')}</span>
+          <span className="hint">{t('settings.profiles.hint')}</span>
+          {profiles.length === 0 && <p className="hint">{t('settings.profiles.none')}</p>}
           {profiles.map((p) => (
             <LabelRow key={p.name} profile={p} profiles={profiles} />
           ))}
         </div>
         <div className="field">
-          <span className="lbl">Profil par défaut par projet</span>
-          <span className="hint">Proposé dans « Nouvelle session ». « Automatique » : le dernier profil utilisé dans le projet.</span>
-          {projects.length === 0 && <p className="hint">Aucun projet connu pour l’instant.</p>}
+          <span className="lbl">{t('settings.projectProfiles.title')}</span>
+          <span className="hint">{t('settings.projectProfiles.hint')}</span>
+          {projects.length === 0 && <p className="hint">{t('settings.projectProfiles.none')}</p>}
           <div className="pprofiles">
             {projects.map((c) => {
               const set = settings.projectProfiles[c.profileKey] ?? ''
@@ -819,16 +834,16 @@ function General({ profiles, projects, home }: { profiles: Profile[]; projects: 
                   </span>
                   <select
                     value={set}
-                    aria-label={`Profil par défaut de ${c.name}`}
+                    aria-label={t('settings.projectProfiles.label', { name: c.name })}
                     onChange={(e) => update({ projectProfiles: { [c.profileKey]: e.target.value || null } })}
                   >
-                    <option value="">Automatique</option>
+                    <option value="">{t('settings.projectProfiles.auto')}</option>
                     {profiles.map((p) => (
                       <option key={p.name} value={p.name}>
                         {label(p.name).long}
                       </option>
                     ))}
-                    {set && !profiles.some((p) => p.name === set) && <option value={set}>{set} (inconnu)</option>}
+                    {set && !profiles.some((p) => p.name === set) && <option value={set}>{t('settings.projectProfiles.unknown', { profile: set })}</option>}
                   </select>
                 </label>
               )
@@ -839,9 +854,41 @@ function General({ profiles, projects, home }: { profiles: Profile[]; projects: 
         <Delivery projects={projects} home={home} />
       </div>
       <div className="mf">
-        <span className="hint">Les réglages sont propres à ton compte sur ce poste.</span>
+        <span className="hint">{t('settings.footer')}</span>
       </div>
     </>
+  )
+}
+
+const LANGUAGE_LABELS: Record<LanguagePref, PlainKey> = {
+  system: 'common.language.system',
+  fr: 'common.language.fr',
+  en: 'common.language.en',
+}
+
+/** « Langue » : Système, Français ou English (les noms des langues restent dans leur propre langue) ; appliquée à chaud. */
+function LanguageField() {
+  const { settings, update } = useSettings()
+  const t = useT()
+  return (
+    <div className="field">
+      <label className="lbl" htmlFor="st-language">
+        {t('settings.language.label')}
+      </label>
+      <div className="row-inline">
+        <select
+          id="st-language"
+          value={settings.ui.language}
+          onChange={(e) => update({ ui: { language: e.target.value as LanguagePref } })}
+        >
+          {LANGUAGE_PREFS.map((l) => (
+            <option key={l} value={l}>
+              {t(LANGUAGE_LABELS[l])}
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
   )
 }
 
@@ -860,15 +907,16 @@ export function SettingsDialog({
 }) {
   const [tab, setTab] = useState<Tab>('apparence')
   const { saveError } = useSettings()
+  const t = useT()
   const id = useId()
   const tabs: [Tab, string][] = [
-    ['apparence', 'Apparence'],
-    ['general', 'Général'],
-    ['consignes', 'Consignes'],
+    ['apparence', t('settings.tab.appearance')],
+    ['general', t('settings.tab.general')],
+    ['consignes', t('settings.tab.prompts')],
   ]
   return (
-    <Modal title="Réglages" onClose={onClose} width={780}>
-      <div className="stabs" role="tablist" aria-label="Rubriques des réglages">
+    <Modal title={t('settings.title')} onClose={onClose} width={780}>
+      <div className="stabs" role="tablist" aria-label={t('settings.tabsLabel')}>
         {tabs.map(([k, l]) => (
           <button
             key={k}
@@ -882,7 +930,7 @@ export function SettingsDialog({
             onKeyDown={(e) => {
               if (['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) {
                 e.preventDefault()
-                const i = tabs.findIndex(([t]) => t === tab)
+                const i = tabs.findIndex(([k]) => k === tab)
                 const j =
                   e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length
                 const next: Tab = tabs[j]![0]

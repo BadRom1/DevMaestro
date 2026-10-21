@@ -7,6 +7,7 @@ import { EditorState } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { useEffect, useRef, type RefObject } from 'react'
 
+import { useT } from '../i18n'
 import { createEditorState, editorText, readOnlyConf, themeConf, themeFor } from '../state/editorSetup'
 
 export interface EditorHandle {
@@ -33,6 +34,7 @@ export function FileEditor({
   onSave: () => void
   handleRef: RefObject<EditorHandle | null>
 }) {
+  const tr = useT()
   const host = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
   const hooks = useRef({ onDirty, onSave })
@@ -51,7 +53,7 @@ export function FileEditor({
         {
           onDirty: (d) => hooks.current.onDirty(d),
           onSave: () => hooks.current.onSave(),
-          label: `Édition de ${path}`,
+          label: tr('files.editor.label', { path }),
         },
         { readOnly: readOnlyRef.current },
       )

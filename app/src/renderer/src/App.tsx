@@ -2,8 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 
 import type { ConnectionState } from '../../shared/bridge'
 import { validHome } from '../../shared/home'
+import type { Translate } from '../../shared/i18n'
 import { ErrorCode, type ForgeStatus, type Session } from '../../shared/protocol'
 import { CallError, api, call, errorText } from './api'
+import { useT } from './i18n'
+import { daemonText } from './state/errors'
 import { CleanupDialog } from './components/CleanupDialog'
 import { forgetDiffMemory } from './components/DiffView'
 import { forgetCommitsMemory } from './state/commits'
@@ -68,27 +71,40 @@ function forgetViewMemory(id: string): void {
 /** Aucun fichier vu (référence stable). */
 const NO_SEEN: Record<string, boolean> = {}
 
-function connectionText(c: ConnectionState): { text: string; bad: boolean } | null {
+function connectionText(c: ConnectionState, t: Translate): { text: string; bad: boolean } | null {
   switch (c.state) {
     case 'connected':
       return null
     case 'connecting':
-      return { text: 'Connexion au démon orchd…', bad: false }
+      return { text: t('shell.conn.connecting'), bad: false }
     case 'starting-daemon':
-      return { text: `Démarrage du démon (« ${c.bin} daemon »)…`, bad: false }
+      return { text: t('shell.conn.starting', { bin: c.bin }), bad: false }
     case 'disconnected':
       return {
-        text: `Démon injoignable (${c.error}). Nouvel essai dans ${Math.max(1, Math.round(c.retryInMs / 1000))} s.`,
+        text: t('shell.conn.unreachable', { error: c.error, s: Math.max(1, Math.round(c.retryInMs / 1000)) }),
         bad: true,
       }
     case 'incompatible':
-      return { text: `Démon incompatible : ${c.error}.`, bad: true }
+      return { text: t('shell.conn.incompatible', { error: c.error }), bad: true }
     case 'refused':
       return {
-        text: `Connexion refusée : ${c.error} Nouvel essai dans ${Math.max(1, Math.round(c.retryInMs / 1000))} s.`,
+        text: t('shell.conn.refused', { error: c.error, s: Math.max(1, Math.round(c.retryInMs / 1000)) }),
         bad: true,
       }
   }
+}
+
+/**
+ * Avertissement affiché sous l'en-tête : avertissements d'un lancement (déjà
+ * prêts à afficher : ceux du démon marqués par `daemonText` là où ils sont
+ * reçus, ceux de l'app traduits), ou échec du premier message avec la raison
+ * du démon, rendue à l'affichage dans la langue courante.
+ */
+type Notice = { kind: 'daemon'; text: string } | { kind: 'initial_prompt_failed'; reason: string | null }
+
+function noticeText(n: Notice, t: Translate): string {
+  if (n.kind === 'daemon') return n.text
+  return t('shell.notice.initialPromptFailed', { reason: n.reason ? daemonText(n.reason) : t('shell.notice.unknownReason') })
 }
 
 /** Préférence du système (clair ou sombre), suivie en direct. */
@@ -110,6 +126,7 @@ const PAST_LIMIT = 100
 const RESOLVE_RETRY_MS = 60_000
 
 export function App() {
+  const t = useT()
   const [state, dispatch] = useReducer(reducer, initialState)
   const { settings, update: updateSettings, label: profileLabelOf } = useSettings()
   const themeMode: ThemeMode = settings.theme.mode
@@ -128,7 +145,7 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const closeSettings = useCallback(() => setSettingsOpen(false), [])
   /** Avertissements du démon au lancement (mode dangereux remplacé…). */
-  const [notices, setNotices] = useState<string[]>([])
+  const [notices, setNotices] = useState<Notice[]>([])
   const [link, setLink] = useState<string | null>(null)
   const closeDialog = useCallback(() => {
     setDialog(false)
@@ -170,8 +187,8 @@ export function App() {
         dispatch({ type: 'session.effect', id: n.params.id, effect: n.params.effect })
         // Premier message depuis une issue non envoyé : la session tourne sans lui, l'utilisateur doit le savoir.
         if (n.params.effect?.type === 'initial_prompt_failed') {
-          const reason = typeof n.params.effect.reason === 'string' ? n.params.effect.reason : 'raison inconnue'
-          setNotices((xs) => [...xs, `Le premier message (consigne et contenu de l’issue) n’a pas été envoyé à la session : ${reason}.`])
+          const reason = typeof n.params.effect.reason === 'string' ? n.params.effect.reason : null
+          setNotices((xs) => [...xs, { kind: 'initial_prompt_failed', reason }])
         }
       }
       else if (n.method === 'session.removed') {
@@ -349,6 +366,7 @@ export function App() {
         })
         .catch((e: unknown) => {
           const code = e instanceof CallError ? e.failure.code : null
+          // i18n-exempt: journal technique
           if (code !== ErrorCode.MethodNotFound) console.warn('[devmaestro] sessions.subagents :', e)
           setAgentsLoad(loadFailed(agentsLoad.current, id, code, Date.now()))
         })
@@ -488,8 +506,8 @@ export function App() {
       then?.()
     }
     if (id === selectedRef.current) go()
-    else guardLeave(selectedRef.current, 'changer de session', go)
-  }, [])
+    else guardLeave(selectedRef.current, t('shell.leave.switchSession'), go)
+  }, [t])
 
   // Fermeture de la fenêtre (ou rechargement) avec un fichier modifié non enregistré :
   // le processus principal demande confirmation par un dialogue natif (`will-prevent-unload`).
@@ -555,11 +573,11 @@ export function App() {
   /** Retire une session arrêtée de la liste du démon ; la page la retire aussitôt. */
   const forget = useCallback(async (id: string) => {
     const path = unsavedPath(id)
-    if (path) throw new Error(`les modifications de « ${path} » ne sont pas enregistrées : enregistre-les ou annule-les d’abord`)
+    if (path) throw new Error(t('shell.forgetUnsaved', { path }))
     await call('sessions.forget', { id })
     forgetViewMemory(id)
     dispatch({ type: 'session.removed', id })
-  }, [])
+  }, [t])
 
   /** Revues en cours, par session (gardées en changeant de session). */
   const [reviews, setReviews] = useState<Record<string, ReviewDraft>>({})
@@ -602,7 +620,7 @@ export function App() {
 
   const onTermSize = useCallback((cols: number, rows: number) => setTermSize({ cols, rows }), [])
 
-  const banner = connectionText(state.connection)
+  const banner = connectionText(state.connection, t)
   const selectedProject = selected ? state.projects[selected.cwd] : undefined
 
   /** Vue par statut : volet de session ouvert à côté du kanban (choix retenu). */
@@ -616,8 +634,8 @@ export function App() {
     [setKanbanPane, select],
   )
   const closeKanbanPane = useCallback(
-    () => guardLeave(selectedRef.current, 'fermer le volet de la session', () => setKanbanPane(false)),
-    [setKanbanPane],
+    () => guardLeave(selectedRef.current, t('shell.leave.closePane'), () => setKanbanPane(false)),
+    [setKanbanPane, t],
   )
   /** Afficher une session : dans le volet en vue par statut, sinon la sélectionner. */
   const kanbanView = settings.view === 'statut'
@@ -627,7 +645,7 @@ export function App() {
     (s: Session, warnings: string[]) => {
       dispatch({ type: 'session.updated', session: s })
       show(s.id)
-      setNotices(warnings.filter((w) => typeof w === 'string' && w.trim() !== ''))
+      setNotices(warnings.filter((w) => typeof w === 'string' && w.trim() !== '').map((text) => ({ kind: 'daemon', text })))
       setDialog(false)
       setDialogFrom(null)
     },
@@ -733,19 +751,19 @@ export function App() {
           worktree: { branch: row.branch, location },
           ...(prefill.issue ? { issue: prefill.issue } : {}),
         })
-        const warnings = [...(r.warnings ?? [])]
-        if (!r.worktree) warnings.push(`pas de worktree créé (démon trop ancien ?) : la session tourne dans ${r.session.cwd}`)
+        const warnings = (r.warnings ?? []).map(daemonText)
+        if (!r.worktree) warnings.push(t('shell.epic.noWorktree', { cwd: r.session.cwd }))
         let session = r.session
         try {
           session = (await call('sessions.update', { id: session.id, title: prefill.name })).session
         } catch (e) {
-          warnings.push(`nom non enregistré : ${errorText(e)}`)
+          warnings.push(t('shell.epic.nameNotSaved', { error: errorText(e) }))
         }
         return { session, warnings }
       },
       onLaunched: (s) => dispatch({ type: 'session.updated', session: s }),
     }
-  }, [issues, projectChoices, state.profiles, settings.projectProfiles, settings.worktrees, settings.prompts, worktreeLists, worktreesSupported, initialSupported, profileLabelOf, termSize])
+  }, [issues, projectChoices, state.profiles, settings.projectProfiles, settings.worktrees, settings.prompts, worktreeLists, worktreesSupported, initialSupported, profileLabelOf, termSize, t])
 
   // Clic sur une notification desktop : afficher la session.
   const showRef = useRef(show)
@@ -885,7 +903,7 @@ export function App() {
         onNew={() => setDialog(true)}
         onSettings={() => setSettingsOpen(true)}
         view={settings.view}
-        onView={(v) => v !== settings.view && guardLeave(selectedRef.current, 'changer de vue', () => updateSettings({ view: v }))}
+        onView={(v) => v !== settings.view && guardLeave(selectedRef.current, t('shell.leave.switchView'), () => updateSettings({ view: v }))}
       />
       <div className={`conn${banner?.bad ? ' bad' : ''}`} role="status" aria-live="polite" hidden={!banner}>
         {banner?.text}
@@ -893,9 +911,9 @@ export function App() {
       {notices.length > 0 && (
         <div className="conn notice" role="alert">
           <span>
-            <b>Avertissement du démon :</b> {notices.join(' ')}
+            <b>{t('shell.notice.title')}</b> {notices.map((n) => noticeText(n, t)).join(' ')}
           </span>
-          <button className="btn sm ghost" onClick={() => setNotices([])} aria-label="Fermer l’avertissement">
+          <button className="btn sm ghost" onClick={() => setNotices([])} aria-label={t('shell.notice.close')}>
             ×
           </button>
         </div>
@@ -918,7 +936,7 @@ export function App() {
         />
       ) : (
       <main className="viewA" ref={viewARef} style={{ '--col-w': `${sideCol.width}px` } as CSSProperties}>
-        <ColumnGrip column="sidebar" label="Largeur de la barre latérale" width={sideCol.width} max={sideCol.max} avail={sideCol.avail} />
+        <ColumnGrip column="sidebar" label={t('shell.sidebarWidth')} width={sideCol.width} max={sideCol.max} avail={sideCol.avail} />
         <Sidebar
           groups={groups}
           past={past}

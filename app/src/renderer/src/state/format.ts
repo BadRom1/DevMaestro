@@ -1,22 +1,22 @@
-/** Mise en forme pour l'interface (français). */
+/** Mise en forme pour l'interface, dans la langue courante (lot 20). */
+import { dateFormat, numberFormat, t, type KeyWith, type PlainKey } from '../../../shared/i18n'
 import { SESSION_COLORS, type PastSession, type ProjectInfo, type Session, type SessionColor } from '../../../shared/protocol'
 
-const nf = new Intl.NumberFormat('fr-FR')
-const money2 = new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const MONEY2 = { minimumFractionDigits: 2, maximumFractionDigits: 2 } as const
+const COMPACT1 = { maximumFractionDigits: 1 } as const
 
 export function formatNumber(n: number | null | undefined): string {
-  return typeof n === 'number' && Number.isFinite(n) ? nf.format(n) : 'inconnu'
+  return typeof n === 'number' && Number.isFinite(n) ? numberFormat().format(n) : t('format.unknown')
 }
-
-/** Coût tel que fourni par Claude Code (en dollars). */
-const compact1 = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 1 })
 
 /**
  * Nombre compact (tailles de contexte, tokens) : « 840 », « 1,2k », « 122k »,
  * « 1M », « 1,1M », « 25M ». Une décimale (virgule) sous 10, aucune au-delà.
  */
 export function formatCompact(n: number | null | undefined): string {
-  if (typeof n !== 'number' || !Number.isFinite(n)) return 'inconnu'
+  if (typeof n !== 'number' || !Number.isFinite(n)) return t('format.unknown')
+  const nf = numberFormat()
+  const compact1 = numberFormat(COMPACT1)
   const a = Math.abs(n)
   // Signe seulement si la valeur arrondie n'est pas nulle (jamais « -0 »).
   const sign = n < 0 && a >= 0.5 ? '-' : ''
@@ -28,12 +28,13 @@ export function formatCompact(n: number | null | undefined): string {
   return `${sign}${compact1.format(m)}M`
 }
 
+/** Coût tel que fourni par Claude Code (en dollars). */
 export function formatUsd(n: number | null | undefined): string {
-  return typeof n === 'number' && Number.isFinite(n) ? `${money2.format(n)} $` : 'inconnu'
+  return typeof n === 'number' && Number.isFinite(n) ? t('format.usd', { amount: numberFormat(MONEY2).format(n) }) : t('format.unknown')
 }
 
 export function formatPct(n: number | null | undefined): string {
-  return typeof n === 'number' && Number.isFinite(n) ? `${Math.round(n)} %` : 'inconnu'
+  return typeof n === 'number' && Number.isFinite(n) ? t('format.pct', { n: Math.round(n) }) : t('format.unknown')
 }
 
 function parse(iso: string | null | undefined): number | null {
@@ -42,23 +43,39 @@ function parse(iso: string | null | undefined): number | null {
   return Number.isNaN(t) ? null : t
 }
 
-/** « à l'instant », « il y a 5 min », « il y a 2 h », « hier », « il y a 3 j ». */
-export function relativeTime(iso: string | null | undefined, now = Date.now()): string {
-  const t = parse(iso)
-  if (t === null) return 'inconnue'
-  const min = Math.floor((now - t) / 60_000)
-  if (min < 1) return "à l'instant"
-  if (min < 60) return `il y a ${min} min`
+type Ago = { kind: 'unknown' } | { kind: 'now' } | { kind: 'yesterday' } | { kind: 'min' | 'h' | 'd'; n: number }
+
+function ago(iso: string | null | undefined, now: number): Ago {
+  const at = parse(iso)
+  if (at === null) return { kind: 'unknown' }
+  const min = Math.floor((now - at) / 60_000)
+  if (min < 1) return { kind: 'now' }
+  if (min < 60) return { kind: 'min', n: min }
   const h = Math.floor(min / 60)
-  if (h < 24) return `il y a ${h} h`
+  if (h < 24) return { kind: 'h', n: h }
   const d = Math.floor(h / 24)
-  return d === 1 ? 'hier' : `il y a ${d} j`
+  return d === 1 ? { kind: 'yesterday' } : { kind: 'd', n: d }
+}
+
+const AGO_LONG: Record<'min' | 'h' | 'd', KeyWith<'n'>> = { min: 'format.minutesAgo', h: 'format.hoursAgo', d: 'format.daysAgo' }
+const AGO_SHORT: Record<'min' | 'h' | 'd', KeyWith<'n'>> = { min: 'format.minutesShort', h: 'format.hoursShort', d: 'format.daysShort' }
+
+/** « à l’instant », « il y a 5 min », « il y a 2 h », « hier », « il y a 3 j ». */
+export function relativeTime(iso: string | null | undefined, now = Date.now()): string {
+  const a = ago(iso, now)
+  if (a.kind === 'unknown') return t('format.unknownFem')
+  if (a.kind === 'now') return t('format.justNow')
+  if (a.kind === 'yesterday') return t('format.yesterday')
+  return t(AGO_LONG[a.kind], { n: a.n })
 }
 
 /** Version courte pour la barre latérale : « 5 min », « 2 h », « hier ». */
 export function shortAgo(iso: string | null | undefined, now = Date.now()): string {
-  const r = relativeTime(iso, now)
-  return r.startsWith('il y a ') ? r.slice('il y a '.length) : r === 'inconnue' ? '—' : r
+  const a = ago(iso, now)
+  if (a.kind === 'unknown') return '—'
+  if (a.kind === 'now') return t('format.justNow')
+  if (a.kind === 'yesterday') return t('format.yesterday')
+  return t(AGO_SHORT[a.kind], { n: a.n })
 }
 
 /** Heure de remise à zéro d'un quota : « 14:30 » le jour même, sinon « lun. 09:00 ». */
@@ -66,24 +83,34 @@ export function formatReset(iso: string | null | undefined, now = Date.now()): s
   const t = parse(iso)
   if (t === null) return null
   const d = new Date(t)
-  const time = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+  const time = dateFormat({ hour: '2-digit', minute: '2-digit' }).format(d)
   if (new Date(now).toDateString() === d.toDateString()) return time
-  return `${d.toLocaleDateString('fr-FR', { weekday: 'short' })} ${time}`
+  return `${dateFormat({ weekday: 'short' }).format(d)} ${time}`
 }
 
-export const MODE_LABELS: Record<string, string> = {
-  default: 'Par défaut',
-  manual: 'Par défaut',
-  acceptEdits: 'Accepter les modifs',
-  plan: 'Plan',
-  auto: 'Auto',
-  dontAsk: 'Ne rien demander',
-  bypassPermissions: 'Sans permissions',
+const MODE_KEYS: Record<string, PlainKey> = {
+  default: 'format.mode.default',
+  manual: 'format.mode.default',
+  acceptEdits: 'format.mode.acceptEdits',
+  plan: 'format.mode.plan',
+  auto: 'format.mode.auto',
+  dontAsk: 'format.mode.dontAsk',
+  bypassPermissions: 'format.mode.bypassPermissions',
 }
+
+/** Libellés des modes, dans la langue courante (lus à chaque accès). */
+export const MODE_LABELS: Readonly<Record<string, string>> = new Proxy({} as Record<string, string>, {
+  get: (_, k) => (typeof k === 'string' && k in MODE_KEYS ? t(MODE_KEYS[k]!) : undefined),
+  has: (_, k) => typeof k === 'string' && k in MODE_KEYS,
+  ownKeys: () => Object.keys(MODE_KEYS),
+  getOwnPropertyDescriptor: (_, k) =>
+    typeof k === 'string' && k in MODE_KEYS ? { enumerable: true, configurable: true, value: t(MODE_KEYS[k]!) } : undefined,
+})
 
 export function modeLabel(mode: string | null | undefined): string {
-  if (!mode) return 'inconnu'
-  return MODE_LABELS[mode] ?? mode
+  if (!mode) return t('format.unknown')
+  const k = MODE_KEYS[mode]
+  return k ? t(k) : mode
 }
 
 /** Remplace le dossier personnel par « ~ ». */
@@ -150,16 +177,16 @@ export function supportsNaming(s: Session): boolean {
   return typeof s.display_name === 'string'
 }
 
-export const COLOR_LABELS: Record<SessionColor, string> = {
-  gris: 'Gris',
-  bleu: 'Bleu',
-  vert: 'Vert',
-  jaune: 'Jaune',
-  orange: 'Orange',
-  rouge: 'Rouge',
-  violet: 'Violet',
-  rose: 'Rose',
-}
+/** Libellés des couleurs de session, dans la langue courante (lus à chaque accès). */
+export const COLOR_LABELS: Readonly<Record<SessionColor, string>> = new Proxy({} as Record<SessionColor, string>, {
+  get: (_, k) => (typeof k === 'string' && (SESSION_COLORS as readonly string[]).includes(k) ? t(`format.color.${k as SessionColor}`) : undefined),
+  has: (_, k) => typeof k === 'string' && (SESSION_COLORS as readonly string[]).includes(k),
+  ownKeys: () => [...SESSION_COLORS],
+  getOwnPropertyDescriptor: (_, k) =>
+    typeof k === 'string' && (SESSION_COLORS as readonly string[]).includes(k)
+      ? { enumerable: true, configurable: true, value: t(`format.color.${k as SessionColor}`) }
+      : undefined,
+})
 
 /** Couleur connue de la palette, ou `null` (valeur absente ou inattendue). */
 export function sessionColor(s: Pick<Session, 'color'>): SessionColor | null {
@@ -200,16 +227,10 @@ export function resumeBlock(
 ): ResumeBlock | null {
   if (s.alive) return null
   if (folderMissing(s, project)) {
-    return {
-      short: 'dossier supprimé (worktree ?)',
-      long: `Le dossier de la session n’existe plus (worktree supprimé ?) : ${s.cwd}. Elle ne peut pas être reprise.`,
-    }
+    return { short: t('format.resume.cwdShort'), long: t('format.resume.cwdLong', { cwd: s.cwd }) }
   }
   if (s.resume_blocker === 'transcript_missing' || s.resumable === false) {
-    return {
-      short: 'pas de transcript',
-      long: 'Claude Code n’a pas de transcript pour cette session (aucun échange enregistré) : elle ne peut pas être reprise.',
-    }
+    return { short: t('format.resume.transcriptShort'), long: t('format.resume.transcriptLong') }
   }
   return null
 }

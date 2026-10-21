@@ -14,6 +14,7 @@
 import { useMemo, useRef, type MouseEvent } from 'react'
 
 import type { IssueLabel } from '../../../shared/protocol'
+import { useT } from '../i18n'
 import { cleanForge, invisibleNote, labelColors, oneLine } from '../state/forge'
 import { classifyLink, renderMarkdown } from '../state/markdown'
 
@@ -21,8 +22,8 @@ export function ForgeMarkdown({
   text,
   idPrefix,
   onLink,
-  empty = 'Aucune description.',
-  what = 'de la description',
+  empty,
+  what,
   truncated = false,
   className = 'md issue-md',
 }: {
@@ -30,13 +31,15 @@ export function ForgeMarkdown({
   /** Préfixe des ancres (unique dans la vue). */
   idPrefix: string
   onLink: (url: string) => void
+  /** Par défaut « Aucune description. ». */
   empty?: string
-  /** « de la description », « du commentaire » : complète la mention des caractères retirés. */
+  /** « de la description », « du commentaire » : complète la mention des caractères retirés (défaut : « de la description »). */
   what?: string
   /** Texte coupé par le démon (64 Kio au plus). */
   truncated?: boolean | null
   className?: string
 }) {
+  const t = useT()
   const ref = useRef<HTMLElement>(null)
   const clean = useMemo(() => cleanForge(text ?? ''), [text])
   const html = useMemo(() => (clean.text.trim() ? renderMarkdown(clean.text, { idPrefix }).html : null), [clean.text, idPrefix])
@@ -45,21 +48,21 @@ export function ForgeMarkdown({
     const a = (e.target as HTMLElement).closest('a')
     if (!a) return
     e.preventDefault()
-    const t = classifyLink(a.getAttribute('href'), '')
-    if (t.kind === 'external') onLink(t.url)
-    else if (t.kind === 'anchor') ref.current?.querySelector(`[id="${idPrefix}-${CSS.escape(t.id)}"]`)?.scrollIntoView({ block: 'start' })
+    const link = classifyLink(a.getAttribute('href'), '')
+    if (link.kind === 'external') onLink(link.url)
+    else if (link.kind === 'anchor') ref.current?.querySelector(`[id="${idPrefix}-${CSS.escape(link.id)}"]`)?.scrollIntoView({ block: 'start' })
   }
-  if (!html) return <p className="hint">{empty}</p>
+  if (!html) return <p className="hint">{empty ?? t('forge.issues.md.empty')}</p>
   return (
     <>
       {note && (
         <p className="chip pend" role="note">
-          {note} {what}
+          {note} {what ?? t('forge.issues.md.whatDescription')}
         </p>
       )}
       {truncated && (
         <p className="ag-cut" role="note">
-          Texte coupé par le démon (64 Kio au plus) : la suite est sur la forge.
+          {t('forge.issues.md.truncated')}
         </p>
       )}
       {/* HTML produit par markdown-it sans HTML brut (échappé) ni image chargée, comme l'onglet Fichiers. */}
@@ -69,6 +72,7 @@ export function ForgeMarkdown({
 }
 
 export function IssueLabels({ labels }: { labels: readonly IssueLabel[] | null | undefined }) {
+  const t = useT()
   if (!labels?.length) return null
   return (
     <span className="ilabels">
@@ -77,7 +81,7 @@ export function IssueLabels({ labels }: { labels: readonly IssueLabel[] | null |
         const name = oneLine(l.name)
         // Pastille neutre (jamais l'aspect d'un bouton) : la couleur de la forge n'est qu'un point, le nom est écrit.
         return (
-          <span key={`${name}-${i}`} className="ilabel" title={`Étiquette : ${name}`}>
+          <span key={`${name}-${i}`} className="ilabel" title={t('forge.issues.labelTitle', { name })}>
             <span className="ldot" aria-hidden="true" style={c ? { background: c.background } : undefined} />
             {name}
           </span>

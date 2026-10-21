@@ -9,7 +9,9 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 
 import type { Profile, Session } from '../../../shared/protocol'
+import type { Translate } from '../../../shared/i18n'
 import { call, errorCode, errorText } from '../api'
+import { useI18n, useT } from '../i18n'
 import {
   busyReason,
   canSwitch,
@@ -29,11 +31,17 @@ import {
   type Visibility,
   visibilityIn,
 } from '../state/accountSwitch'
+import { daemonText } from '../state/errors'
 import { formatPct, sessionDisplayName } from '../state/format'
 import { QUOTA_CRIT_PCT, type QuotaView } from '../state/quotas'
 import { useSettings } from '../settings'
 import { Meter } from './common'
 import { Modal } from './Modal'
+
+/** Fenêtre de quota affichée (`'5 h'` / `'7 j'` sont aussi des identifiants : voir `ceilingKey`). */
+function windowLabel(w: '5 h' | '7 j', t: Translate): string {
+  return w === '5 h' ? t('sessions.switch.window5h') : t('sessions.switch.window7d')
+}
 
 /** Pas de l'horloge de la bascule (repos à tenir, délai d'arrêt, nouvel essai). */
 const TICK_MS = 250
@@ -155,31 +163,33 @@ export function SwitchAccountButton({
   state: SwitchState | null
   onOpen: () => void
 }) {
+  const t = useT()
   if (!canSwitch(session, profiles)) return null
   const engaged = switchInFlight(state) || state?.kind === 'waiting'
   return (
     <button
       className="btn sm ghost"
       disabled={engaged}
-      title={engaged ? 'Une bascule de compte est déjà en cours' : 'Reprendre cette conversation sous un autre profil Claude Code'}
+      title={engaged ? t('sessions.switch.engagedTitle') : t('sessions.switch.buttonTitle')}
       onClick={onOpen}
     >
-      Changer de compte…
+      {t('sessions.switch.open')}
     </button>
   )
 }
 
 function QuotaLine({ view }: { view: QuotaView | undefined }) {
+  const t = useT()
   const five = view?.fiveHour?.used_pct
   const seven = view?.sevenDay?.used_pct
-  if (typeof five !== 'number' && typeof seven !== 'number') return <span className="hint">quota inconnu</span>
+  if (typeof five !== 'number' && typeof seven !== 'number') return <span className="hint">{t('sessions.switch.quotaUnknown')}</span>
   return (
     <span className="asw-q">
       <span>
-        5 h <Meter pct={five} width={48} label="Quota 5 h" /> <b>{formatPct(five)}</b>
+        {t('sessions.switch.window5h')} <Meter pct={five} width={48} label={t('sessions.switch.quota5h')} /> <b>{formatPct(five)}</b>
       </span>
       <span>
-        7 j <Meter pct={seven} width={48} label="Quota 7 jours" /> <b>{formatPct(seven)}</b>
+        {t('sessions.switch.window7d')} <Meter pct={seven} width={48} label={t('sessions.switch.quota7d')} /> <b>{formatPct(seven)}</b>
       </span>
     </span>
   )
@@ -232,6 +242,7 @@ export function AccountSwitchDialog({
   onStart: (target: string, wait: boolean) => void
   onClose: () => void
 }) {
+  const { t, rich } = useI18n()
   const { label } = useSettings()
   const targets = switchTargets(session, profiles)
   const [target, setTarget] = useState<string>(() => targets[0]?.name ?? '')
@@ -277,13 +288,11 @@ export function AccountSwitchDialog({
   )
 
   return (
-    <Modal title="Changer de compte" onClose={onClose} width={560}>
+    <Modal title={t('sessions.switch.title')} onClose={onClose} width={560}>
       <div className="mb">
-        <p style={{ margin: 0 }}>
-          Session « {name} », actuellement sous le profil <b>{originLabel}</b>.
-        </p>
+        <p style={{ margin: 0 }}>{rich('sessions.switch.intro', { name, profile: <b>{originLabel}</b> })}</p>
         <fieldset className="asw-list" aria-labelledby={legendId}>
-          <legend id={legendId}>Profil cible</legend>
+          <legend id={legendId}>{t('sessions.switch.target')}</legend>
           {targets.map((p) => (
             <label key={p.name} className="asw-opt">
               <input
@@ -297,10 +306,10 @@ export function AccountSwitchDialog({
                   setConfirm(false)
                 }}
               />
-              <span className="asw-n" title={`Profil Claude Code ${label(p.name).long} (${p.name})`}>
+              <span className="asw-n" title={t('common.profileChipTitle', { label: label(p.name).long, profile: p.name })}>
                 {label(p.name).long}
               </span>
-              {vis[p.name] === 'absent' && risks.noTranscript === null && <span className="chip pend">ne voit pas la conversation</span>}
+              {vis[p.name] === 'absent' && risks.noTranscript === null && <span className="chip pend">{t('sessions.switch.blind')}</span>}
               <QuotaLine view={quotas.find((q) => q.profile === p.name)} />
             </label>
           ))}
@@ -308,46 +317,59 @@ export function AccountSwitchDialog({
         {target && (
           <p style={{ margin: 0 }}>
             {session.alive
-              ? `La session va être arrêtée puis reprise sous ${targetLabel} ; la conversation continue (même dossier, même onglet).`
-              : `La session va être reprise sous ${targetLabel} ; la conversation continue (même dossier, même onglet).`}
+              ? t('sessions.switch.willStopResume', { profile: targetLabel })
+              : t('sessions.switch.willResume', { profile: targetLabel })}
           </p>
         )}
         {checking && (
           <p className="hint" role="status" style={{ margin: 0 }}>
-            <span className="spin" aria-hidden="true" /> Vérification de la conversation sous chaque profil…
+            <span className="spin" aria-hidden="true" /> {t('sessions.switch.checking')}
           </p>
         )}
         {risks.noTranscript === 'sure' &&
           warn(
+            // i18n-exempt: clé React (identifiant)
             'nt',
-            <>
-              Cette conversation n’a pas encore de transcript (aucun échange terminé) : Claude Code ne pourra la reprendre
-              sous aucun profil, {originLabel} compris.
-              {session.alive ? ' Attends la fin d’un premier échange, puis « Vérifier à nouveau ».' : ''}
-            </>,
+            session.alive
+              ? t('sessions.switch.noTranscriptAlive', { profile: originLabel })
+              : t('sessions.switch.noTranscript', { profile: originLabel }),
           )}
         {risks.noTranscript === 'likely' &&
-          warn('ntl', `Aucun premier prompt connu : la conversation n’a peut-être pas encore de transcript, et la reprise échouerait alors sous tout profil, ${originLabel} compris.`)}
+          // i18n-exempt: clé React (identifiant)
+          warn('ntl', t('sessions.switch.noTranscriptLikely', { profile: originLabel }))}
         {risks.targetBlind &&
-          warn('tb', `Le profil ${targetLabel} ne voit pas cette conversation (dossier projects/ distinct ?) : la reprise échouera${session.alive ? ', après l’arrêt de la session' : ''}.`)}
+          warn(
+            // i18n-exempt: clé React (identifiant)
+            'tb',
+            session.alive
+              ? t('sessions.switch.targetBlindAlive', { profile: targetLabel })
+              : t('sessions.switch.targetBlind', { profile: targetLabel }),
+          )}
         {risks.dangerous &&
           warn(
+            // i18n-exempt: clé React (identifiant)
             'dm',
-            `La session est en mode « ${session.mode} » : le démon refuse de la reprendre dans ce mode sauf si allow_dangerous_modes = true dans sa configuration ; sinon la reprise échouera, sous ${originLabel} aussi.`,
+            t('sessions.switch.dangerous', { mode: session.mode, profile: originLabel }),
           )}
         {reason && (
           <p className="hint warn" role="status" style={{ margin: 0 }}>
             <span aria-hidden="true">● </span>
-            Claude travaille : {reason}.
+            {t('sessions.switch.busyLine', { reason })}
           </p>
         )}
         {confirm && (
           <p className="asw-confirm" role="alert" style={{ margin: 0 }}>
-            {reason
-              ? `Changer maintenant interrompt le travail en cours : la réponse ou l’outil en cours sera coupé${session.pending.length ? ', la demande en attente restera sans réponse' : ''}. `
-              : ''}
-            {risky ? 'La reprise risque d’échouer (voir ci-dessus) : la session resterait arrêtée. ' : ''}
-            Confirmer ?
+            {[
+              reason
+                ? session.pending.length
+                  ? t('sessions.switch.interruptPending')
+                  : t('sessions.switch.interrupt')
+                : null,
+              risky ? t('sessions.switch.riskyResume') : null,
+              t('sessions.switch.confirm'),
+            ]
+              .filter(Boolean)
+              .join(' ')}
           </p>
         )}
       </div>
@@ -356,45 +378,45 @@ export function AccountSwitchDialog({
         {blocked ? (
           <>
             <button className="btn ghost" onClick={onClose}>
-              Annuler
+              {t('sessions.confirm.cancel')}
             </button>
             <button className="btn" onClick={() => setSeq((n) => n + 1)}>
-              Vérifier à nouveau
+              {t('sessions.switch.recheck')}
             </button>
           </>
         ) : confirm ? (
           <>
             <button className="btn ghost" onClick={() => setConfirm(false)}>
-              Retour
+              {t('sessions.cleanup.back')}
             </button>
             <button className="btn danger" disabled={!target} onClick={() => go(false)}>
-              {reason ? 'Interrompre et changer' : 'Changer quand même'}
+              {reason ? t('sessions.switch.interruptAndSwitch') : t('sessions.switch.switchAnyway')}
             </button>
           </>
         ) : reason ? (
           <>
             <button className="btn ghost" onClick={onClose}>
-              Annuler
+              {t('sessions.confirm.cancel')}
             </button>
             <button className="btn warn" disabled={!target || checking} onClick={() => setConfirm(true)}>
-              Changer maintenant…
+              {t('sessions.switch.switchNow')}
             </button>
             <button className="btn pri" disabled={!target || checking} onClick={() => go(true)}>
-              Attendre la fin
+              {t('sessions.switch.waitEnd')}
             </button>
           </>
         ) : (
           <>
             <button className="btn ghost" onClick={onClose}>
-              Annuler
+              {t('sessions.confirm.cancel')}
             </button>
             {risky ? (
               <button className="btn warn" disabled={!target || checking} onClick={() => setConfirm(true)}>
-                Changer quand même…
+                {t('sessions.switch.switchAnywayAsk')}
               </button>
             ) : (
               <button className="btn pri" disabled={!target || checking} onClick={() => go(false)}>
-                Changer de compte
+                {t('sessions.switch.title')}
               </button>
             )}
           </>
@@ -416,39 +438,40 @@ export function SwitchStatus({
   onCancel: () => void
   onResumeAs: (profile: string) => void
 }) {
+  const t = useT()
   const { label } = useSettings()
   if (!state) return null
-  const t = label(state.kind === 'resuming' || state.kind === 'failed' ? state.profile : state.target).long
+  const to = label(state.kind === 'resuming' || state.kind === 'failed' ? state.profile : state.target).long
   switch (state.kind) {
     case 'waiting':
       return (
         <span className="asw-st" role="status">
           <span className="spin" aria-hidden="true" />
-          Bascule vers {t} dès que Claude aura fini
+          {t('sessions.switch.waiting', { profile: to })}
           {state.reason ? ` (${state.reason})` : ''}
           <button className="btn sm ghost" onClick={onCancel}>
-            Annuler la bascule
+            {t('sessions.switch.cancelSwitch')}
           </button>
         </span>
       )
     case 'stopping':
       return (
         <span className="asw-st" role="status">
-          <span className="spin" aria-hidden="true" /> Bascule vers {t} : arrêt de la session…
+          <span className="spin" aria-hidden="true" /> {t('sessions.switch.stopping', { profile: to })}
         </span>
       )
     case 'resuming':
       return (
         <span className="asw-st" role="status">
-          <span className="spin" aria-hidden="true" /> Bascule : reprise sous {t}…
+          <span className="spin" aria-hidden="true" /> {t('sessions.switch.resuming', { profile: to })}
         </span>
       )
     case 'done':
       return (
         <span className="asw-st" role="status">
-          Reprise sous {t}, avec un avertissement : {state.warnings.join(' ; ')}
+          {t('sessions.switch.doneWarn', { profile: to, warnings: daemonText(state.warnings.join(' ; ')) })}
           <button className="btn sm ghost" onClick={onCancel}>
-            Fermer
+            {t('sessions.cleanup.close')}
           </button>
         </span>
       )
@@ -457,15 +480,15 @@ export function SwitchStatus({
         <span className="asw-st" role="status">
           <span aria-hidden="true">■ </span>
           {session.alive
-            ? `La session a redémarré pendant l’attente : bascule vers ${t} abandonnée.`
-            : `La session s’est arrêtée pendant l’attente : bascule vers ${t} suspendue, rien n’a été repris.`}
+            ? t('sessions.switch.interruptedRestarted', { profile: to })
+            : t('sessions.switch.interruptedStopped', { profile: to })}
           {!session.alive && (
             <button className="btn sm" onClick={() => onResumeAs(state.target)}>
-              Reprendre sous {t}
+              {t('sessions.switch.resumeAs', { profile: to })}
             </button>
           )}
           <button className="btn sm ghost" onClick={onCancel}>
-            Fermer
+            {t('sessions.cleanup.close')}
           </button>
         </span>
       )
@@ -473,26 +496,26 @@ export function SwitchStatus({
       // D'après l'instantané (une réponse perdue ne dit rien de l'état réel), pas d'après l'étape.
       const stopped = !session.alive
       const origin = label(state.origin).long
-      const why = state.step === 'resume' ? resumeFailureText(state.code, state.message, t) : state.message
+      const why = state.step === 'resume' ? resumeFailureText(state.code, state.message, to) : state.message
       const text = stopped
-        ? `La session est arrêtée ; la bascule vers ${t} a échoué : ${why}. ${originRetryCaveat(state.code, origin)}`
-        : `Bascule vers ${t} impossible : ${why} ; la session tourne toujours sous ${label(session.profile).long}.`
+        ? t('sessions.switch.failedStopped', { profile: to, why, caveat: originRetryCaveat(state.code, origin) })
+        : t('sessions.switch.failedRunning', { profile: to, why, current: label(session.profile).long })
       return (
         <span className="asw-st bad" role="alert">
           <span aria-hidden="true">× </span>
           {text}
           {stopped && (
             <button className="btn sm" onClick={() => onResumeAs(state.origin)}>
-              Reprendre sous {origin}
+              {t('sessions.switch.resumeAs', { profile: origin })}
             </button>
           )}
           {stopped && state.profile !== state.origin && (
             <button className="btn sm ghost" onClick={() => onResumeAs(state.profile)}>
-              Réessayer sous {t}
+              {t('sessions.switch.retryAs', { profile: to })}
             </button>
           )}
           <button className="btn sm ghost" onClick={onCancel}>
-            Fermer
+            {t('sessions.cleanup.close')}
           </button>
         </span>
       )
@@ -506,6 +529,7 @@ export function SwitchStatus({
  * « Annuler la bascule », « Fermer »), le focus y revient au lieu de se perdre.
  */
 export function SwitchArea({ state, children }: { state: SwitchState | null; children: ReactNode }) {
+  const t = useT()
   const ref = useRef<HTMLDivElement>(null)
   const kind = state?.kind ?? null
   const prev = useRef(kind)
@@ -517,7 +541,7 @@ export function SwitchArea({ state, children }: { state: SwitchState | null; chi
     if (lost) ref.current?.focus()
   }, [kind])
   return (
-    <div ref={ref} className="sh-asw" tabIndex={-1} aria-label="Changer de compte">
+    <div ref={ref} className="sh-asw" tabIndex={-1} aria-label={t('sessions.switch.title')}>
       {children}
     </div>
   )
@@ -541,20 +565,27 @@ export function CeilingHint({
   onDismiss: (key: string) => void
   onOpen: () => void
 }) {
+  const t = useT()
   const { label } = useSettings()
   const c = ceilingSuggestion(session, profiles, quotas)
   if (!c || state) return null
   const key = ceilingKey(session.id, session.profile, c)
   if (dismissed(key)) return null
   const who = label(session.profile).long
-  const level = c.pct >= 100 ? 'au plafond' : `presque au plafond (≥ ${QUOTA_CRIT_PCT} %)`
+  const level = c.pct >= 100 ? t('sessions.switch.atCeiling') : t('sessions.switch.nearCeiling', { pct: QUOTA_CRIT_PCT })
+  const win = windowLabel(c.window, t)
   return (
     <span className="asw-hint-wrap">
-      <button className="asw-hint" onClick={onOpen} title={`Quota ${c.window} du profil ${who} à ${formatPct(c.pct)}`}>
+      <button className="asw-hint" onClick={onOpen} title={t('sessions.switch.ceilingTitle', { window: win, profile: who, pct: formatPct(c.pct) })}>
         <span aria-hidden="true">⚠ </span>
-        Compte {who} {level} — {c.window} : {formatPct(c.pct)} — Changer de compte…
+        {t('sessions.switch.ceiling', { profile: who, level, window: win, pct: formatPct(c.pct) })}
       </button>
-      <button className="asw-hint-x" aria-label={`Masquer l’invite « compte ${who} ${level} »`} title="Masquer jusqu’au prochain changement de quota" onClick={() => onDismiss(key)}>
+      <button
+        className="asw-hint-x"
+        aria-label={t('sessions.switch.ceilingHide', { profile: who, level })}
+        title={t('sessions.switch.ceilingHideTitle')}
+        onClick={() => onDismiss(key)}
+      >
         ×
       </button>
     </span>

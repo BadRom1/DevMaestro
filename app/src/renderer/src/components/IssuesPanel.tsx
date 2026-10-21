@@ -19,14 +19,16 @@
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
+import type { MessageKey } from '../../../shared/i18n'
 import { ISSUE_STATE_FILTERS, type ForgeStatus, type Issue, type IssueStateFilter, type RepoLabel, type Session } from '../../../shared/protocol'
 import { api, call, errorCode, errorText, CallError } from '../api'
+import { useI18n, useT } from '../i18n'
 import { outcomeUncertain } from '../state/errors'
 import {
   DEFAULT_FILTERS,
   EPIC_MODES,
-  FORGE_CONTENT_WARNING,
-  UNCERTAIN_LAUNCH,
+  forgeContentWarning,
+  uncertainLaunchText,
   invisibleNote,
   onlyRepoIssues,
   prepareEpic,
@@ -65,7 +67,8 @@ export type ForgeTab = 'issues' | 'pulls'
 
 const NO_LAUNCHED: ReadonlyMap<number, 'done' | 'uncertain'> = new Map()
 
-const STATE_LABELS: Record<IssueStateFilter, string> = { open: 'Ouvertes', closed: 'Fermées', all: 'Toutes' }
+/** Libellés des filtres d'état (clés du catalogue, traduites au rendu). */
+const STATE_LABELS = { open: 'forge.issues.filter.open', closed: 'forge.issues.filter.closed', all: 'forge.issues.filter.all' } as const satisfies Record<IssueStateFilter, MessageKey>
 
 /** Clé de la taille retenue du panneau Forge. */
 export const FORGE_PANEL_SIZE_KEY = 'devmaestro.forge.panel'
@@ -119,11 +122,12 @@ function Progress({ issue }: { issue: Issue }) {
 
 /** Forge indisponible : raison, commande à lancer soi-même (copiable, jamais exécutée). */
 function Unavailable({ a, onRetry }: { a: ForgeAvailability; onRetry: () => void }) {
+  const t = useT()
   const [copied, setCopied] = useState(false)
   if (a.kind === 'unsupported') {
     return (
       <div className="forge-off" role="status">
-        <p>Le démon ne connaît pas encore les forges : mets orchd à jour pour lire les issues.</p>
+        <p>{t('forge.issues.unsupported')}</p>
       </div>
     )
   }
@@ -131,26 +135,26 @@ function Unavailable({ a, onRetry }: { a: ForgeAvailability; onRetry: () => void
   return (
     <div className="forge-off" role="status">
       <p>
-        <b>Forge indisponible :</b> {a.reason}
+        <b>{t('forge.issues.unavailableTitle')}</b> {a.reason}
       </p>
       {a.command && (
         <>
           <p className="forge-cmd">
-            Lance toi-même, dans un terminal : <code className="mono">{a.command}</code>
+            {t('forge.issues.runYourself')} <code className="mono">{a.command}</code>
             <button
               type="button"
               className="btn sm ghost"
               onClick={() => void api.copyText(a.command!).then((ok) => setCopied(ok))}
             >
-              {copied ? 'Copié' : 'Copier'}
+              {copied ? t('forge.issues.copied') : t('forge.issues.copy')}
             </button>
           </p>
-          <p className="hint">DevMaestro n’exécute jamais cette commande : elle reste entre toi et la CLI GitHub.</p>
+          <p className="hint">{t('forge.issues.neverRun')}</p>
         </>
       )}
       <p>
         <button type="button" className="btn sm" onClick={onRetry}>
-          Réessayer
+          {t('forge.issues.retry')}
         </button>
       </p>
     </div>
@@ -197,6 +201,7 @@ export function ForgePanel({
   /** `forge.status` a répondu : le démon connaît la forge (`status` : ses capacités annoncées). */
   onSupported?: (status: ForgeStatus) => void
 }) {
+  const t = useT()
   const { settings } = useSettings()
   const prefix = settings.worktrees.branchPrefix
   const [avail, setAvail] = useState<ForgeAvailability>({ kind: 'loading' })
@@ -265,8 +270,8 @@ export function ForgePanel({
   // Saisie de la recherche ou de l'étiquette : appliquée après une courte pause ; le reste tout de suite.
   useEffect(() => {
     if (filters === applied) return
-    const t = setTimeout(() => setApplied(filters), filters.search === applied.search && filters.label === applied.label ? 0 : SEARCH_DEBOUNCE_MS)
-    return () => clearTimeout(t)
+    const timer = setTimeout(() => setApplied(filters), filters.search === applied.search && filters.label === applied.label ? 0 : SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
   }, [filters, applied])
 
   const available = avail.kind === 'available'
@@ -346,14 +351,16 @@ export function ForgePanel({
   )
 
   return (
-    <Modal title={`Forge du projet · ${name}`} onClose={onClose} busy={busy} panel={{ sizeKey: FORGE_PANEL_SIZE_KEY }}>
+    <Modal title={t('forge.issues.panelTitle', { name })} onClose={onClose} busy={busy} panel={{ sizeKey: FORGE_PANEL_SIZE_KEY }}>
       <div className="mb issues-mb">
         {available && (
-          <div className="ftabs" role="tablist" aria-label="Forge">
+          <div className="ftabs" role="tablist" aria-label={t('forge.issues.tabsLabel')}>
             {(
               [
-                ['issues', 'Issues'],
-                ['pulls', 'Demandes de fusion'],
+                // i18n-exempt: identifiant d'onglet
+                ['issues', t('forge.issues.tab.issues')],
+                // i18n-exempt: identifiant d'onglet
+                ['pulls', t('forge.issues.tab.pulls')],
               ] as const
             ).map(([id, label]) => (
               <button key={id} type="button" role="tab" className="ftab" aria-selected={tab === id} disabled={busy && tab !== id} onClick={() => setTab(id)}>
@@ -365,7 +372,7 @@ export function ForgePanel({
         {available && tab === 'pulls' && (
           <PullsTab root={root} status={avail.status} initialNumber={initialPull ?? null} onLink={onLink} onBusy={setPullBusy} />
         )}
-        {avail.kind === 'loading' && <p className="hint">Connexion à la forge…</p>}
+        {avail.kind === 'loading' && <p className="hint">{t('forge.issues.connecting')}</p>}
         {(avail.kind === 'unavailable' || avail.kind === 'unsupported') && (
           <Unavailable a={avail} onRetry={() => setStatusSeq((n) => n + 1)} />
         )}
@@ -386,25 +393,25 @@ export function ForgePanel({
         {available && tab === 'issues' && !epicOpen && (
           <div className="issues">
             <div className="ifilters-wrap">
-              <div className="ifilters" role="group" aria-label="Filtres des issues">
+              <div className="ifilters" role="group" aria-label={t('forge.issues.filtersLabel')}>
                 <label className="field ifield-state">
-                  <span className="lbl">État</span>
+                  <span className="lbl">{t('forge.issues.filter.state')}</span>
                   <select value={filters.state} onChange={(e) => setFilters((f) => ({ ...f, state: e.target.value as IssueStateFilter }))}>
                     {ISSUE_STATE_FILTERS.map((s) => (
                       <option key={s} value={s}>
-                        {STATE_LABELS[s]}
+                        {t(STATE_LABELS[s])}
                       </option>
                     ))}
                   </select>
                 </label>
                 {repoLabels.phase === 'fallback' ? (
                   <label className="field ifield-labels">
-                    <span className="lbl">Étiquette</span>
+                    <span className="lbl">{t('forge.issues.filter.label')}</span>
                     <input
                       value={filters.label}
                       maxLength={128}
-                      placeholder="bug…"
-                      title="Le démon ne donne pas la liste des étiquettes du dépôt : saisie libre d’une étiquette."
+                      placeholder={t('forge.issues.filter.labelPlaceholder')}
+                      title={t('forge.issues.filter.labelFree')}
                       onChange={(e) => setFilters((f) => ({ ...f, label: e.target.value }))}
                     />
                   </label>
@@ -419,36 +426,36 @@ export function ForgePanel({
                 )}
                 <label className="optrow imine">
                   <input type="checkbox" checked={filters.mine} onChange={(e) => setFilters((f) => ({ ...f, mine: e.target.checked }))} />
-                  <span>Assignées à moi</span>
+                  <span>{t('forge.issues.filter.mine')}</span>
                 </label>
                 <label className="field grow">
-                  <span className="lbl">Recherche</span>
+                  <span className="lbl">{t('forge.issues.filter.search')}</span>
                   <input
                     type="search"
                     value={filters.search}
                     maxLength={256}
-                    placeholder="Titre, texte…"
+                    placeholder={t('forge.issues.filter.searchPlaceholder')}
                     onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
                   />
                 </label>
-                <button type="button" className="btn ghost ictl" onClick={refresh} title="Redemander à la forge (sans le cache)">
-                  Actualiser
+                <button type="button" className="btn ghost ictl" onClick={refresh} title={t('forge.issues.refreshTitle')}>
+                  {t('forge.issues.refresh')}
                 </button>
               </div>
               {QUALIFIER.test(filters.search) && (
                 <p className="hint">
-                  Recherche de GitHub : un qualificatif (repo:, is:pr…) peut ramener des éléments d’autres dépôts ; ils sont écartés.
+                  {t('forge.issues.qualifierHint')}
                 </p>
               )}
             </div>
-            <section className="ilist" aria-label="Liste des issues">
-              {list.phase === 'loading' && <p className="hint">Chargement des issues…</p>}
+            <section className="ilist" aria-label={t('forge.issues.listLabel')}>
+              {list.phase === 'loading' && <p className="hint">{t('forge.issues.loadingList')}</p>}
               {list.phase === 'error' && (
                 <p className="inline-err" role="alert">
-                  Liste indisponible : {list.message}
+                  {t('forge.issues.listError', { message: list.message })}
                 </p>
               )}
-              {list.phase === 'ready' && shown.issues.length === 0 && <p className="empty-note">Aucune issue pour ces filtres.</p>}
+              {list.phase === 'ready' && shown.issues.length === 0 && <p className="empty-note">{t('forge.issues.noneForFilters')}</p>}
               {list.phase === 'ready' && shown.issues.length > 0 && (
                 <ul className="irows" role="list" aria-describedby={`${uid}-n`}>
                   {shown.issues.map((i) => {
@@ -469,7 +476,7 @@ export function ForgePanel({
                             <IssueState state={i.state} />
                             <Progress issue={i} />
                             <IssueLabels labels={i.labels} />
-                            <span className="hint iago" title={i.updated_at ? `mise à jour ${relativeTime(i.updated_at)}` : undefined}>
+                            <span className="hint iago" title={i.updated_at ? t('forge.issues.updated', { ago: relativeTime(i.updated_at) }) : undefined}>
                               {shortAgo(i.updated_at)}
                             </span>
                           </span>
@@ -481,18 +488,18 @@ export function ForgePanel({
               )}
               {list.phase === 'ready' && (
                 <p className="hint" id={`${uid}-n`}>
-                  {shown.issues.length} issue{shown.issues.length > 1 ? 's' : ''}
-                  {list.truncated ? ' (liste coupée : affine les filtres)' : ''}
-                  {shown.dropped > 0 ? ` · ${shown.dropped} élément${shown.dropped > 1 ? 's' : ''} hors du dépôt écarté${shown.dropped > 1 ? 's' : ''}` : ''}
+                  {t('forge.issues.count', { count: shown.issues.length })}
+                  {list.truncated ? t('forge.issues.countTruncated') : ''}
+                  {shown.dropped > 0 ? t('forge.issues.countDropped', { count: shown.dropped }) : ''}
                 </p>
               )}
             </section>
-            <section className="idetail" aria-label="Détail de l’issue" aria-live="polite">
-              {selected === null && <p className="empty">Choisis une issue pour voir sa description.</p>}
-              {detail?.phase === 'loading' && <p className="hint">Chargement de l’issue #{detail.number}…</p>}
+            <section className="idetail" aria-label={t('forge.issues.detailLabel')} aria-live="polite">
+              {selected === null && <p className="empty">{t('forge.issues.pickOne')}</p>}
+              {detail?.phase === 'loading' && <p className="hint">{t('forge.issues.loadingIssue', { number: detail.number })}</p>}
               {detail?.phase === 'error' && (
                 <p className="inline-err" role="alert">
-                  Issue #{detail.number} indisponible : {detail.message}
+                  {t('forge.issues.issueError', { number: detail.number, message: detail.message })}
                 </p>
               )}
               {current && (
@@ -514,7 +521,7 @@ export function ForgePanel({
           {avail.kind === 'available' && avail.status.repo ? `${avail.status.host ? `${avail.status.host} · ` : ''}${avail.status.repo}` : ''}
         </span>
         <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>
-          Fermer
+          {t('forge.issues.close')}
         </button>
       </div>
     </Modal>
@@ -537,6 +544,7 @@ function IssueDetail({
   onEpic: () => void
   onOpen: (n: number) => void
 }) {
+  const { t, rich } = useI18n()
   const subs = issue.sub_issues ?? []
   const openCount = openSubIssues(issue).length
   return (
@@ -549,18 +557,18 @@ function IssueDetail({
           <IssueState state={issue.state} />
           <Progress issue={issue} />
           <IssueLabels labels={issue.labels} />
-          {issue.author && <span className="hint">par {oneLine(issue.author)}</span>}
-          {issue.assignees?.length > 0 && <span className="hint">assignée à {issue.assignees.map(oneLine).join(', ')}</span>}
-          {issue.updated_at && <span className="hint">mise à jour {relativeTime(issue.updated_at)}</span>}
+          {issue.author && <span className="hint">{t('forge.issues.by', { author: oneLine(issue.author) })}</span>}
+          {issue.assignees?.length > 0 && <span className="hint">{t('forge.issues.assignedTo', { names: issue.assignees.map(oneLine).join(', ') })}</span>}
+          {issue.updated_at && <span className="hint">{t('forge.issues.updated', { ago: relativeTime(issue.updated_at) })}</span>}
           {typeof issue.parent === 'number' && (
             <button type="button" className="linkish" onClick={() => onOpen(issue.parent!)}>
-              epic #{issue.parent}
+              {t('forge.issues.epicParent', { number: issue.parent })}
             </button>
           )}
         </div>
         {subs.length > 0 && (
           <div className="isubs">
-            <span className="lbl">Sous-issues</span>
+            <span className="lbl">{t('forge.issues.subIssues')}</span>
             <ul role="list">
               {subs.map((s) => (
                 <li key={s.number}>
@@ -577,21 +585,21 @@ function IssueDetail({
         <IssueBody issue={issue} onLink={onLink} />
       </div>
       {/* Barre d'actions fixée en bas du détail : toujours visible, quel que soit le défilement. */}
-      <div className="iissue-bar" role="group" aria-label={`Actions de l’issue #${issue.number}`}>
+      <div className="iissue-bar" role="group" aria-label={t('forge.issues.actionsLabel', { number: issue.number })}>
         <button type="button" className="btn pri" onClick={onLaunch}>
-          Lancer une session
+          {t('forge.issues.launch')}
         </button>
         {isEpic(issue) && (
-          <button type="button" className="btn" onClick={onEpic} disabled={openCount === 0} title={openCount === 0 ? 'Aucune sous-issue ouverte' : undefined}>
-            Lancer une session par sous-issue ({openCount})…
+          <button type="button" className="btn" onClick={onEpic} disabled={openCount === 0} title={openCount === 0 ? t('forge.issues.noOpenSub') : undefined}>
+            {t('forge.issues.launchEach', { count: openCount })}
           </button>
         )}
         <span className="hint iissue-names">
-          session « {names.name} » · branche <span className="mono">{names.branch}</span> (modifiables avant de lancer)
+          {rich('forge.issues.names', { name: names.name, branch: <span className="mono">{names.branch}</span> })}
         </span>
         {issue.url && (
           <button type="button" className="btn sm ghost iissue-link" onClick={() => onLink(issue.url)} title={issue.url}>
-            Voir sur la forge ↗
+            {t('forge.issues.viewOnForge')}
           </button>
         )}
       </div>
@@ -601,11 +609,12 @@ function IssueDetail({
 
 type EpicPhase = 'select' | 'preparing' | 'confirm' | 'running' | 'done'
 
-const MODE_LABELS: Record<EpicMode, string> = {
-  default: 'Par défaut (demande les permissions)',
-  plan: 'Plan (lecture seule)',
-  acceptEdits: 'Accepter les modifications',
-}
+/** Libellés des modes d'un epic (clés du catalogue, traduites au rendu). */
+const MODE_LABELS = {
+  default: 'forge.issues.mode.default',
+  plan: 'forge.issues.mode.plan',
+  acceptEdits: 'forge.issues.mode.acceptEdits',
+} as const satisfies Record<EpicMode, MessageKey>
 
 /**
  * Epic : sous-issues ouvertes à cocher, mode, aperçu relu (ce qui sera collé),
@@ -631,6 +640,7 @@ function EpicLaunch({
   onBusy: (busy: boolean) => void
   onBack: () => void
 }) {
+  const { t, rich } = useI18n()
   const subs = useMemo(() => openSubIssues(epic), [epic])
   const [checked, setChecked] = useState<Set<number>>(() => new Set(subs.map((s) => s.number).filter((n) => !launched.has(n))))
   const [mode, setMode] = useState<EpicMode>('default')
@@ -698,43 +708,41 @@ function EpicLaunch({
   return (
     <div className="iepic">
       <h3 className="ih">
-        Une session par sous-issue de <span className="inum mono">#{epic.number}</span> {oneLine(epic.title)}
+        {rich('forge.issues.epic.title', { number: <span className="inum mono">#{epic.number}</span>, title: oneLine(epic.title) })}
       </h3>
       {!ctx.worktrees && (
         <p className="inline-err" role="alert">
-          Le démon ne crée pas de worktree (version trop ancienne ?) : impossible de lancer une session par sous-issue, chacune dans
-          son worktree.
+          {t('forge.issues.epic.noWorktrees')}
         </p>
       )}
       {!ctx.initial && (
         <p className="inline-err" role="alert">
-          Le démon ne sait pas encore taper la consigne puis coller le contenu des issues : mets orchd à jour pour lancer depuis un epic.
+          {t('forge.issues.epic.noInitial')}
         </p>
       )}
       <p className="forge-warn" role="note">
         <span aria-hidden="true">⚠ </span>
-        {FORGE_CONTENT_WARNING}
+        {forgeContentWarning()}
       </p>
       <div className="iepic-opts">
         <label className="field">
-          <span className="lbl">Mode des sessions</span>
+          <span className="lbl">{t('forge.issues.epic.modeLabel')}</span>
           <select value={mode} disabled={phase !== 'select' && phase !== 'confirm'} onChange={(e) => setMode(e.target.value as EpicMode)}>
             {EPIC_MODES.map((m) => (
               <option key={m} value={m}>
-                {MODE_LABELS[m]}
+                {t(MODE_LABELS[m])}
               </option>
             ))}
           </select>
-          <span className="hint">Jamais de mode qui approuve seul depuis un epic : le contenu collé n’est pas fiable.</span>
+          <span className="hint">{t('forge.issues.epic.modeHint')}</span>
         </label>
         <p className="hint">
-          Profil : <b>{ctx.profileLabel}</b> · worktrees : <b>{ctx.locationLabel}</b> · nom court « #n titre » et branche courte (mots vides retirés) ; la consigne est
-          tapée, puis la description de la sous-issue est collée. Les sessions partent l’une après l’autre.
+          {rich('forge.issues.epic.summary', { profile: <b>{ctx.profileLabel}</b>, location: <b>{ctx.locationLabel}</b> })}
         </p>
       </div>
       <fieldset className="iepic-list" disabled={phase !== 'select'}>
-        <legend className="lbl">Sous-issues ouvertes ({subs.length})</legend>
-        {subs.length === 0 && <p className="hint">Aucune sous-issue ouverte.</p>}
+        <legend className="lbl">{t('forge.issues.epic.openSubs', { count: subs.length })}</legend>
+        {subs.length === 0 && <p className="hint">{t('forge.issues.epic.noneOpen')}</p>}
         <ul role="list">
           {subs.map((s) => {
             const row = rows.find((r) => r.number === s.number)
@@ -762,14 +770,14 @@ function EpicLaunch({
                     </b>
                     {row && (
                       <span className="hint">
-                        session « {row.name} » · branche <span className="mono">{row.branch}</span>
+                        {rich('forge.issues.epic.rowNames', { name: row.name, branch: <span className="mono">{row.branch}</span> })}
                       </span>
                     )}
                   </span>
                 </label>
                 {before && !r && (
                   <span className={`wt-result${before === 'done' ? ' ok' : ''}`}>
-                    {before === 'done' ? '✓ déjà lancée depuis ce panneau' : `déjà tentée : ${UNCERTAIN_LAUNCH}`}
+                    {before === 'done' ? t('forge.issues.epic.alreadyLaunched') : t('forge.issues.epic.alreadyTried', { text: uncertainLaunchText() })}
                   </span>
                 )}
                 {row?.problem && !r && (
@@ -780,21 +788,21 @@ function EpicLaunch({
                 {showPreview && row && !row.problem && p?.phase === 'ready' && (
                   <details className="forge-pasted">
                     <summary>
-                      Ce qui sera tapé puis collé
+                      {t('forge.issues.epic.previewSummary')}
                       {invisibleNote(p.prefill.invisible) && <span className="chip pend">{invisibleNote(p.prefill.invisible)}</span>}
                     </summary>
                     <p className="hint">
-                      Consigne : <span className="mono">{p.prefill.instruction}</span>
+                      {rich('forge.issues.epic.instruction', { text: <span className="mono">{p.prefill.instruction}</span> })}
                     </p>
-                    <pre className="forge-pre">{p.prefill.pasted || '(aucune description : rien n’est collé)'}</pre>
+                    <pre className="forge-pre">{p.prefill.pasted || t('forge.issues.epic.nothingPasted')}</pre>
                   </details>
                 )}
                 {showPreview && p?.phase === 'failed' && !row?.problem && !r && (
                   <span className="wt-result bad" role="alert">
-                    Sous-issue illisible : {p.message}
+                    {t('forge.issues.epic.unreadable', { message: p.message })}
                   </span>
                 )}
-                {phase === 'preparing' && p?.phase === 'loading' && <span className="wt-result">lecture de la sous-issue…</span>}
+                {phase === 'preparing' && p?.phase === 'loading' && <span className="wt-result">{t('forge.issues.epic.reading')}</span>}
                 {r && <EpicResult r={r} />}
               </li>
             )
@@ -802,27 +810,30 @@ function EpicLaunch({
         </ul>
       </fieldset>
       {phase === 'confirm' && (
-        <div className="forget wt-confirm" role="group" aria-label="Confirmation">
+        <div className="forget wt-confirm" role="group" aria-label={t('forge.issues.epic.confirmLabel')}>
           <span>
-            Lancer {ready.length > 1 ? `ces ${ready.length} sessions` : ready.length === 1 ? 'cette session' : 'aucune session'}, chacune dans
-            un nouveau worktree, en mode « {MODE_LABELS[mode]} » ?
-            {rows.length > ready.length && ` ${rows.length - ready.length} ligne(s) en erreur ne partiront pas.`}
+            {ready.length > 1
+              ? t('forge.issues.epic.confirmMany', { count: ready.length, mode: t(MODE_LABELS[mode]) })
+              : ready.length === 1
+                ? t('forge.issues.epic.confirmOne', { mode: t(MODE_LABELS[mode]) })
+                : t('forge.issues.epic.confirmNone', { mode: t(MODE_LABELS[mode]) })}
+            {rows.length > ready.length && t('forge.issues.epic.confirmErrors', { count: rows.length - ready.length })}
           </span>
-          <span>Relis le contenu de chaque sous-issue (« Ce qui sera tapé puis collé ») avant de lancer.</span>
+          <span>{t('forge.issues.epic.confirmReread')}</span>
         </div>
       )}
       {phase === 'done' && (
         <p role="status">
-          {nDone} session{nDone > 1 ? 's' : ''} lancée{nDone > 1 ? 's' : ''}
-          {nUncertain > 0 ? `, ${nUncertain} au résultat incertain (vérifie la liste des sessions)` : ''}
-          {nFailed > 0 ? `, ${nFailed} en échec` : ''}.
+          {t('forge.issues.epic.doneLaunched', { count: nDone })}
+          {nUncertain > 0 ? t('forge.issues.epic.doneUncertain', { count: nUncertain }) : ''}
+          {nFailed > 0 ? t('forge.issues.epic.doneFailed', { count: nFailed }) : ''}.
         </p>
       )}
       <div className="iacts">
         {phase === 'select' && (
           <>
             <button type="button" className="btn ghost" onClick={onBack}>
-              Retour à l’issue
+              {t('forge.issues.epic.backToIssue')}
             </button>
             <button
               type="button"
@@ -830,33 +841,33 @@ function EpicLaunch({
               disabled={!ctx.worktrees || !ctx.initial || plannable.length === 0}
               onClick={() => void prepare()}
             >
-              Aperçu de {plannable.length} session{plannable.length > 1 ? 's' : ''}…
+              {t('forge.issues.epic.preview', { count: plannable.length })}
             </button>
           </>
         )}
         {phase === 'preparing' && (
           <span className="hint" role="status">
-            <span className="spin" aria-hidden="true" /> Lecture des sous-issues…
+            <span className="spin" aria-hidden="true" /> {t('forge.issues.epic.readingAll')}
           </span>
         )}
         {phase === 'confirm' && (
           <>
             <button type="button" className="btn ghost" onClick={() => setPhase('select')} autoFocus>
-              Retour
+              {t('forge.issues.epic.back')}
             </button>
             <button type="button" className="btn pri" disabled={ready.length === 0} onClick={() => void run()}>
-              Lancer {ready.length} session{ready.length > 1 ? 's' : ''}
+              {t('forge.issues.epic.run', { count: ready.length })}
             </button>
           </>
         )}
         {phase === 'running' && (
           <span className="hint" role="status">
-            <span className="spin" aria-hidden="true" /> Lancement en cours…
+            <span className="spin" aria-hidden="true" /> {t('forge.issues.epic.running')}
           </span>
         )}
         {phase === 'done' && (
           <button type="button" className="btn" onClick={onBack}>
-            Retour à l’issue
+            {t('forge.issues.epic.backToIssue')}
           </button>
         )}
       </div>
@@ -865,19 +876,21 @@ function EpicLaunch({
 }
 
 function EpicResult({ r }: { r: RowResult }) {
+  const t = useT()
   switch (r.phase) {
     case 'pending':
-      return <span className="wt-result">en attente</span>
+      return <span className="wt-result">{t('forge.issues.result.pending')}</span>
     case 'running':
       return (
         <span className="wt-result" role="status">
-          <span className="spin" aria-hidden="true" /> lancement…
+          <span className="spin" aria-hidden="true" /> {t('forge.issues.result.running')}
         </span>
       )
     case 'done':
       return (
         <span className="wt-result ok" role="status">
-          <span aria-hidden="true">✓</span> lancée{r.warnings.length ? ` (${r.warnings.join(' ')})` : ''}
+          <span aria-hidden="true">✓</span>{' '}
+          {r.warnings.length ? t('forge.issues.result.doneWarnings', { warnings: r.warnings.join(' ') }) : t('forge.issues.result.done')}
         </span>
       )
     case 'uncertain':
@@ -889,7 +902,7 @@ function EpicResult({ r }: { r: RowResult }) {
     case 'failed':
       return (
         <span className="wt-result bad" role="alert">
-          <span aria-hidden="true">✗</span> échec : {r.message}
+          <span aria-hidden="true">✗</span> {t('forge.issues.result.failed', { message: r.message })}
         </span>
       )
   }

@@ -30,7 +30,7 @@ import {
   withRunnerConfirmed,
 } from '../src/shared/settings'
 import {
-  CONFIRM_TEXT,
+  confirmText,
   KIND_LABELS,
   commandText,
   groupRunners,
@@ -191,7 +191,7 @@ describe('regroupement et libellés', () => {
     expect(readConfirmation({ ...c, fingerprint: 'court' })).toBeNull()
     expect(readConfirmation({ ...c, command: [] })).toBeNull()
     expect(readConfirmation(null)).toBeNull()
-    expect(CONFIRM_TEXT).toContain('Cette commande vient du dépôt et va s’exécuter sur ta machine')
+    expect(confirmText()).toContain('Cette commande vient du dépôt et va s’exécuter sur ta machine')
   })
 })
 
@@ -347,6 +347,7 @@ describe('confirmation tenue par le processus principal (runners.start)', () => 
       body_truncated: false,
       files: null,
       fingerprint: FP,
+      origin: 'app',
     })
   })
 

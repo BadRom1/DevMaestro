@@ -7,8 +7,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { ErrorCode, type DiffFile, type DiffSummary, type FileDiff, type Session } from '../../../shared/protocol'
 import { call, errorCode, errorText } from '../api'
-import { STATUS_LABELS, baseLabel, diffRows, skippedCount, sortFiles, totals } from '../state/diff'
+import { baseLabel, diffRows, skippedCount, sortFiles, statusLabel, totals } from '../state/diff'
 import { MAX_COMMENTS, activeComments, commentsAt, editingAt, isDiffComment, type ReviewAction, type ReviewDraft } from '../state/review'
+import { useI18n, useT } from '../i18n'
 import { useNotifiedReload } from '../notifiedReload'
 import { DiffFileList, DiffTable, FileHeadCounts, fileKeys, useFileNav } from './DiffReader'
 import { AiReviewButton } from './AiReview'
@@ -38,8 +39,6 @@ export function forgetDiffMemory(id: string): void {
   diffMemory.delete(id)
 }
 
-export const OLD_DAEMON_DIFF = 'Le démon ne sait pas encore calculer le diff : mets orchd à jour.'
-
 export interface DiffState {
   summary: DiffSummary | null
   loading: boolean
@@ -54,6 +53,9 @@ export interface DiffState {
  * `session.diff_changed` (avec anti-rebond) pour garder le badge à jour.
  */
 export function useSessionDiff(sessionId: string | null, seq: number, active: boolean): DiffState & { reload: () => void } {
+  const t = useT()
+  const tRef = useRef(t)
+  tRef.current = t
   const [state, setState] = useState<DiffState>({ summary: null, loading: false, error: null, version: 0 })
   const current = useRef(sessionId)
   current.current = sessionId
@@ -68,7 +70,8 @@ export function useSessionDiff(sessionId: string | null, seq: number, active: bo
       setState((s) => ({ summary: r, loading: false, error: null, version: s.version + 1 }))
     } catch (e) {
       if (current.current !== id) return
-      const msg = errorCode(e) === ErrorCode.MethodNotFound ? OLD_DAEMON_DIFF : `Diff indisponible : ${errorText(e)}`
+      const tr = tRef.current
+      const msg = errorCode(e) === ErrorCode.MethodNotFound ? tr('files.diff.oldDaemon') : tr('files.errorWith', { what: tr('files.diff.unavailable'), text: errorText(e) })
       setState((s) => ({ ...s, loading: false, error: msg }))
     }
   }, [])
@@ -115,6 +118,7 @@ export function DiffView({
   /** Commentaire de commit cliqué dans la liste de la revue : onglet Commits. */
   onOpenCommit?: (sha: string, path: string) => void
 }) {
+  const { t, rich } = useI18n()
   const files = useMemo(() => sortFiles(diff.summary?.files ?? []), [diff.summary])
   const memo = diffMemoryFor(session.id)
   /** Demande « Voir le diff » pour cette session, pas encore traitée. */
@@ -169,7 +173,11 @@ export function DiffView({
       .catch((e: unknown) => {
         if (!alive) return
         setFileDiff(null)
-        setFileError(errorCode(e) === ErrorCode.MethodNotFound ? OLD_DAEMON_DIFF : `Diff du fichier indisponible : ${errorText(e)}`)
+        setFileError(
+          errorCode(e) === ErrorCode.MethodNotFound
+            ? t('files.diff.oldDaemon')
+            : t('files.errorWith', { what: t('files.diff.fileUnavailable'), text: errorText(e) }),
+        )
       })
     return () => {
       alive = false
@@ -195,14 +203,14 @@ export function DiffView({
   const staleHere = selected ? draft.comments.filter(isDiffComment).filter((c) => c.stale && c.path === selected) : []
   const full = count >= MAX_COMMENTS
   const seenCount = files.filter((f) => seen[f.path]).length
-  const t = totals(files)
+  const tot = totals(files)
 
   if (diff.error && !diff.summary) {
     return (
       <div className="diffpane empty" role="alert">
         <b>{diff.error}</b>
         <button className="btn sm" onClick={diff.reload}>
-          Réessayer
+          {t('files.retry')}
         </button>
       </div>
     )
@@ -210,7 +218,7 @@ export function DiffView({
   if (!diff.summary) {
     return (
       <div className="diffpane empty" role="status">
-        Calcul du diff…
+        {t('files.diff.computing')}
       </div>
     )
   }
@@ -222,29 +230,29 @@ export function DiffView({
         selected={selected}
         onSelect={setSelected}
         listRef={listRef}
-        label="Fichiers changés"
-        empty="Aucune modification depuis la base."
+        label={t('files.diff.changedFiles')}
+        empty={t('files.diff.noChanges')}
         seen={seen}
         nav={nav}
         comments={(path) => draft.comments.filter(isDiffComment).filter((c) => c.path === path && !c.stale).length}
         head={
           <>
             <span className="lbl">
-              {seenCount}/{files.length} vus
+              {t('files.diff.seenCount', { seen: seenCount, total: files.length })}
             </span>
             <span className="hint" title={diff.summary.base ? `${diff.summary.base.ref} ${diff.summary.base.sha}` : undefined}>
               {baseLabel(diff.summary.base)}
             </span>
             <span className="hint">
               <span className="plus">
-                +{t.additions}
-                {t.unknown ? '+?' : ''}
+                +{tot.additions}
+                {tot.unknown ? '+?' : ''}
               </span>{' '}
               <span className="minus">
-                −{t.deletions}
-                {t.unknown ? '−?' : ''}
+                −{tot.deletions}
+                {tot.unknown ? '−?' : ''}
               </span>
-              {diff.loading && ' · mise à jour…'}
+              {diff.loading && t('files.updating')}
             </span>
             {files.length > 0 && (
               <AiReviewButton
@@ -253,8 +261,8 @@ export function DiffView({
               />
             )}
             {diff.summary.truncated && (
-              <span className="chip pend" title="Trop de fichiers changés : le démon n’en donne qu’une partie.">
-                liste tronquée
+              <span className="chip pend" title={t('files.diff.truncatedTitle')}>
+                {t('files.truncatedList')}
               </span>
             )}
             {skippedCount(diff.summary.skipped_non_utf8) > 0 && (
@@ -262,8 +270,7 @@ export function DiffView({
                 className="hint"
                 title={Array.isArray(diff.summary.skipped_non_utf8) ? diff.summary.skipped_non_utf8.join('\n') : undefined}
               >
-                {skippedCount(diff.summary.skipped_non_utf8)} fichier{skippedCount(diff.summary.skipped_non_utf8) > 1 ? 's' : ''} non UTF-8
-                ignoré{skippedCount(diff.summary.skipped_non_utf8) > 1 ? 's' : ''}
+                {t('files.diff.skippedNonUtf8', { count: skippedCount(diff.summary.skipped_non_utf8) })}
               </span>
             )}
           </>
@@ -277,25 +284,25 @@ export function DiffView({
               {file.path}
             </span>
             <FileHeadCounts file={file} fileDiff={fileDiff?.path === file.path ? fileDiff.data : null} />
-            <span className="hint">{STATUS_LABELS[file.status]} · survole une ligne et clique sur + pour commenter</span>
+            <span className="hint">{t('files.diff.fileHint', { status: statusLabel(file.status) })}</span>
             <label>
-              <input type="checkbox" checked={!!seen[file.path]} onChange={(e) => onSeen(file.path, e.target.checked)} /> Vu
+              <input type="checkbox" checked={!!seen[file.path]} onChange={(e) => onSeen(file.path, e.target.checked)} /> {t('files.diff.seen')}
             </label>
           </div>
         ) : (
           <div className="dhead" />
         )}
-        <div className="dscroll" ref={scrollRef} tabIndex={0} aria-label={file ? `Diff de ${file.path}` : 'Diff'}>
+        <div className="dscroll" ref={scrollRef} tabIndex={0} aria-label={file ? t('files.diff.diffOf', { path: file.path }) : t('files.diff.diff')}>
           {fileError && (
             <p className="inline-err pad" role="alert">
               {fileError}
             </p>
           )}
-          {file && fileDiff?.path === file.path && fileDiff.data.binary && <p className="empty">Fichier binaire : pas de diff ligne à ligne.</p>}
+          {file && fileDiff?.path === file.path && fileDiff.data.binary && <p className="empty">{t('files.binaryNoDiff')}</p>}
           {file && fileDiff?.path === file.path && fileDiff.data.too_large && (
-            <p className="empty">Fichier trop volumineux pour être affiché ici.</p>
+            <p className="empty">{t('files.tooLarge')}</p>
           )}
-          {file && !fileDiff && !fileError && <p className="empty">Chargement…</p>}
+          {file && !fileDiff && !fileError && <p className="empty">{t('files.loading')}</p>}
           {rows.length > 0 && selected && (
             <DiffTable
               rows={rows}
@@ -308,20 +315,23 @@ export function DiffView({
             />
           )}
           {staleHere.length > 0 && (
-            <section className="stale-comments" aria-label="Commentaires hors diff">
-              <h3 className="lbl">Commentaires hors diff</h3>
-              <p className="hint">La ligne commentée a changé : ces commentaires ne seront pas envoyés. Supprime-les ou recopie-les sur la bonne ligne.</p>
+            <section className="stale-comments" aria-label={t('files.diff.staleTitle')}>
+              <h3 className="lbl">{t('files.diff.staleTitle')}</h3>
+              <p className="hint">{t('files.diff.staleHint')}</p>
               {staleHere.map((c) => (
                 <div key={c.id} className="cbox">
                   <div className="who">
                     <span>
-                      ligne modifiée · ancienne ligne {c.line} ({c.side === 'new' ? 'nouvelle' : 'ancienne'} version) :{' '}
-                      <code>{c.lineText}</code>
+                      {rich('files.diff.staleLine', {
+                        line: c.line,
+                        version: c.side === 'new' ? t('files.newVersion') : t('files.oldVersion'),
+                        code: <code>{c.lineText}</code>,
+                      })}
                     </span>
                     <button
                       type="button"
                       className="btn sm ghost"
-                      aria-label={`Supprimer le commentaire de l’ancienne ligne ${c.line}`}
+                      aria-label={t('files.diff.deleteStale', { line: c.line })}
                       onClick={() => review({ type: 'delete', id: c.id })}
                     >
                       ×

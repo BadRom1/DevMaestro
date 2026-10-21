@@ -6,15 +6,26 @@
  */
 import type { Demand, PendingRequest, Session } from '../../../shared/protocol'
 import { summarizeToolInput } from '../../../shared/summary'
+import { getLocale, t, type PlainKey } from '../../../shared/i18n'
 import { glyphFor } from './status'
 
 export type ColumnKey = 'waiting' | 'running' | 'idle' | 'stopped'
 
-export const COLUMNS: readonly { key: ColumnKey; title: string }[] = [
-  { key: 'waiting', title: 'À répondre' },
-  { key: 'running', title: 'En cours' },
-  { key: 'idle', title: 'Inactive' },
-  { key: 'stopped', title: 'Arrêtée' },
+/** Titre d'une colonne : calculé à la lecture, dans la langue courante. */
+function column(key: ColumnKey, titleKey: PlainKey): { key: ColumnKey; readonly title: string } {
+  return {
+    key,
+    get title() {
+      return t(titleKey)
+    },
+  }
+}
+
+export const COLUMNS: readonly { key: ColumnKey; readonly title: string }[] = [
+  column('waiting', 'shell.kanban.column.waiting'),
+  column('running', 'shell.kanban.column.running'),
+  column('idle', 'shell.kanban.column.idle'),
+  column('stopped', 'shell.kanban.column.stopped'),
 ]
 
 export function columnOf(s: Session): ColumnKey {
@@ -36,10 +47,10 @@ function waitingSince(s: Session): number {
 export function kanbanColumns(sessions: readonly Session[]): Record<ColumnKey, Session[]> {
   const cols: Record<ColumnKey, Session[]> = { waiting: [], running: [], idle: [], stopped: [] }
   for (const s of sessions) cols[columnOf(s)].push(s)
-  cols.waiting.sort((a, b) => waitingSince(a) - waitingSince(b) || a.id.localeCompare(b.id))
+  cols.waiting.sort((a, b) => waitingSince(a) - waitingSince(b) || a.id.localeCompare(b.id, getLocale()))
   for (const k of ['running', 'idle', 'stopped'] as const) {
     cols[k].sort(
-      (a, b) => time(b.last_activity ?? b.created_at) - time(a.last_activity ?? a.created_at) || a.id.localeCompare(b.id),
+      (a, b) => time(b.last_activity ?? b.created_at) - time(a.last_activity ?? a.created_at) || a.id.localeCompare(b.id, getLocale()),
     )
   }
   return cols
@@ -53,9 +64,9 @@ function oneLine(s: string, max: number): string {
 
 /** Texte court de la demande en attente pour une carte. */
 export function demandSummary(d: Demand, max = 140): string {
-  if (d.detailed === false) return d.kind === 'question' ? 'Question (détails dans le terminal)' : 'Permission (détails dans le terminal)'
+  if (d.detailed === false) return d.kind === 'question' ? t('shell.kanban.questionNoDetail') : t('shell.kanban.permissionNoDetail')
   if (d.kind === 'question') {
-    const q = d.questions[0]?.question ?? 'Question'
+    const q = d.questions[0]?.question ?? t('shell.kanban.question')
     return oneLine(d.questions.length > 1 ? `${q} (+${d.questions.length - 1})` : q, max)
   }
   const what = summarizeToolInput(d.tool_name, d.tool_input)

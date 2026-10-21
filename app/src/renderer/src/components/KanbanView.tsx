@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type Keyboard
 
 import type { PendingRequest, ProjectInfo, Profile, Session, Subagent } from '../../../shared/protocol'
 import { call, errorCode, errorText } from '../api'
+import { useT } from '../i18n'
 import { ALREADY_CLOSED } from '../state/errors'
 import { basename, formatPct, formatUsd, relativeTime, sessionColor, sessionDisplayName } from '../state/format'
 import { browserStorage } from '../state/collapse'
@@ -49,6 +50,7 @@ function PermissionActions({
   stale: readonly number[]
   onOpen: () => void
 }) {
+  const t = useT()
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const can = answerability(req)
@@ -57,11 +59,11 @@ function PermissionActions({
       ? can.why
       : req.pending.kind === 'question'
         ? undefined
-        : 'Demande à lire en entier (ou peut-être obsolète) : ouvre la session pour répondre.'
+        : t('shell.kanban.readInFull')
     return (
       <div className="kacts">
         <button className="btn sm warn" onClick={onOpen} title={why}>
-          {req.pending.kind === 'question' ? 'Répondre' : 'Ouvrir pour répondre'}
+          {req.pending.kind === 'question' ? t('shell.kanban.answer') : t('shell.kanban.openToAnswer')}
         </button>
       </div>
     )
@@ -72,20 +74,20 @@ function PermissionActions({
     try {
       await call('sessions.answerPermission', { id: session.id, request_id: req.request_id, decision })
     } catch (e) {
-      if (errorCode(e) !== ALREADY_CLOSED) setError(`Réponse non transmise : ${errorText(e)}`)
+      if (errorCode(e) !== ALREADY_CLOSED) setError(t('shell.kanban.answerFailed', { error: errorText(e) }))
       setBusy(null)
     }
   }
   return (
     <div className="kacts">
       <button className="btn sm pri" disabled={busy !== null} onClick={() => void answer('allow')}>
-        {busy === 'allow' ? 'Envoi…' : 'Autoriser'}
+        {busy === 'allow' ? t('shell.kanban.sending') : t('shell.kanban.allow')}
       </button>
       <button className="btn sm danger" disabled={busy !== null} onClick={() => void answer('deny')}>
-        {busy === 'deny' ? 'Envoi…' : 'Refuser'}
+        {busy === 'deny' ? t('shell.kanban.sending') : t('shell.kanban.deny')}
       </button>
       <button className="btn sm ghost" onClick={onOpen}>
-        Ouvrir
+        {t('shell.kanban.open')}
       </button>
       {error && (
         <span className="inline-err" role="alert">
@@ -120,6 +122,7 @@ function Card({
   stale: readonly number[]
   onOpen: () => void
 }) {
+  const t = useT()
   const glyph = glyphFor(session.status)
   const name = sessionDisplayName(session)
   const projectName = project?.name ?? basename(project?.root ?? session.project_root ?? session.cwd)
@@ -148,19 +151,19 @@ function Card({
           className="kname"
           onClick={onOpen}
           aria-current={selected ? 'true' : undefined}
-          title={`Afficher « ${name} » à côté du kanban`}
+          title={t('shell.kanban.showBeside', { name })}
         >
           {name}
         </button>
         <ProfileBadge profile={session.profile} profiles={profiles} />
       </div>
       <div className="kwhere mono">
-        {projectName} <span>/</span> {session.branch ?? 'sans branche'}
+        {projectName} <span>/</span> {session.branch ?? t('shell.noBranch')}
       </div>
       {iss && <IssueChip issue={iss} onOpen={onOpenIssue ? () => onOpenIssue(session) : undefined} />}
       {req && (
         <p className="kask" title={demandSummary(req.pending, 1000)}>
-          <b>{req.pending.kind === 'question' ? 'Question' : 'Permission'} :</b>{' '}
+          <b>{req.pending.kind === 'question' ? t('shell.kanban.questionLabel') : t('shell.kanban.permissionLabel')}</b>{' '}
           {perm ? (
             <>
               {perm.tool}
@@ -180,9 +183,9 @@ function Card({
       {req && (session.possibly_stale || stale.includes(req.request_id)) && (
         <span
           className="chip pend"
-          title="La demande a peut-être déjà été traitée dans le terminal : ouvre la session pour vérifier."
+          title={t('shell.staleTitle')}
         >
-          peut-être obsolète
+          {t('shell.stale')}
         </span>
       )}
       {req && <PermissionActions key={req.request_id} session={session} req={req} stale={stale} onOpen={onOpen} />}
@@ -198,12 +201,12 @@ function Card({
         </span>
       )}
       {runnersIndicator(runnersRunning) && (
-        <span className="chip ag-chip run-chip" title="Voir l’onglet « Lancer » de la session">
+        <span className="chip ag-chip run-chip" title={t('shell.kanban.runnersTitle')}>
           <span aria-hidden="true">▶</span> {runnersIndicator(runnersRunning)}
         </span>
       )}
       <div className="kmeta hint">
-        <span>contexte {formatPct(m?.context_used_pct)}</span>
+        <span>{t('shell.kanban.context', { pct: formatPct(m?.context_used_pct) })}</span>
         <span>{formatUsd(m?.cost_usd)}</span>
         <span>{relativeTime(session.last_activity)}</span>
       </div>
@@ -219,8 +222,8 @@ function cardId(sessionId: string): string {
 /** Échap ferme le volet, sauf dans un champ, un dialogue ou le terminal (où Échap va à Claude). */
 function escapeCloses(e: KeyboardEvent): boolean {
   if (e.key !== 'Escape' || e.defaultPrevented) return false
-  const t = e.target as Element | null
-  return !t?.closest?.('.xterm, input, textarea, select, [contenteditable="true"], [role="dialog"], dialog')
+  const target = e.target as Element | null
+  return !target?.closest?.('.xterm, input, textarea, select, [contenteditable="true"], [role="dialog"], dialog')
 }
 
 export function KanbanView({
@@ -260,6 +263,7 @@ export function KanbanView({
   onOpen: (id: string) => void
   onClose: () => void
 }) {
+  const t = useT()
   const [stored, setStored] = useState<ProjectFilter | null>(() => loadProjectFilter(browserStorage()))
   // Nom à jour quand le projet est là ; sinon le nom retenu (projet sans session).
   const filter = useMemo(() => (stored ? (filterFor(groups, stored.key) ?? stored) : null), [stored, groups])
@@ -309,17 +313,17 @@ export function KanbanView({
       ref={mainRef}
       style={showPane ? ({ '--col-w': `${col.width}px` } as CSSProperties) : undefined}
     >
-      {showPane && <ColumnGrip column="kanban" label="Largeur de la colonne du kanban" width={col.width} max={col.max} avail={col.avail} />}
+      {showPane && <ColumnGrip column="kanban" label={t('shell.kanban.columnWidth')} width={col.width} max={col.max} avail={col.avail} />}
       <div className="kside">
         <div className="khdr">
-          <label htmlFor="kanban-project">Projet :</label>
+          <label htmlFor="kanban-project">{t('shell.kanban.project')}</label>
           <select
             id="kanban-project"
             ref={selectRef}
             value={filter?.key ?? ''}
             onChange={(e) => choose(e.target.value)}
           >
-            <option value="">Tous les projets ({sessions.length})</option>
+            <option value="">{t('shell.kanban.allProjects', { n: sessions.length })}</option>
             {options.map((o) => (
               <option key={o.key} value={o.key}>
                 {o.label} ({o.count})
@@ -329,15 +333,13 @@ export function KanbanView({
         </div>
         {empty ? (
           <div className="kempty panel" role="status">
-            <p>
-              Aucune session affichée pour le projet « {filter.name} ».
-            </p>
+            <p>{t('shell.kanban.emptyProject', { name: filter.name })}</p>
             <button className="btn sm" onClick={() => choose('')}>
-              Afficher tous les projets
+              {t('shell.kanban.showAllProjects')}
             </button>
           </div>
         ) : (
-          <div className="kanban" role="region" aria-label="Sessions par statut">
+          <div className="kanban" role="region" aria-label={t('shell.kanban.region')}>
             {COLUMNS.map((c) => (
               <section key={c.key} className={`kcol k-${c.key}`} aria-labelledby={`kcol-${c.key}`}>
                 <h2 id={`kcol-${c.key}`} className="kctitle">
@@ -345,7 +347,7 @@ export function KanbanView({
                   <span className={`badge${c.key === 'waiting' && cols[c.key].length ? ' wait' : ''}`}>{cols[c.key].length}</span>
                 </h2>
                 <ul role="list" className="kcards">
-                  {cols[c.key].length === 0 && <li className="hint pad">Aucune session.</li>}
+                  {cols[c.key].length === 0 && <li className="hint pad">{t('shell.kanban.noSession')}</li>}
                   {cols[c.key].map((s) => (
                     <Card
                       key={s.id}
@@ -369,9 +371,9 @@ export function KanbanView({
       {showPane && (
         <div className="kpane">
           <div className="kpane-bar">
-            <span className="hint">Session ouverte depuis la vue par statut · Échap pour fermer</span>
+            <span className="hint">{t('shell.kanban.paneHint')}</span>
             <button ref={closeRef} className="btn sm ghost" onClick={onClose}>
-              Fermer
+              {t('shell.close')}
             </button>
           </div>
           {pane}

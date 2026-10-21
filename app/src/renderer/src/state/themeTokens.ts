@@ -6,6 +6,7 @@
  * siennes) s'y ajoutent sous forme de propriétés CSS sur `<html>`. Les glyphes de statut gardent leur forme
  * quelle que soit la couleur.
  */
+import { t } from '../../../shared/i18n'
 import type { PaletteName, Scheme, ThemeSettings, ThemeToken } from '../../../shared/settings'
 
 export type { Scheme } from '../../../shared/settings'
@@ -13,14 +14,29 @@ export type { Scheme } from '../../../shared/settings'
 /** Jetons neutres qu'une palette (contraste élevé) peut aussi changer. */
 export const NEUTRAL_TOKENS = ['bg', 'panel', 'panel-2', 'sunk', 'line', 'line-2', 'fg', 'muted', 'faint', 'accent-ink'] as const
 
-export const TOKEN_LABELS: Record<ThemeToken, string> = {
-  accent: 'Accent (sélection, liens)',
-  wait: 'En attente de réponse',
-  run: 'En cours',
-  done: 'Terminée / succès',
-  err: 'Erreur / échec',
-  add: 'Lignes ajoutées',
-  del: 'Lignes supprimées',
+/** Noms des jetons, traduits à l'usage (accesseurs : `TOKEN_LABELS[jeton]` suit la langue). */
+export const TOKEN_LABELS: Readonly<Record<ThemeToken, string>> = {
+  get accent() {
+    return t('settings.token.accent')
+  },
+  get wait() {
+    return t('settings.token.wait')
+  },
+  get run() {
+    return t('settings.token.run')
+  },
+  get done() {
+    return t('settings.token.done')
+  },
+  get err() {
+    return t('settings.token.err')
+  },
+  get add() {
+    return t('settings.token.add')
+  },
+  get del() {
+    return t('settings.token.del')
+  },
 }
 
 /** Valeurs de `styles.css` (palette DevMaestro). */
@@ -30,24 +46,39 @@ export const BASE: Record<Scheme, Record<ThemeToken, string>> = {
 }
 
 export interface Palette {
-  name: string
-  description: string
+  /** Nom affiché (langue de l'interface). */
+  readonly name: string
+  /** Description affichée (langue de l'interface). */
+  readonly description: string
   light: Record<string, string>
   dark: Record<string, string>
 }
 
 /** Palettes de la maquette (`prototype/orchestrateur.html`). */
 export const PALETTES: Record<PaletteName, Palette> = {
-  devmaestro: { name: 'DevMaestro', description: 'Palette par défaut', light: {}, dark: {} },
+  devmaestro: {
+    name: 'DevMaestro',
+    get description() {
+      return t('settings.palette.devmaestro.description')
+    },
+    light: {},
+    dark: {},
+  },
   okabe: {
     name: 'Okabe-Ito',
-    description: 'Sûre pour les daltonismes rouge-vert : plus d’opposition rouge/vert',
+    get description() {
+      return t('settings.palette.okabe.description')
+    },
     light: { accent: '#a24f86', wait: '#a86f00', run: '#00785a', done: '#0072b2', err: '#c04f00', add: '#0072b2', del: '#c04f00' },
     dark: { accent: '#cc79a7', wait: '#e69f00', run: '#1fb58a', done: '#56b4e9', err: '#e0702a', add: '#56b4e9', del: '#e0702a' },
   },
   contraste: {
-    name: 'Contraste élevé',
-    description: 'Fonds purs, bordures marquées, texte au maximum',
+    get name() {
+      return t('settings.palette.contraste.name')
+    },
+    get description() {
+      return t('settings.palette.contraste.description')
+    },
     light: {
       bg: '#ffffff', panel: '#ffffff', 'panel-2': '#f0f0f0', sunk: '#ffffff', line: '#5a5a5a', 'line-2': '#333333',
       fg: '#000000', muted: '#262626', faint: '#444444', accent: '#0033cc', 'accent-ink': '#ffffff',

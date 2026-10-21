@@ -11,7 +11,9 @@
  * (seconde confirmation) → `overwriting` (`files.write` avec l'empreinte
  * actuelle) → lecture, ou nouveau conflit si le fichier a encore changé.
  */
+import { t } from '../../../shared/i18n'
 import type { FileContent, FileVersion } from '../../../shared/protocol'
+import { daemonText } from './errors'
 
 export type EditPhase = 'editing' | 'saving' | 'conflict' | 'confirmOverwrite' | 'overwriting'
 
@@ -75,7 +77,8 @@ export function canEdit(c: FileContent | null, isSymlink: boolean): boolean {
  */
 export function notEditableReason(c: FileContent | null): string | null {
   if (!c || c.editable !== false || c.version === undefined) return null
-  return c.not_editable_reason?.trim() || 'Ce fichier ne peut pas être modifié dans l’app.'
+  const reason = c.not_editable_reason?.trim()
+  return reason ? daemonText(reason) : t('files.edit.notEditable')
 }
 
 /** Forme d'une empreinte de fichier (venue du démon : vérifiée avant usage). */

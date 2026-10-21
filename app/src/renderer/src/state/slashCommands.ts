@@ -9,6 +9,8 @@
  * l'égalité des deux fichiers).
  */
 import builtinData from '../../../shared/builtinCommands.json'
+import { getLocale, t } from '../../../shared/i18n'
+import { BUILTIN_COMMANDS_EN } from '../../../shared/i18n/catalog/conversation'
 import { COMMAND_SOURCES, type CommandSource, type SlashCommand } from '../../../shared/protocol'
 
 /** Propositions affichées au plus. */
@@ -188,32 +190,50 @@ export function popupKey(e: PopupKey, count: number, active: number, exact: bool
 /** Origine lisible d'une commande. */
 export function sourceLabel(c: SlashCommand): string {
   const base =
-    c.source === 'builtin' ? 'intégrée' : c.source === 'project' ? 'projet' : c.source === 'user' ? 'utilisateur' : `plugin ${c.plugin ?? ''}`.trim()
-  return c.kind === 'skill' ? `${base}, skill` : base
+    c.source === 'builtin'
+      ? t('conversation.slash.source.builtin')
+      : c.source === 'project'
+        ? t('conversation.slash.source.project')
+        : c.source === 'user'
+          ? t('conversation.slash.source.user')
+          : t('conversation.slash.source.plugin', { plugin: c.plugin ?? '' }).trim()
+  return c.kind === 'skill' ? t('conversation.slash.source.skill', { source: base }) : base
+}
+
+/**
+ * Description et indication d'arguments affichées : version anglaise des
+ * commandes intégrées quand l'interface est en anglais (la liste de référence
+ * est en français) ; celles des commandes du disque (utilisateur, projet,
+ * plugins) viennent de leurs fichiers et restent telles quelles.
+ */
+export function commandTexts(c: SlashCommand): { description?: string; argument_hint?: string } {
+  const en = c.source === 'builtin' && getLocale() === 'en' && Object.prototype.hasOwnProperty.call(BUILTIN_COMMANDS_EN, c.name)
+    ? BUILTIN_COMMANDS_EN[c.name]
+    : undefined
+  if (!en) return { description: c.description, argument_hint: c.argument_hint }
+  return {
+    description: c.description ? en.description : undefined,
+    argument_hint: c.argument_hint ? (en.argument_hint ?? c.argument_hint) : undefined,
+  }
 }
 
 /** Avertissement d'une commande qui reprend le nom d'une autre, ou `null`. */
 export function conflictLabel(c: SlashCommand): string | null {
-  if (c.conflict === 'builtin') return 'même nom qu’une commande intégrée'
-  if (c.conflict === 'plugin') return 'même nom qu’une commande de plugin'
+  if (c.conflict === 'builtin') return t('conversation.slash.conflict.builtin')
+  if (c.conflict === 'plugin') return t('conversation.slash.conflict.plugin')
   return null
 }
 
 /** Mention discrète sous la liste quand la lecture du démon a été bornée. */
 export function listNote(truncated: boolean, ignored: number): string | null {
   const parts: string[] = []
-  if (truncated) parts.push('Liste incomplète : trop de fichiers de commandes, certains n’ont pas été lus.')
-  if (ignored > 0)
-    parts.push(
-      ignored === 1
-        ? '1 fichier ignoré (nom invalide : lettres ASCII, chiffres, - et _ seulement).'
-        : `${ignored} fichiers ignorés (nom invalide : lettres ASCII, chiffres, - et _ seulement).`,
-    )
+  if (truncated) parts.push(t('conversation.slash.truncated'))
+  if (ignored > 0) parts.push(t('conversation.slash.ignored', { count: ignored }))
   return parts.length ? parts.join(' ') : null
 }
 
 /** Annonce du nombre de propositions (lecteurs d'écran). */
 export function suggestionsLabel(n: number): string {
-  if (n === 0) return 'Aucune commande ne correspond.'
-  return n === 1 ? '1 commande proposée.' : `${n} commandes proposées.`
+  if (n === 0) return t('conversation.slash.none')
+  return t('conversation.slash.count', { count: n })
 }

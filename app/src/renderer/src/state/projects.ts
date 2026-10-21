@@ -4,6 +4,7 @@
  * tous ses worktrees ; à défaut la racine, à défaut le dossier de la session.
  */
 import type { PastSession, ProjectInfo, Session } from '../../../shared/protocol'
+import { getLocale, t } from '../../../shared/i18n'
 import { rootFromCommonDir } from '../../../shared/worktrees'
 import { basename, tildify } from './format'
 import { STATUS_ORDER, glyphFor } from './status'
@@ -147,7 +148,7 @@ export function groupByProject(
     )
   }
   // Ordre stable : par nom de projet.
-  return list.sort((a, b) => a.name.localeCompare(b.name, 'fr') || a.key.localeCompare(b.key))
+  return list.sort((a, b) => a.name.localeCompare(b.name, getLocale()) || a.key.localeCompare(b.key, getLocale()))
 }
 
 /** Sessions dans l'ordre de la barre latérale (pour « N à répondre »). */
@@ -253,11 +254,11 @@ export function groupPast(entries: PastEntry[], projects: Record<string, Project
     const info = p.cwd ? projects[p.cwd] : undefined
     if (!p.cwd) {
       key = 'dossier:?'
-      name = 'Dossier inconnu'
+      name = t('shell.projects.unknownFolder')
       root = null
     } else if (!info) {
       key = RESOLVING_GROUP
-      name = 'Résolution…'
+      name = t('shell.projects.resolving')
       root = null
     } else if (info?.is_git) {
       const top = info.root ?? info.worktree_root ?? p.cwd
@@ -288,7 +289,7 @@ export function groupPast(entries: PastEntry[], projects: Record<string, Project
     into.latest = Math.max(into.latest, from.latest)
   }, (g) => g.entries.some((e) => !!e.git_branch))
   for (const g of list) g.entries.sort((a, b) => pastTime(b) - pastTime(a))
-  return list.sort((a, b) => b.latest - a.latest || a.name.localeCompare(b.name, 'fr') || a.key.localeCompare(b.key))
+  return list.sort((a, b) => b.latest - a.latest || a.name.localeCompare(b.name, getLocale()) || a.key.localeCompare(b.key, getLocale()))
 }
 
 /**
@@ -323,7 +324,7 @@ export function pastToOffer(
     return i < 0 ? order.length : i
   }
   const all: PastEntry[] = [...byId.values()].map((g) => {
-    const profiles = [...g.profiles].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+    const profiles = [...g.profiles].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b, getLocale()))
     return { ...mergePast(g.entries), profile: profiles[0]!, profiles }
   })
   all.sort((a, b) => pastTime(b) - pastTime(a))

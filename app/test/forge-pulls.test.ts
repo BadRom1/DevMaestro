@@ -14,8 +14,8 @@ import { FORGE_TIMEOUT_MS, ValidationError, requestTimeoutMs, validateParams } f
 import { ErrorCode, FORGE_METHODS, RENDERER_METHODS, type FileDiff, type ForgeReviewPayload, type MethodName, type Pull, type PullDetail } from '../src/shared/protocol'
 import { diffRows } from '../src/renderer/src/state/diff'
 import {
-  FORGE_DESTINATION,
   branchPullOf,
+  forgeDestination,
   buildForgeReview,
   checkDuration,
   checkRunLabel,
@@ -506,7 +506,7 @@ describe('CI, revue, état : glyphe et texte', () => {
   })
 
   it('destination du brouillon de la forge', () => {
-    expect(FORGE_DESTINATION).toBe('Publiée sur GitHub, visible par tous')
+    expect(forgeDestination()).toBe('Publiée sur GitHub, visible par tous')
   })
 })
 

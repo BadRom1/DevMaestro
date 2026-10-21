@@ -22,6 +22,8 @@ import { useEffect, useRef, useState } from 'react'
 
 import { api, call, sessionChannel, type TerminalChannel } from '../api'
 import type { RpcFailure } from '../../../shared/bridge'
+import { t as translate } from '../../../shared/i18n'
+import { useT } from '../i18n'
 import { describeError } from '../state/errors'
 import { TerminalFeed } from './feed'
 import { keyOverride, swallowedByOverride } from './keys'
@@ -52,7 +54,10 @@ export const SESSION_TERMINAL: TerminalStream = {
   channel: sessionChannel,
   view: (id, size) => api.view({ id, ...size }),
   resize: (id, cols, rows) => void call('sessions.resize', { id, cols, rows }).catch(() => {}),
-  label: 'Terminal de la session',
+  /** Calculé à la lecture : suit la langue courante. */
+  get label() {
+    return translate('conversation.terminal.label')
+  },
 }
 
 /** Taille plausible (un conteneur en cours de mise en page donne 1 ligne). */
@@ -81,6 +86,7 @@ export function TerminalView({
   /** Élément qui porte le terminal (pour savoir s'il a le focus). */
   hostRef?: React.RefObject<HTMLDivElement | null>
 }) {
+  const t = useT()
   const ownHost = useRef<HTMLDivElement>(null)
   const host = hostRef ?? ownHost
   const live = useRef<Live | null>(null)
@@ -132,6 +138,7 @@ export function TerminalView({
       try {
         const gl = new WebglAddon()
         gl.onContextLoss(() => {
+          // i18n-exempt: journal technique
           console.warn('[terminal] contexte WebGL perdu : passage au moteur DOM')
           gl.dispose()
         })
@@ -267,7 +274,7 @@ export function TerminalView({
     l.refit()
     const size = usable(l.term.cols, l.term.rows) ? { cols: l.term.cols, rows: l.term.rows } : {}
     void streamRef.current.view(sessionId, size).then((r) => {
-      if (!r.ok && idRef.current === sessionId) setError(describeError(r.error.code, r.error.message))
+      if (!r.ok && idRef.current === sessionId) setError(describeError(r.error.code, r.error.message, r.error.data))
     })
   }, [sessionId, ready])
 
@@ -294,12 +301,12 @@ export function TerminalView({
       {!sessionId && <div className="overlay">{emptyText}</div>}
       {sessionId && !shown && (
         <div className="overlay" role="status">
-          {error ? `Terminal indisponible : ${error}` : 'Chargement de l’écran…'}
+          {error ? t('conversation.terminal.unavailable', { error }) : t('conversation.terminal.loading')}
         </div>
       )}
       {catchingUp && (
         <div className="term-note" role="status">
-          Affichage en retard : rattrapage…
+          {t('conversation.terminal.catchingUp')}
         </div>
       )}
     </div>

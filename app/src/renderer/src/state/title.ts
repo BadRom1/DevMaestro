@@ -7,6 +7,7 @@
  * - un titre fait seulement de caractères invisibles ou de format vaut
  *   « pas de titre » (`null`).
  */
+import { t as tr } from '../../../shared/i18n'
 import { MAX_TITLE } from '../../../shared/protocol'
 
 const BIDI = /[‪-‮⁦-⁩‎‏؜]/gu
@@ -29,10 +30,10 @@ export function clampTitle(s: string): string {
 export function normalizeTitleInput(raw: string): TitleInput {
   const t = raw.replace(BIDI, '').trim()
   if (CONTROL.test(t)) {
-    return { ok: false, error: 'le titre ne doit pas contenir de caractère de contrôle (saut de ligne, tabulation…)' }
+    return { ok: false, error: tr('shell.title.control') }
   }
   if (INVISIBLE_ONLY.test(t)) return { ok: true, title: null }
   const n = titleLength(t)
-  if (n > MAX_TITLE) return { ok: false, error: `titre trop long : ${n} caractères, ${MAX_TITLE} au plus` }
+  if (n > MAX_TITLE) return { ok: false, error: tr('shell.title.tooLong', { n, max: MAX_TITLE }) }
   return { ok: true, title: t }
 }

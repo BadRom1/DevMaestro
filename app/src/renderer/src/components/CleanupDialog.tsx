@@ -10,8 +10,10 @@
 import { useEffect, useId, useMemo, useState } from 'react'
 
 import { ErrorCode, type WorktreeInfo, type WorktreesList } from '../../../shared/protocol'
+import type { Translate } from '../../../shared/i18n'
 import { CallError, call, errorCode, errorText } from '../api'
-import { UNCERTAIN_TEXT, outcomeUncertain } from '../state/errors'
+import { useT } from '../i18n'
+import { outcomeUncertain, uncertainText } from '../state/errors'
 import { tildify } from '../state/format'
 import {
   branchDeletable,
@@ -36,8 +38,8 @@ type RowResult =
   /** Refusé (-32020) : modifications non commitées ; `files` : liste courte du démon. */
   | { state: 'dirty'; files: string[] }
 
-function branchLabel(w: WorktreeInfo): string {
-  return w.branch ?? (w.head ? `HEAD détachée (${w.head.slice(0, 8)})` : 'sans branche')
+function branchLabel(w: WorktreeInfo, t: Translate): string {
+  return w.branch ?? (w.head ? t('sessions.cleanup.detached', { head: w.head.slice(0, 8) }) : t('sessions.cleanup.noBranch'))
 }
 
 export function CleanupDialog({
@@ -62,6 +64,7 @@ export function CleanupDialog({
   onRefresh: () => void
   onClose: () => void
 }) {
+  const t = useT()
   /** Lignes vues depuis l'ouverture : une ligne supprimée reste affichée avec son résultat. */
   const [rowsSeen, setRowsSeen] = useState<Record<string, WorktreeInfo>>({})
   const [choices, setChoices] = useState<Record<string, CleanupChoice>>({})
@@ -130,31 +133,30 @@ export function CleanupDialog({
     if (!r) return null
     switch (r.state) {
       case 'running':
-        return 'Suppression…'
+        return t('sessions.cleanup.removing')
       case 'done':
         return r.text
       case 'uncertain':
-        return `? Suppression : ${UNCERTAIN_TEXT}`
+        return t('sessions.cleanup.uncertain', { text: uncertainText() })
       case 'error':
         return `✗ ${r.message}`
       case 'dirty':
-        return '✗ Refusé : modifications non commitées'
+        return t('sessions.cleanup.refusedDirty')
     }
   }
 
   return (
-    <Modal title={`Nettoyer les worktrees · ${name}`} onClose={onClose} width={820} busy={busy}>
+    <Modal title={t('sessions.cleanup.title', { name })} onClose={onClose} width={820} busy={busy}>
       <div className="mb">
         <p className="hint">
-          {tildify(root, home)} · Les worktrees dont la branche est intégrée et où aucune session ne tourne sont cochés. Les
-          sessions arrêtées de ces dossiers restent dans l’historique.
+          {t('sessions.cleanup.hint', { root: tildify(root, home) })}
         </p>
-        {!list && <p className="hint">Chargement des worktrees…</p>}
-        {list && rows.length === 0 && <p className="empty-note">Aucun worktree en dehors du dossier principal.</p>}
+        {!list && <p className="hint">{t('sessions.cleanup.loading')}</p>}
+        {list && rows.length === 0 && <p className="empty-note">{t('sessions.cleanup.empty')}</p>}
         {rows.length > 0 && (
           <ul className="wt-list" role="list">
             {rows.map((w, i) => {
-              const statesId = `${uid}-st-${i}`
+              const statesId = `${uid}-st-${i}` // i18n-exempt: identifiant DOM
               const r = results[w.path]
               const gone = !live(w)
               const can = !gone && removable(w) && !busy
@@ -171,7 +173,7 @@ export function CleanupDialog({
                       aria-describedby={statesId}
                     />
                     <span className="wt-names">
-                      <b className="mono">{branchLabel(w)}</b>
+                      <b className="mono">{branchLabel(w, t)}</b>
                       <span className="hint mono" title={w.path}>
                         {tildify(w.path, home)}
                       </span>
@@ -183,7 +185,7 @@ export function CleanupDialog({
                         <span aria-hidden="true">{st.icon}</span> {st.label}
                       </span>
                     ))}
-                    {!removable(w) && !gone && <span className="hint">arrête la session pour pouvoir le supprimer</span>}
+                    {!removable(w) && !gone && <span className="hint">{t('sessions.cleanup.stopFirst')}</span>}
                   </span>
                   {w.branch && !gone && branchDeletable(w, protectedSet) && (
                     <label className="optrow wt-branch">
@@ -193,7 +195,7 @@ export function CleanupDialog({
                         disabled={!can || phase === 'confirm'}
                         onChange={(e) => setChoice(w.path, { deleteBranch: e.target.checked })}
                       />
-                      <span>supprimer aussi la branche</span>
+                      <span>{t('sessions.cleanup.deleteBranch')}</span>
                     </label>
                   )}
                   {text && (
@@ -202,35 +204,35 @@ export function CleanupDialog({
                     </span>
                   )}
                   {r?.state === 'dirty' && (
-                    <div className="forget wt-force" role="group" aria-label={`Suppression forcée de ${branchLabel(w)}`}>
+                    <div className="forget wt-force" role="group" aria-label={t('sessions.cleanup.forceLabel', { branch: branchLabel(w, t) })}>
                       <span>
                         {r.files.length > 0 ? (
                           <>
-                            Fichiers modifiés ou non suivis : <span className="mono">{r.files.join(', ')}</span>
+                            {t('sessions.cleanup.dirtyFiles')} <span className="mono">{r.files.join(', ')}</span>
                           </>
                         ) : (
-                          'Le worktree contient des modifications non commitées ou des fichiers non suivis.'
+                          t('sessions.cleanup.dirtyNoList')
                         )}
                       </span>
                       {forcing === w.path ? (
                         <span className="row">
                           <span>
-                            Supprimer de force « {branchLabel(w)} » ? <b>Ces modifications seront perdues définitivement.</b>
+                            {t('sessions.cleanup.forceQuestion', { branch: branchLabel(w, t) })} <b>{t('sessions.cleanup.forceLost')}</b>
                             {lossesFor(w, !!c?.deleteBranch, true)
-                              .filter((l) => !l.startsWith('les modifications'))
+                              .filter((l) => l !== t('sessions.worktree.lossDirtyForce'))
                               .map((l) => ` ${l}.`)}
                           </span>
                           <button type="button" className="btn sm danger" disabled={busy} onClick={() => void force(w)}>
-                            Forcer la suppression
+                            {t('sessions.cleanup.force')}
                           </button>
                           <button type="button" className="btn sm ghost" onClick={() => setForcing(null)}>
-                            Annuler
+                            {t('sessions.confirm.cancel')}
                           </button>
                         </span>
                       ) : (
                         <span className="row">
                           <button type="button" className="btn sm" disabled={busy} onClick={() => setForcing(w.path)}>
-                            Forcer la suppression…
+                            {t('sessions.cleanup.forceAsk')}
                           </button>
                         </span>
                       )}
@@ -242,19 +244,21 @@ export function CleanupDialog({
           </ul>
         )}
         {phase === 'confirm' && (
-          <div className="forget wt-confirm" role="group" aria-label="Confirmation">
+          <div className="forget wt-confirm" role="group" aria-label={t('sessions.confirm.label')}>
             <span>
-              Supprimer {selected.length > 1 ? `ces ${selected.length} worktrees` : 'ce worktree'} ?{' '}
-              <span className="muted">Le dossier est retiré du disque.</span>
+              {t('sessions.cleanup.confirmQuestion', { count: selected.length })}{' '}
+              <span className="muted">{t('sessions.cleanup.confirmDetail')}</span>
             </span>
             <ul>
               {selected.map((w) => {
                 const losses = lossesFor(w, !!choices[w.path]?.deleteBranch)
                 return (
                   <li key={w.path}>
-                    <b className="mono">{branchLabel(w)}</b>
-                    {choices[w.path]?.deleteBranch && branchDeletable(w, protectedSet) ? ' (et sa branche)' : ''}
-                    {losses.length === 0 ? ' : rien de non intégré n’est perdu.' : ` : ${losses.join(' ; ')}.`}
+                    <b className="mono">{branchLabel(w, t)}</b>
+                    {choices[w.path]?.deleteBranch && branchDeletable(w, protectedSet) ? t('sessions.cleanup.andBranch') : ''}
+                    {losses.length === 0
+                      ? t('sessions.cleanup.nothingLost')
+                      : t('sessions.cleanup.losses', { losses: losses.join(t('sessions.cleanup.lossSeparator')) })}
                   </li>
                 )
               })}
@@ -264,24 +268,24 @@ export function CleanupDialog({
       </div>
       <div className="mf">
         <span className="hint" style={{ marginRight: 'auto' }}>
-          {selected.length === 0 ? 'Aucun worktree coché.' : `${selected.length} worktree${selected.length > 1 ? 's' : ''} coché${selected.length > 1 ? 's' : ''}.`}
+          {selected.length === 0 ? t('sessions.cleanup.noneChecked') : t('sessions.cleanup.checked', { count: selected.length })}
         </span>
         {phase === 'confirm' ? (
           <>
             <button type="button" className="btn ghost" onClick={() => setPhase('select')} autoFocus>
-              Retour
+              {t('sessions.cleanup.back')}
             </button>
             <button type="button" className="btn danger" onClick={() => void run()}>
-              Supprimer
+              {t('sessions.cleanup.delete')}
             </button>
           </>
         ) : (
           <>
             <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>
-              Fermer
+              {t('sessions.cleanup.close')}
             </button>
             <button type="button" className="btn pri" disabled={busy || selected.length === 0} onClick={() => setPhase('confirm')}>
-              {busy ? 'Suppression…' : 'Supprimer la sélection…'}
+              {busy ? t('sessions.cleanup.removing') : t('sessions.cleanup.deleteSelection')}
             </button>
           </>
         )}

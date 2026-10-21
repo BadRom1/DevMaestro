@@ -12,6 +12,7 @@
  * dans `PullsPanel.tsx`, derrière le bouton « Publier » du dialogue
  * (vérifié par `test/forge-pulls.test.ts`).
  */
+import { t, type PlainKey } from '../../../shared/i18n'
 import {
   ErrorCode,
   type CheckRunState,
@@ -46,11 +47,16 @@ export interface PullFilters {
 export const DEFAULT_PULL_FILTERS: PullFilters = { state: 'open', search: '', mine: false }
 export const PULLS_LIMIT = 50
 
-export const PULL_FILTER_LABELS: Record<PullStateFilter, string> = {
-  open: 'Ouvertes',
-  merged: 'Fusionnées',
-  closed: 'Fermées',
-  all: 'Toutes',
+const PULL_FILTER_KEYS: Record<PullStateFilter, PlainKey> = {
+  open: 'forge.pulls.filter.open',
+  merged: 'forge.pulls.filter.merged',
+  closed: 'forge.pulls.filter.closed',
+  all: 'forge.pulls.filter.all',
+}
+
+/** Libellé d'un filtre d'état, dans la langue courante. */
+export function pullFilterLabel(f: PullStateFilter): string {
+  return t(PULL_FILTER_KEYS[f])
 }
 
 /** Paramètres de `forge.pulls` (champs vides omis). */
@@ -93,20 +99,20 @@ export interface Badge {
 }
 
 export function pullStateLabel(state: PullState | string, draft = false): Badge {
-  if (state === 'merged') return { glyph: '⑂', text: 'fusionnée', tone: 'done', label: 'Demande fusionnée' }
-  if (state === 'closed') return { glyph: '✕', text: 'fermée', tone: 'muted', label: 'Demande fermée sans fusion' }
-  if (draft) return { glyph: '◌', text: 'brouillon', tone: 'muted', label: 'Demande ouverte, en brouillon' }
-  return { glyph: '○', text: 'ouverte', tone: 'open', label: 'Demande ouverte' }
+  if (state === 'merged') return { glyph: '⑂', text: t('forge.pulls.state.merged'), tone: 'done', label: t('forge.pulls.state.mergedLabel') }
+  if (state === 'closed') return { glyph: '✕', text: t('forge.pulls.state.closed'), tone: 'muted', label: t('forge.pulls.state.closedLabel') }
+  if (draft) return { glyph: '◌', text: t('forge.pulls.state.draft'), tone: 'muted', label: t('forge.pulls.state.draftLabel') }
+  return { glyph: '○', text: t('forge.pulls.state.open'), tone: 'open', label: t('forge.pulls.state.openLabel') }
 }
 
 export function reviewDecisionLabel(d: ReviewDecision | string | null | undefined): Badge | null {
   switch (d) {
     case 'approved':
-      return { glyph: '✓', text: 'approuvée', tone: 'ok', label: 'Revue : approuvée' }
+      return { glyph: '✓', text: t('forge.pulls.decision.approved'), tone: 'ok', label: t('forge.pulls.decision.approvedLabel') }
     case 'changes_requested':
-      return { glyph: '✗', text: 'modifications demandées', tone: 'bad', label: 'Revue : modifications demandées' }
+      return { glyph: '✗', text: t('forge.pulls.decision.changes'), tone: 'bad', label: t('forge.pulls.decision.changesLabel') }
     case 'review_required':
-      return { glyph: '◷', text: 'revue attendue', tone: 'pend', label: 'Revue : en attente d’une revue' }
+      return { glyph: '◷', text: t('forge.pulls.decision.required'), tone: 'pend', label: t('forge.pulls.decision.requiredLabel') }
     default:
       return null
   }
@@ -116,56 +122,50 @@ const count = (v: unknown): number => (typeof v === 'number' && Number.isFinite(
 
 /** État de la CI : « ✓ CI réussie », « ✗ CI en échec (2/7) », « ◷ CI en cours », « – pas de CI », « ? CI inconnue ». */
 export function checksLabel(c: ChecksSummary | null | undefined): Badge {
-  if (!c || typeof c !== 'object') return { glyph: '?', text: 'CI inconnue', tone: 'muted', label: 'État de la CI inconnu' }
+  if (!c || typeof c !== 'object') return { glyph: '?', text: t('forge.pulls.ci.unknown'), tone: 'muted', label: t('forge.pulls.ci.unknownLabel') }
   const total = count(c.total)
   const passed = count(c.passed)
   const failed = count(c.failed)
   const pending = count(c.pending)
-  const of = total > 0 ? ` sur ${total}` : ''
+  // « … sur 7 » seulement si le total est connu.
+  const ciLabel = (key: 'success' | 'failure' | 'pending', n: number): string =>
+    total > 0 ? t(`forge.pulls.ci.${key}LabelOf`, { count: n, total }) : t(`forge.pulls.ci.${key}Label`, { count: n })
   switch (c.state) {
     case 'success':
-      return {
-        glyph: '✓',
-        text: 'CI réussie',
-        tone: 'ok',
-        label: `CI réussie : ${passed} vérification${passed > 1 ? 's' : ''} réussie${passed > 1 ? 's' : ''}${of}`,
-      }
+      return { glyph: '✓', text: t('forge.pulls.ci.success'), tone: 'ok', label: ciLabel('success', passed) }
     case 'failure':
       return {
         glyph: '✗',
-        text: failed > 0 ? `CI en échec (${failed}${total > 0 ? `/${total}` : ''})` : 'CI en échec',
+        text:
+          failed === 0
+            ? t('forge.pulls.ci.failure')
+            : total > 0
+              ? t('forge.pulls.ci.failureCountOf', { failed, total })
+              : t('forge.pulls.ci.failureCount', { failed }),
         tone: 'bad',
-        label: `CI en échec : ${failed} vérification${failed > 1 ? 's' : ''} en échec${of}`,
+        label: ciLabel('failure', failed),
       }
     case 'pending':
-      return {
-        glyph: '◷',
-        text: 'CI en cours',
-        tone: 'pend',
-        label: `CI en cours : ${pending} vérification${pending > 1 ? 's' : ''} en attente${of}`,
-      }
+      return { glyph: '◷', text: t('forge.pulls.ci.pending'), tone: 'pend', label: ciLabel('pending', pending) }
     case 'none':
-      return { glyph: '–', text: 'pas de CI', tone: 'muted', label: 'Aucune vérification de CI' }
+      return { glyph: '–', text: t('forge.pulls.ci.none'), tone: 'muted', label: t('forge.pulls.ci.noneLabel') }
     default:
-      return { glyph: '?', text: 'CI inconnue', tone: 'muted', label: 'État de la CI inconnu' }
+      return { glyph: '?', text: t('forge.pulls.ci.unknown'), tone: 'muted', label: t('forge.pulls.ci.unknownLabel') }
   }
 }
 
+const RUN_BADGES: Record<string, { glyph: string; tone: Tone; key: 'success' | 'failure' | 'pending' | 'skipped' | 'cancelled' }> = {
+  success: { glyph: '✓', tone: 'ok', key: 'success' },
+  failure: { glyph: '✗', tone: 'bad', key: 'failure' },
+  pending: { glyph: '◷', tone: 'pend', key: 'pending' },
+  skipped: { glyph: '↷', tone: 'muted', key: 'skipped' },
+  cancelled: { glyph: '⊘', tone: 'muted', key: 'cancelled' },
+}
+
 export function checkRunLabel(state: CheckRunState | string): Badge {
-  switch (state) {
-    case 'success':
-      return { glyph: '✓', text: 'réussie', tone: 'ok', label: 'Vérification réussie' }
-    case 'failure':
-      return { glyph: '✗', text: 'échec', tone: 'bad', label: 'Vérification en échec' }
-    case 'pending':
-      return { glyph: '◷', text: 'en cours', tone: 'pend', label: 'Vérification en cours ou en attente' }
-    case 'skipped':
-      return { glyph: '↷', text: 'ignorée', tone: 'muted', label: 'Vérification ignorée' }
-    case 'cancelled':
-      return { glyph: '⊘', text: 'annulée', tone: 'muted', label: 'Vérification annulée' }
-    default:
-      return { glyph: '?', text: 'inconnue', tone: 'muted', label: 'État de la vérification inconnu' }
-  }
+  const b = Object.prototype.hasOwnProperty.call(RUN_BADGES, state) ? RUN_BADGES[state]! : null
+  if (!b) return { glyph: '?', text: t('forge.pulls.run.unknown'), tone: 'muted', label: t('forge.pulls.run.unknownLabel') }
+  return { glyph: b.glyph, text: t(`forge.pulls.run.${b.key}`), tone: b.tone, label: t(`forge.pulls.run.${b.key}Label`) }
 }
 
 /** Durée d'une vérification (« 42 s », « 3 min 05 s », « 1 h 02 min ») ; `null` si inconnue. */
@@ -185,7 +185,7 @@ export function checkDuration(started: string | null | undefined, completed: str
 export function pullCounters(p: Pick<Pull, 'additions' | 'deletions' | 'changed_files'>): string {
   const parts: string[] = []
   if (typeof p.additions === 'number' || typeof p.deletions === 'number') parts.push(`+${count(p.additions)} −${count(p.deletions)}`)
-  if (typeof p.changed_files === 'number') parts.push(`${count(p.changed_files)} fichier${count(p.changed_files) > 1 ? 's' : ''}`)
+  if (typeof p.changed_files === 'number') parts.push(t('forge.pulls.counters.files', { count: count(p.changed_files) }))
   return parts.join(' · ')
 }
 
@@ -229,7 +229,10 @@ export function pullsErrorKind(code: number | null): 'old-daemon' | 'unavailable
   return 'other'
 }
 
-export const OLD_DAEMON_PULLS = 'Le démon ne connaît pas encore les demandes de fusion : mets orchd à jour.'
+/** Démon d'avant le lot 13b, dans la langue courante. */
+export function oldDaemonPulls(): string {
+  return t('forge.pulls.oldDaemon')
+}
 
 /** Le démon sait-il publier une revue ligne à ligne ? Absent (démon du lot 13a) : non. */
 export function supportsForgeReview(status: Pick<ForgeStatus, 'capabilities'> | null | undefined): boolean {
@@ -270,8 +273,10 @@ export const BRANCH_PULL_REFRESH_MS = 60_000
 export const MAX_FORGE_COMMENTS = 100
 export const MAX_FORGE_TEXT = 65_536
 
-/** Destination affichée partout où le brouillon de la forge apparaît. */
-export const FORGE_DESTINATION = 'Publiée sur GitHub, visible par tous'
+/** Destination affichée partout où le brouillon de la forge apparaît, dans la langue courante. */
+export function forgeDestination(): string {
+  return t('forge.pulls.destination')
+}
 
 export interface ForgeDraftComment {
   id: number
@@ -372,7 +377,7 @@ function placed(c: ForgeDraftComment, n: number | null): ForgeDraftComment {
 
 /** « ligne 40 → 42 » pour un commentaire replacé, sinon `null`. */
 export function movedLabel(c: Pick<ForgeDraftComment, 'line' | 'movedFrom'>): string | null {
-  return typeof c.movedFrom === 'number' && c.movedFrom !== c.line ? `ligne ${c.movedFrom} → ${c.line}` : null
+  return typeof c.movedFrom === 'number' && c.movedFrom !== c.line ? t('forge.pulls.moved', { from: c.movedFrom, to: c.line }) : null
 }
 
 export function forgeDraftReducer(d: ForgeDraft, a: ForgeDraftAction): ForgeDraft {
@@ -480,10 +485,15 @@ export const forgeDraftKey = (root: string, number: number): string => JSON.stri
 
 /* ---------- Revue publiée ---------- */
 
-export const EVENT_LABELS: Record<ForgeReviewEvent, string> = {
-  comment: 'Commenter',
-  approve: 'Approuver',
-  request_changes: 'Demander des modifications',
+const EVENT_KEYS: Record<ForgeReviewEvent, PlainKey> = {
+  comment: 'forge.pulls.event.comment',
+  approve: 'forge.pulls.event.approve',
+  request_changes: 'forge.pulls.event.requestChanges',
+}
+
+/** Libellé d'une décision de revue, dans la langue courante. */
+export function eventLabel(ev: ForgeReviewEvent): string {
+  return t(EVENT_KEYS[ev])
 }
 
 /** Contrôles C0/C1 sauf `\n` et `\t`, et contrôles bidirectionnels (texte qui se lit autrement qu'il ne s'écrit). */
@@ -547,9 +557,8 @@ export function buildForgeReview(d: ForgeDraft, number: number, files: readonly 
     comments: sorted.map((c) => ({ path: c.path, line: c.line, side: c.side, body: publishedText(c.text) })),
   }
   let problem: string | null = null
-  if (!d.headSha) problem = 'tête de la demande inconnue : recharge la demande de fusion'
-  else if (d.event !== 'approve' && body === '')
-    problem = `commentaire général obligatoire : « ${EVENT_LABELS[d.event]} » demande un commentaire général (GitHub l’exige), même avec des commentaires de ligne`
+  if (!d.headSha) problem = t('forge.pulls.problem.noHead')
+  else if (d.event !== 'approve' && body === '') problem = t('forge.pulls.problem.bodyRequired', { event: eventLabel(d.event) })
   return { payload, ids: sorted.map((c) => c.id), dropped, problem }
 }
 
@@ -589,6 +598,7 @@ export function publishFailure(e: PublishError, ids: readonly number[], describe
   }
   if (e.code === ErrorCode.InvalidParams) {
     const d = typeof e.data === 'object' && e.data !== null ? (e.data as Record<string, unknown>) : {}
+    // i18n-exempt: lecture du message du démon (en français), pas un texte affiché
     const rank = /commentaire (\d+)/.exec(e.message)
     const index = rank ? Number(rank[1]) - 1 : typeof d.index === 'number' && Number.isInteger(d.index) ? d.index : null
     return { phase: 'rejected', message: describe(e), commentId: index !== null ? (ids[index] ?? null) : null }
@@ -649,7 +659,7 @@ export async function reloadForReview(
 ): Promise<{ pull: PullDetail; action: ForgeDraftAction }> {
   const pull = await deps.fetchPull()
   const sha = validHeadSha(pull.head?.sha)
-  if (!sha) throw new Error('tête de la demande illisible')
+  if (!sha) throw new Error(t('forge.pulls.headUnreadable'))
   const paths = pullDiffFiles(pull.files).map((f) => f.path)
   const rows: Record<string, DiffRow[]> = {}
   let first = true
@@ -663,8 +673,9 @@ export async function reloadForReview(
 
 /** Message d'un échec de `forge.pullFile` : diff trop gros pour GitHub dit explicitement. */
 export function pullFileErrorText(message: string): string {
+  // i18n-exempt: motifs reconnus dans le message de gh ou du démon, pas un texte affiché
   if (/too[ _-]?large|exceed|maximum number|HTTP 406|trop gros|trop volumineux/i.test(message)) {
-    return 'diff trop gros pour être affiché par GitHub : vois ce fichier sur la forge'
+    return t('forge.pulls.file.tooLargeForGitHub')
   }
-  return `Diff du fichier indisponible : ${message}`
+  return t('forge.pulls.file.unavailable', { message })
 }

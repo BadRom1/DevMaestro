@@ -10,6 +10,7 @@ import {
   type Subagent,
 } from '../../../shared/protocol'
 import { CallError, call, errorCode, errorText } from '../api'
+import { useT } from '../i18n'
 import {
   basename,
   folderMissing,
@@ -56,7 +57,7 @@ import { CeilingHint, SwitchAccountButton, SwitchArea, SwitchStatus, type Header
 import { switchInFlight } from '../state/accountSwitch'
 import { sortFiles } from '../state/diff'
 import { guardLeave } from '../state/unsaved'
-import { activateTab, defaultLayout, isVisible, removeTabs, TAB_IDS, zoneOfTab, type Layout, type TabId } from '../state/layout'
+import { activateTab, defaultLayout, isVisible, removeTabs, TAB_IDS, tabLabel, zoneOfTab, type Layout, type TabId } from '../state/layout'
 import { getZones, resetLayout, setZones, useZones } from './layoutStore'
 import { ZoneGrid } from './ZoneGrid'
 import type { DiffFile } from '../../../shared/protocol'
@@ -79,7 +80,8 @@ function useModeSwitch(session: Session) {
       dispatch({ type: 'sent', sent: r.sent, mode: latest.current.mode })
     } catch (e) {
       const message = e instanceof CallError ? e.failure.message : errorText(e)
-      dispatch({ type: 'failed', code: errorCode(e), message, mode: latest.current.mode, now: Date.now() })
+      const data = e instanceof CallError ? e.failure.data : undefined
+      dispatch({ type: 'failed', code: errorCode(e), message, data, mode: latest.current.mode, now: Date.now() })
     }
   }, [])
 
@@ -110,8 +112,6 @@ function useModeSwitch(session: Session) {
   return { sw, request }
 }
 
-const OLD_DAEMON = 'Le démon ne gère pas encore le nommage des sessions : mets orchd à jour.'
-
 function Header({
   session,
   agents,
@@ -139,6 +139,8 @@ function Header({
   onSessionUpdated: (s: Session) => void
   onForget: (id: string) => Promise<void>
 }) {
+  const t = useT()
+  const oldDaemon = t('shell.pane.oldDaemon')
   const [busy, setBusy] = useState<'stop' | 'resume' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [renaming, setRenaming] = useState(false)
@@ -151,8 +153,8 @@ function Header({
   const glyph = glyphFor(session.status)
   const m = session.metrics
   const projectName = project?.name ?? basename(project?.root ?? session.project_root ?? session.cwd)
-  const branch = session.branch ?? project?.branch ?? 'sans branche'
-  const model = m?.model?.display_name ?? m?.model?.id ?? session.model ?? 'modèle inconnu'
+  const branch = session.branch ?? project?.branch ?? t('shell.noBranch')
+  const model = m?.model?.display_name ?? m?.model?.id ?? session.model ?? t('shell.pane.unknownModel')
   const mode = displayedMode(sw, session.mode)
   const known = (SETTABLE_MODES as readonly string[]).includes(mode)
   const pendingMode = sw.phase === 'pending'
@@ -175,7 +177,7 @@ function Header({
     try {
       await f()
     } catch (e) {
-      setError(`${what} : ${errorText(e)}`)
+      setError(t('shell.pane.actionFailed', { what, error: errorText(e) }))
     } finally {
       setBusy(null)
     }
@@ -191,13 +193,13 @@ function Header({
       await update({ title })
       setRenaming(false)
     } catch (e) {
-      throw new Error(`Renommage impossible : ${errorText(e)}`)
+      throw new Error(t('shell.renameFailed', { error: errorText(e) }))
     }
   }
 
   function pickColor(c: SessionColor | null) {
     setError(null)
-    update({ color: c }).catch((e: unknown) => setError(`Couleur non enregistrée : ${errorText(e)}`))
+    update({ color: c }).catch((e: unknown) => setError(t('shell.pane.colorFailed', { error: errorText(e) })))
   }
 
   return (
@@ -217,7 +219,7 @@ function Header({
           ) : (
             <h2
               className="sname"
-              title={naming ? `${name} (double-clic pour renommer)` : name}
+              title={naming ? t('shell.pane.renameHint', { name }) : name}
               onDoubleClick={() => naming && setRenaming(true)}
             >
               {name}
@@ -234,20 +236,21 @@ function Header({
         </div>
         <div className="sh-tags">
           <ProfileChip profile={session.profile} profiles={profiles} />
-          <span className="chip" title="Modèle">
+          <span className="chip" title={t('shell.pane.model')}>
             {model}
           </span>
           <label className="chip" style={{ paddingRight: 2 }}>
+            {/* i18n-exempt: nom technique (mode de Claude Code) */}
             mode
             <select
               className="mode"
-              aria-label="Mode de la session"
+              aria-label={t('shell.pane.modeLabel')}
               aria-busy={pendingMode}
               value={mode}
               disabled={pendingMode || !session.alive || session.status.state === 'waiting'}
               title={
                 session.status.state === 'waiting'
-                  ? 'Réponds d’abord à la demande en attente (Shift+Tab agirait sur le dialogue)'
+                  ? t('shell.pane.answerFirst')
                   : undefined
               }
               onChange={(e) => request(e.target.value as SettableMode)}
@@ -266,7 +269,7 @@ function Header({
           </label>
           {pendingMode && (
             <span className="hint pending" role="status">
-              <span className="spin" aria-hidden="true" /> en cours…
+              <span className="spin" aria-hidden="true" /> {t('shell.pane.inProgress')}
             </span>
           )}
         </div>
@@ -274,12 +277,12 @@ function Header({
           <button
             className="btn sm ghost"
             disabled={!naming || renaming}
-            title={naming ? 'Renommer la session' : OLD_DAEMON}
+            title={naming ? t('shell.pane.renameTitle') : oldDaemon}
             onClick={() => setRenaming(true)}
           >
-            Renommer
+            {t('shell.pane.rename')}
           </button>
-          <ColorPicker value={color} disabled={!naming} disabledReason={OLD_DAEMON} onPick={pickColor} />
+          <ColorPicker value={color} disabled={!naming} disabledReason={oldDaemon} onPick={pickColor} />
           {accountSwitch && (
             <SwitchAccountButton session={session} profiles={profiles} state={sw15} onOpen={accountSwitch.open} />
           )}
@@ -290,38 +293,38 @@ function Header({
               onClick={() => {
                 // Arrêt demandé pendant « Attendre la fin » : la bascule est annulée (sinon elle reprendrait la session).
                 if (sw15?.kind === 'waiting') accountSwitch?.cancel()
-                void run('stop', () => call('sessions.stop', { id: session.id }), 'Arrêt impossible')
+                void run('stop', () => call('sessions.stop', { id: session.id }), t('shell.pane.stopFailed'))
               }}
             >
-              {busy === 'stop' ? 'Arrêt…' : 'Arrêter'}
+              {busy === 'stop' ? t('shell.pane.stopping') : t('shell.pane.stop')}
             </button>
           ) : (
             <>
               <button
                 className="btn sm"
                 disabled={busy !== null || block !== null || switching}
-                title={block ? block.long : 'Relancer Claude Code sur cette conversation'}
+                title={block ? block.long : t('shell.pane.resumeTitle')}
                 onClick={() =>
                   void run(
                     'resume',
                     () => call('sessions.resume', { id: session.id, ...(termSize ?? {}) }),
-                    'Reprise impossible',
+                    t('shell.resumeFailed'),
                   )
                 }
               >
-                {busy === 'resume' ? 'Reprise…' : 'Reprendre'}
+                {busy === 'resume' ? t('shell.pane.resuming') : t('shell.resume')}
               </button>
               <button
                 className="btn sm ghost"
                 disabled={busy !== null || forgetting}
-                title="Retirer cette session arrêtée de la liste de DevMaestro"
+                title={t('shell.pane.forgetTitle')}
                 onClick={() => {
                   if (settings.confirmRemoval) setForgetting(true)
                   else
-                    onForget(session.id).catch((e: unknown) => setError(`Retrait impossible : ${errorText(e)}`))
+                    onForget(session.id).catch((e: unknown) => setError(t('shell.pane.forgetFailed', { error: errorText(e) })))
                 }}
               >
-                Retirer de la liste
+                {t('shell.removeFromList')}
               </button>
             </>
           )}
@@ -367,31 +370,34 @@ function Header({
         )}
         <span
           title={
-            m?.context_window_size ? `Fenêtre de contexte : ${formatNumber(m.context_window_size)} tokens` : 'Fenêtre de contexte'
+            m?.context_window_size
+              ? t('shell.pane.contextWindowSize', { size: formatNumber(m.context_window_size) })
+              : t('shell.pane.contextWindow')
           }
         >
-          contexte <Meter pct={m?.context_used_pct} label="Contexte utilisé" /> <b>{formatPct(m?.context_used_pct)}</b>
+          {t('shell.pane.context')} <Meter pct={m?.context_used_pct} label={t('shell.pane.contextUsed')} /> <b>{formatPct(m?.context_used_pct)}</b>
           {m?.context_window_size ? ` · ${formatCompact(m.context_window_size)}` : ''}
         </span>
         <span>
-          coût <b>{formatUsd(m?.cost_usd)}</b> · <span title={typeof m?.total_tokens === 'number' ? `${formatNumber(m.total_tokens)} tokens` : undefined}>
+          {t('shell.pane.cost')} <b>{formatUsd(m?.cost_usd)}</b> ·{' '}
+          <span title={typeof m?.total_tokens === 'number' ? t('shell.pane.tokensCount', { n: formatNumber(m.total_tokens) }) : undefined}>
             {formatCompact(m?.total_tokens)}
           </span>{' '}
-          tokens
+          {t('shell.pane.tokens')}
         </span>
         <span>
-          {session.status.state === 'running' ? 'actif ' : 'dernière activité '}
+          {session.status.state === 'running' ? t('shell.pane.active') : t('shell.pane.lastActivity')}{' '}
           <b>{relativeTime(session.last_activity)}</b>
         </span>
-        {session.possibly_stale && <span className="chip pend">peut-être obsolète</span>}
+        {session.possibly_stale && <span className="chip pend">{t('shell.stale')}</span>}
         {block && (
           <span className="chip" title={block.long}>
-            {block.short} : reprise impossible
+            {t('shell.pane.blocked', { reason: block.short })}
           </span>
         )}
         {missing && !block && (
-          <span className="chip bad" title={`Le dossier ${session.cwd} n’existe plus`}>
-            dossier supprimé
+          <span className="chip bad" title={t('shell.folderGone', { cwd: session.cwd })}>
+            {t('shell.folderDeleted')}
           </span>
         )}
         {sw.phase === 'idle' && sw.error && (
@@ -498,6 +504,7 @@ export function SessionPane({
   /** Ouvre la demande de fusion de la branche (absent : forge masquée ou désactivée, rien n'est demandé). */
   onOpenPull?: (s: Session, number: number) => void
 }) {
+  const t = useT()
   const pending = session?.pending ?? []
   const termHost = useRef<HTMLDivElement>(null)
   const keys = session ? pending.map((r) => requestKey(session.id, r.request_id)) : []
@@ -530,7 +537,7 @@ export function SessionPane({
     const next = activateTab(l, settings.ui.sessionTab)
     if (next !== l) setZones(next, false)
   }, [])
-  const visible = (t: TabId) => isVisible(layout, t)
+  const visible = (tab: TabId) => isVisible(layout, tab)
   /**
    * Nouvelle disposition : confirmation d'abord si elle masque l'onglet
    * Fichiers alors qu'un fichier modifié n'est pas enregistré.
@@ -545,13 +552,13 @@ export function SessionPane({
         setFocusSeq((n) => n + 1)
       }
     }
-    if (isVisible(shownOf(storedRef.current), 'files') && !isVisible(shownOf(next), 'files')) guardLeave(session?.id ?? null, 'changer d’onglet', apply)
+    if (isVisible(shownOf(storedRef.current), 'files') && !isVisible(shownOf(next), 'files')) guardLeave(session?.id ?? null, t('shell.leave.switchTab'), apply)
     else apply()
   }
   useLayoutEffect(() => {
-    const t = pendingFocus.current
+    const tab = pendingFocus.current
     pendingFocus.current = null
-    if (t) document.getElementById(`${tabsId}-${t}`)?.focus()
+    if (tab) document.getElementById(`${tabsId}-${tab}`)?.focus()
   }, [focusSeq])
   /** Ouvre un onglet dans la zone qui le contient (et en fait la zone courante). */
   const setTab = (next: TabId) => {
@@ -568,7 +575,7 @@ export function SessionPane({
         setFocusSeq((n) => n + 1)
       }
     }
-    if (visible('files') && !isVisible(defaultLayout(), 'files')) guardLeave(session?.id ?? null, 'réinitialiser la disposition', apply)
+    if (visible('files') && !isVisible(defaultLayout(), 'files')) guardLeave(session?.id ?? null, t('shell.leave.resetLayout'), apply)
     else apply()
   }
   const convVisible = visible('conversation')
@@ -635,12 +642,12 @@ export function SessionPane({
   const extra = (k: TabId) => (
     <>
       {(k === 'terminal' || k === 'conversation') && pending.length > 0 && (
-        <span className="badge wait" aria-label={`${pending.length} à répondre`}>
+        <span className="badge wait" aria-label={t('shell.pane.badge.waiting', { count: pending.length })}>
           {pending.length}
         </span>
       )}
       {k === 'diff' && fileCount !== null && fileCount > 0 && (
-        <span className="badge" aria-label={`${fileCount} fichier${fileCount > 1 ? 's' : ''} changé${fileCount > 1 ? 's' : ''}`}>
+        <span className="badge" aria-label={t('shell.pane.badge.files', { count: fileCount })}>
           {fileCount}
         </span>
       )}
@@ -655,17 +662,17 @@ export function SessionPane({
         </span>
       )}
       {k === 'diff' && pendingComments > 0 && (
-        <span className="badge pend" aria-label={`${pendingComments} commentaire${pendingComments > 1 ? 's' : ''} en attente`}>
+        <span className="badge pend" aria-label={t('shell.pane.badge.comments', { count: pendingComments })}>
           💬{pendingComments}
         </span>
       )}
       {k === 'commits' && commitNotes > 0 && (
-        <span className="badge pend" aria-label={`${commitNotes} commentaire${commitNotes > 1 ? 's' : ''} de commit dans la revue`}>
+        <span className="badge pend" aria-label={t('shell.pane.badge.commitNotes', { count: commitNotes })}>
           💬{commitNotes}
         </span>
       )}
       {k === 'files' && fileExtracts > 0 && (
-        <span className="badge pend" aria-label={`${fileExtracts} extrait${fileExtracts > 1 ? 's' : ''} de fichier dans la revue`}>
+        <span className="badge pend" aria-label={t('shell.pane.badge.extracts', { count: fileExtracts })}>
           💬{fileExtracts}
         </span>
       )}
@@ -684,21 +691,21 @@ export function SessionPane({
             onSize={onTermSize}
             onLink={onLink}
             hostRef={termHost}
-            emptyText="Choisis une session à gauche, ou lance-en une nouvelle."
+            emptyText={t('shell.pane.empty.terminal')}
           />
         )
       case 'conversation':
-        if (!session) return shown ? <p className="empty">Choisis une session pour lire sa conversation.</p> : null
+        if (!session) return shown ? <p className="empty">{t('shell.pane.empty.conversation')}</p> : null
         if (!shown && convOpened !== session.id) return null
         return (
-          <ViewBoundary key={session.id} label="Conversation">
+          <ViewBoundary key={session.id} label={tabLabel(k)}>
             <ConversationView key={session.id} session={session} onLink={onLink} hidden={!shown} slashCommands={slashCommands} />
           </ViewBoundary>
         )
       case 'diff':
         if (!shown) return null
         return session ? (
-          <ViewBoundary key={session.id} label="Diff">
+          <ViewBoundary key={session.id} label={tabLabel(k)}>
             <DiffView
               key={session.id}
               focusPath={diffFocus}
@@ -718,12 +725,12 @@ export function SessionPane({
             />
           </ViewBoundary>
         ) : (
-          <p className="empty">Choisis une session pour voir ce qu’elle a changé.</p>
+          <p className="empty">{t('shell.pane.empty.diff')}</p>
         )
       case 'commits':
         if (!shown) return null
         return session ? (
-          <ViewBoundary key={session.id} label="Commits">
+          <ViewBoundary key={session.id} label={tabLabel(k)}>
             <CommitsView
               key={session.id}
               session={session}
@@ -740,12 +747,12 @@ export function SessionPane({
             />
           </ViewBoundary>
         ) : (
-          <p className="empty">Choisis une session pour parcourir ses commits.</p>
+          <p className="empty">{t('shell.pane.empty.commits')}</p>
         )
       case 'files':
         if (!shown) return null
         return session ? (
-          <ViewBoundary key={session.id} label="Fichiers">
+          <ViewBoundary key={session.id} label={tabLabel(k)}>
             <FilesView
               key={session.id}
               session={session}
@@ -769,12 +776,12 @@ export function SessionPane({
             />
           </ViewBoundary>
         ) : (
-          <p className="empty">Choisis une session pour parcourir ses fichiers.</p>
+          <p className="empty">{t('shell.pane.empty.files')}</p>
         )
       case 'agents':
         if (!shown) return null
         return session ? (
-          <ViewBoundary key={session.id} label="Agents">
+          <ViewBoundary key={session.id} label={tabLabel(k)}>
             <AgentsView
               key={session.id}
               session={session}
@@ -787,12 +794,12 @@ export function SessionPane({
             />
           </ViewBoundary>
         ) : (
-          <p className="empty">Choisis une session pour suivre ses sous-agents.</p>
+          <p className="empty">{t('shell.pane.empty.agents')}</p>
         )
       case 'runners':
         if (!shown || runnersSupported === false) return null
         return session ? (
-          <ViewBoundary key={session.id} label="Lancer">
+          <ViewBoundary key={session.id} label={tabLabel(k)}>
             <RunnersView
               key={session.id}
               session={session}
@@ -807,7 +814,7 @@ export function SessionPane({
             />
           </ViewBoundary>
         ) : (
-          <p className="empty">Choisis une session pour lancer les commandes de son dépôt.</p>
+          <p className="empty">{t('shell.pane.empty.runners')}</p>
         )
     }
   }
@@ -817,7 +824,7 @@ export function SessionPane({
   )
   return (
     <PromptScopeContext.Provider value={promptScope}>
-    <section className="panel sess" aria-label={session ? `Session ${sessionDisplayName(session)}` : 'Aucune session'}>
+    <section className="panel sess" aria-label={session ? t('shell.pane.sessionLabel', { name: sessionDisplayName(session) }) : t('shell.pane.noSessionLabel')}>
       {session ? (
         <Header
           key={session.id}
@@ -836,7 +843,7 @@ export function SessionPane({
       ) : (
         <div className="sh">
           <div className="sh-1">
-            <h2>Aucune session sélectionnée</h2>
+            <h2>{t('shell.pane.noneSelected')}</h2>
           </div>
         </div>
       )}

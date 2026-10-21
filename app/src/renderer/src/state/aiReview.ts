@@ -11,6 +11,7 @@
  */
 import type { CommitInfo, DiffFile, DiffStatus, FileDiff, PullDetail, Session, WorktreeInfo } from '../../../shared/protocol'
 import { MAX_PROMPT_CHARS, renderPrompt, safeValue, type PromptId, type PromptVars } from '../../../shared/prompts'
+import { getLocale, numberFormat, t as tr, type Locale } from '../../../shared/i18n'
 import { worktreeSlug } from '../../../shared/worktrees'
 import type { KeyValueStorage } from './collapse'
 import { cleanForgeText, oneLine } from './forge'
@@ -76,19 +77,25 @@ function cut(s: string, max: number): string {
   return c.length <= max ? s : `${c.slice(0, max - 1).join('')}…`
 }
 
+/** Ce qu'on relit, en bref : « PR #42 », « abc1234 », « du diff <branche> » (dans la langue de l'interface). */
+export function reviewSubject(t: ReviewTarget): string {
+  if (t.kind === 'pull') return `PR #${t.pull.number}`
+  if (t.kind === 'commit') return short(fullSha(t.commit.sha) ?? t.commit.sha.replace(/[^0-9a-f]/gi, ''))
+  const b = t.session.branch ? safeValue(t.session.branch) : ''
+  // Borné comme le nom de session (« Revue » et une espace en moins).
+  return cut(b ? tr('forge.review.subject.diffBranch', { branch: b }) : tr('forge.review.subject.diff'), MAX_REVIEW_NAME - 6)
+}
+
 /** Nom court de la session : « Revue PR #42 », « Revue abc1234 », « Revue du diff <branche> ». */
 export function reviewSessionName(t: ReviewTarget): string {
-  if (t.kind === 'pull') return `Revue PR #${t.pull.number}`
-  if (t.kind === 'commit') return `Revue ${short(fullSha(t.commit.sha) ?? t.commit.sha.replace(/[^0-9a-f]/gi, ''))}`
-  const b = t.session.branch ? safeValue(t.session.branch) : ''
-  return cut(b ? `Revue du diff ${b}` : 'Revue du diff', MAX_REVIEW_NAME)
+  return cut(tr('forge.review.sessionName', { subject: reviewSubject(t) }), MAX_REVIEW_NAME)
 }
 
 /** Libellé accessible du bouton (« Revue assistée de la demande #42 »…). */
 export function reviewButtonLabel(t: Pick<ReviewTarget, 'kind'> & { number?: number; sha?: string }): string {
-  if (t.kind === 'pull') return `Revue assistée de la demande #${t.number ?? '?'}`
-  if (t.kind === 'commit') return `Revue assistée du commit ${t.sha ? short(t.sha) : ''}`.trimEnd()
-  return 'Revue assistée du diff'
+  if (t.kind === 'pull') return tr('forge.review.buttonLabel.pull', { number: t.number ?? '?' })
+  if (t.kind === 'commit') return tr('forge.review.buttonLabel.commit', { sha: t.sha ? short(t.sha) : '' }).trimEnd()
+  return tr('forge.review.buttonLabel.diff')
 }
 
 /** Branche jetable de revue (`null` : pas de worktree, diff d'une session). */
@@ -165,8 +172,17 @@ export function reviewVars(t: ReviewTarget): PromptVars {
   }
 }
 
-/** Ajouté à la consigne (texte de l'app) quand la revue tourne hors de la branche relue. */
-export const NO_WORKTREE_NOTE = 'Attention : ton dossier de travail n’est pas sur la branche relue, fie-toi au diff collé.'
+/**
+ * Ajouté à la consigne (texte de l'app) quand la revue tourne hors de la
+ * branche relue, dans la langue de l'interface comme `defaultPrompt` (lot 20).
+ */
+export function noWorktreeNote(locale: Locale = getLocale()): string {
+  return locale === 'en'
+    ? // i18n-exempt: texte envoyé à Claude
+      'Warning: your working folder is not on the reviewed branch, rely on the pasted diff.'
+    : // i18n-exempt: texte envoyé à Claude
+      'Attention : ton dossier de travail n’est pas sur la branche relue, fie-toi au diff collé.'
+}
 
 /**
  * Consigne tapée, rendue du modèle (lève une erreur si le modèle est
@@ -175,7 +191,7 @@ export const NO_WORKTREE_NOTE = 'Attention : ton dossier de travail n’est pas 
 export function reviewInstruction(t: ReviewTarget, template: string, noWorktree = false): string {
   const text = renderPrompt(reviewPromptId(t), template, reviewVars(t))
   if (!noWorktree) return text
-  const withNote = `${text} ${NO_WORKTREE_NOTE}`
+  const withNote = `${text} ${noWorktreeNote()}`
   return [...withNote].length <= MAX_PROMPT_CHARS ? withNote : text
 }
 
@@ -201,6 +217,7 @@ export function cutBytes(s: string, max: number): { text: string; cut: boolean }
   return { text: out, cut: true }
 }
 
+// i18n-exempt: texte envoyé à Claude
 const STATUS_WORDS: Record<DiffStatus, string> = { A: 'ajouté', M: 'modifié', D: 'supprimé', R: 'renommé', '?': 'non suivi' }
 
 function counts(f: Pick<DiffFile, 'additions' | 'deletions'>): string {
@@ -219,7 +236,9 @@ export function unifiedFile(f: DiffFile, d: FileDiff): string {
   const oldName = f.status === 'A' || f.status === '?' ? '/dev/null' : `a/${f.old_path || f.path}`
   const newName = f.status === 'D' ? '/dev/null' : `b/${f.path}`
   const head = `diff --git a/${f.old_path || f.path} b/${f.path}\n--- ${oldName}\n+++ ${newName}\n`
+  // i18n-exempt: texte envoyé à Claude
   if (d.binary) return `${head}(fichier binaire : pas de diff ligne à ligne)\n`
+  // i18n-exempt: texte envoyé à Claude
   if (d.too_large) return `${head}(diff trop volumineux : non inclus, à lire dans le dépôt)\n`
   let out = head
   for (const h of d.hunks ?? []) {
@@ -242,12 +261,36 @@ export interface ReviewContext {
   total: number
   /** Diff incomplet (budget, nombre de fichiers lus, liste coupée). */
   truncated: boolean
-  /** Ce qui manque au diff collé (binaires, trop gros, illisibles, non UTF-8, liste coupée…), en français. */
+  /** Ce qui manque au diff collé (binaires, trop gros, illisibles, non UTF-8, liste coupée…), en français : texte collé. */
   notes: string[]
+  /** Les mêmes manques, structurés : résumé affiché (`reviewNoteLabel`, dans la langue de l'interface). */
+  missing: ReviewNote[]
 }
 
-/** Taille lisible et exacte (« 64 Kio », « 39,1 Kio », « 900 octets »). */
+/** Un manque du contexte collé. */
+export type ReviewNote =
+  | { kind: 'headCut' }
+  | { kind: 'listCut'; listed: number; total: number }
+  | { kind: 'listTruncated' }
+  | { kind: 'skipped'; count: number }
+  | { kind: 'binary'; count: number }
+  | { kind: 'tooLarge'; count: number }
+  | { kind: 'unreadable'; count: number }
+  | { kind: 'diffCut'; included: number; total: number; maxBytes: number }
+
+/** Taille lisible et exacte (« 64 Kio », « 39,1 Kio », « 900 octets »), dans la langue de l'interface. */
 export function sizeLabel(n: number): string {
+  if (n < 1024) return tr('forge.review.size.bytes', { n })
+  const k = n / 1024
+  const v = Number.isInteger(k) ? String(k) : numberFormat({ minimumFractionDigits: 1, maximumFractionDigits: 1, useGrouping: false }).format(k)
+  return tr('forge.review.size.kib', { n: v })
+}
+
+/* Texte collé à Claude : toujours en français (comme la consigne du démon), jamais traduit. */
+
+/** Taille dans le texte collé (« 64 Kio », « 39,1 Kio », « 900 octets »). */
+function pastedSize(n: number): string {
+  // i18n-exempt: texte envoyé à Claude
   if (n < 1024) return `${n} octets`
   const k = n / 1024
   return `${Number.isInteger(k) ? k : k.toFixed(1).replace('.', ',')} Kio`
@@ -257,18 +300,68 @@ function plural(n: number, one: string, many: string): string {
   return `${n} ${n > 1 ? many : one}`
 }
 
+/** Un manque, tel qu'il est collé (français). */
+function notePasted(n: ReviewNote): string {
+  switch (n.kind) {
+    case 'headCut':
+      return 'en-tête coupé' // i18n-exempt: texte envoyé à Claude
+    case 'listCut':
+      return `liste des fichiers coupée (${n.listed} sur ${n.total})` // i18n-exempt: texte envoyé à Claude
+    case 'listTruncated':
+      return 'liste des fichiers coupée par le démon ou la forge' // i18n-exempt: texte envoyé à Claude
+    case 'skipped':
+      // i18n-exempt: texte envoyé à Claude
+      return `${plural(n.count, 'fichier non UTF-8 ignoré', 'fichiers non UTF-8 ignorés')} par le démon`
+    case 'binary':
+      return plural(n.count, 'fichier binaire sans diff', 'fichiers binaires sans diff') // i18n-exempt: texte envoyé à Claude
+    case 'tooLarge':
+      return plural(n.count, 'fichier trop volumineux non inclus', 'fichiers trop volumineux non inclus') // i18n-exempt: texte envoyé à Claude
+    case 'unreadable':
+      return plural(n.count, 'fichier illisible', 'fichiers illisibles') // i18n-exempt: texte envoyé à Claude
+    case 'diffCut':
+      // i18n-exempt: texte envoyé à Claude
+      return `diff tronqué : ${n.included} fichier${n.included > 1 ? 's' : ''} sur ${n.total} inclus (limite de ${pastedSize(n.maxBytes)})`
+  }
+}
+
+/** Un manque, tel qu'il est affiché dans la confirmation (langue de l'interface). */
+export function reviewNoteLabel(n: ReviewNote): string {
+  switch (n.kind) {
+    case 'headCut':
+      return tr('forge.review.note.headCut')
+    case 'listCut':
+      return tr('forge.review.note.listCut', { listed: n.listed, total: n.total })
+    case 'listTruncated':
+      return tr('forge.review.note.listTruncated')
+    case 'skipped':
+      return tr('forge.review.note.skipped', { count: n.count })
+    case 'binary':
+      return tr('forge.review.note.binary', { count: n.count })
+    case 'tooLarge':
+      return tr('forge.review.note.tooLarge', { count: n.count })
+    case 'unreadable':
+      return tr('forge.review.note.unreadable', { count: n.count })
+    case 'diffCut':
+      return tr('forge.review.note.diffCut', { count: n.included, total: n.total, limit: sizeLabel(n.maxBytes) })
+  }
+}
+
 /** En-tête collé : ce qu'on relit (titre, description, message : données). */
 export function reviewHeader(t: ReviewTarget): string {
   if (t.kind === 'pull') {
     const p = t.pull
     const body = cutBytes(cleanForgeText(p.body ?? '').trim(), MAX_REVIEW_BODY_BYTES)
     const lines = [
+      // i18n-exempt: texte envoyé à Claude
       `Demande de fusion #${p.number} : ${oneLine(p.title ?? '')}`,
+      // i18n-exempt: texte envoyé à Claude
       `Branche : ${oneLine(p.head?.branch ?? '?')} → ${oneLine(p.base?.branch ?? '?')} · tête ${short(targetSha(t) ?? '???????')}`,
       ...(p.author ? [`Auteur : ${oneLine(p.author)}`] : []),
       '',
+      // i18n-exempt: texte envoyé à Claude
       'Description (donnée venue de la forge) :',
       body.text || '(vide)',
+      // i18n-exempt: texte envoyé à Claude
       ...(body.cut || p.truncated ? ['[Description coupée.]'] : []),
     ]
     return lines.join('\n')
@@ -278,13 +371,16 @@ export function reviewHeader(t: ReviewTarget): string {
     const msg = cutBytes(cleanForgeText([c.subject, c.body].filter(Boolean).join('\n\n')).trim(), MAX_REVIEW_MESSAGE_BYTES)
     return [
       `Commit ${short(targetSha(t) ?? c.sha)}${c.author ? ` de ${oneLine(c.author)}` : ''}${c.date ? `, ${c.date}` : ''}`,
+      // i18n-exempt: texte envoyé à Claude
       ...(t.session.branch ? [`Branche : ${oneLine(t.session.branch)}`] : []),
       '',
       'Message :',
       msg.text || '(sans message)',
+      // i18n-exempt: texte envoyé à Claude
       ...(msg.cut ? ['[Message coupé.]'] : []),
     ].join('\n')
   }
+  // i18n-exempt: texte envoyé à Claude
   return [`Changements de la session${t.session.branch ? ` (branche ${oneLine(t.session.branch)})` : ''} contre sa base, modifications non commitées comprises.`].join(
     '\n',
   )
@@ -306,17 +402,20 @@ export function buildReviewContext(
   const maxBytes = opts.maxBytes ?? MAX_REVIEW_PASTED_BYTES
   const listTruncated = !!t.listTruncated
   const files = t.files
-  const notes: string[] = []
+  const missing: ReviewNote[] = []
   // Place gardée pour les mentions de fin.
   const reserve = 600
   const warn = opts.noWorktree
+    // i18n-exempt: texte envoyé à Claude
     ? 'Note de DevMaestro : la session tourne dans le dossier du projet, qui n’est pas sur la branche relue ; ses fichiers ne sont pas ceux du diff ci-dessous.\n\n'
     : ''
   const head = cutBytes(cleanForgeText(`${warn}${reviewHeader(t)}`), Math.floor((maxBytes * 5) / 16))
-  if (head.cut) notes.push('en-tête coupé')
+  if (head.cut) missing.push({ kind: 'headCut' })
+  // i18n-exempt: texte envoyé à Claude
   const headText = head.cut ? `${head.text}\n[En-tête coupé.]` : head.text
   // Liste : jusqu'à 500 lignes et la moitié du budget.
   const listBudget = Math.floor(maxBytes / 2)
+  // i18n-exempt: texte envoyé à Claude
   let listText = `Fichiers modifiés (${files.length}${listTruncated ? ', liste coupée' : ''}) :`
   let listUsed = utf8Bytes(listText)
   let listed = 0
@@ -329,11 +428,12 @@ export function buildReviewContext(
     listed++
   }
   if (listed < files.length) {
-    listText += `\n… et ${files.length - listed} autres (liste bornée à ${MAX_REVIEW_FILE_LIST} lignes et ${sizeLabel(listBudget)}).`
-    notes.push(`liste des fichiers coupée (${listed} sur ${files.length})`)
+    // i18n-exempt: texte envoyé à Claude
+    listText += `\n… et ${files.length - listed} autres (liste bornée à ${MAX_REVIEW_FILE_LIST} lignes et ${pastedSize(listBudget)}).`
+    missing.push({ kind: 'listCut', listed, total: files.length })
   }
-  if (listTruncated) notes.push('liste des fichiers coupée par le démon ou la forge')
-  if (t.skipped && t.skipped > 0) notes.push(`${plural(t.skipped, 'fichier non UTF-8 ignoré', 'fichiers non UTF-8 ignorés')} par le démon`)
+  if (listTruncated) missing.push({ kind: 'listTruncated' })
+  if (t.skipped && t.skipped > 0) missing.push({ kind: 'skipped', count: t.skipped })
   const intro = `${headText}\n\n${listText}\n\nDiff :\n`
   let used = utf8Bytes(intro)
   let diff = ''
@@ -361,20 +461,24 @@ export function buildReviewContext(
     else if (r.diff.too_large) tooLarge++
     else included++
   }
-  if (binary) notes.push(plural(binary, 'fichier binaire sans diff', 'fichiers binaires sans diff'))
-  if (tooLarge) notes.push(plural(tooLarge, 'fichier trop volumineux non inclus', 'fichiers trop volumineux non inclus'))
-  if (unreadable) notes.push(plural(unreadable, 'fichier illisible', 'fichiers illisibles'))
-  if (stopped) notes.unshift(`diff tronqué : ${included} fichier${included > 1 ? 's' : ''} sur ${files.length} inclus (limite de ${sizeLabel(maxBytes)})`)
+  if (binary) missing.push({ kind: 'binary', count: binary })
+  if (tooLarge) missing.push({ kind: 'tooLarge', count: tooLarge })
+  if (unreadable) missing.push({ kind: 'unreadable', count: unreadable })
+  if (stopped) missing.unshift({ kind: 'diffCut', included, total: files.length, maxBytes })
+  const notes = missing.map(notePasted)
   const truncated = stopped || listTruncated || listed < files.length || head.cut
+  // i18n-exempt: texte envoyé à Claude
   if (files.length === 0) diff = '(aucun changement)\n'
+  // i18n-exempt: texte envoyé à Claude
   const tail = notes.length ? `[Contexte incomplet : ${notes.join(' ; ')}. Le reste se lit dans le dépôt.]` : ''
   let pasted = `${intro}${diff}${tail}`.trim()
   // Garde finale : jamais au-delà de la borne annoncée.
   if (utf8Bytes(pasted) > maxBytes) {
+    // i18n-exempt: texte envoyé à Claude
     const end = '\n[Contexte coupé à la limite.]'
     pasted = `${cutBytes(pasted, maxBytes - utf8Bytes(end)).text}${end}`
   }
-  return { pasted, bytes: utf8Bytes(pasted), included, total: files.length, truncated, notes }
+  return { pasted, bytes: utf8Bytes(pasted), included, total: files.length, truncated, notes, missing }
 }
 
 /** Lectures de diffs menées en même temps au plus. */

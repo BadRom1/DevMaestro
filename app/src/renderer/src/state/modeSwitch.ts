@@ -14,7 +14,8 @@
  * - Un message d'erreur disparaît dès que le mode de la session change.
  */
 import { ErrorCode, type SettableMode } from '../../../shared/protocol'
-import { describeError } from './errors'
+import { t } from '../../../shared/i18n'
+import { daemonText, describeError } from './errors'
 import { modeLabel } from './format'
 
 export const MODE_CONFIRM_MS = 3000
@@ -44,7 +45,7 @@ export type ModeEvent =
   /** Réponse du démon : nombre de Shift+Tab envoyés. */
   | { type: 'sent'; sent: unknown; mode: string | null }
   /** Échec de l'appel. */
-  | { type: 'failed'; code: number | null; message: string; mode: string | null; now: number }
+  | { type: 'failed'; code: number | null; message: string; mode: string | null; now: number; data?: unknown }
   /** Le réessai programmé part maintenant. */
   | { type: 'retrying'; now: number }
   /** Nouvel état de la session (`session.updated`). */
@@ -64,18 +65,18 @@ export function isNotYetConfirmed(code: number | null, message: string): boolean
   return code === ErrorCode.InvalidState && /pas encore confirm/i.test(message)
 }
 
-function failure(code: number | null, message: string): string {
+function failure(code: number | null, message: string, data?: unknown): string {
   if (code === ErrorCode.InvalidState) {
-    // Raison donnée par le démon, en français (« la session ne tourne pas »…).
+    // Raison donnée par le démon, en français (« la session ne tourne pas »…) : texte libre, marqué hors du français.
     return message.trim()
-      ? `Changement de mode impossible : ${message.trim()}`
-      : 'Changement de mode impossible dans l’état actuel de la session.'
+      ? t('conversation.mode.failed', { reason: daemonText(message.trim()) })
+      : t('conversation.mode.failedState')
   }
-  const text = code === null ? message : describeError(code, message)
-  // Le texte du démon (-32014) commence déjà par « changement de mode impossible ».
-  const prefix = 'changement de mode impossible'
+  const text = code === null ? message : describeError(code, message, data)
+  // Le texte du -32014 (démon, ou sa traduction par `describeError`) commence déjà par « changement de mode impossible ».
+  const prefix = t('conversation.mode.failedPrefix')
   if (text.toLowerCase().startsWith(prefix)) return text.charAt(0).toUpperCase() + text.slice(1)
-  return `Changement de mode impossible : ${text}`
+  return t('conversation.mode.failed', { reason: text })
 }
 
 export function modeReducer(s: ModeSwitch, e: ModeEvent): ModeSwitch {
@@ -94,7 +95,7 @@ export function modeReducer(s: ModeSwitch, e: ModeEvent): ModeSwitch {
       if (isNotYetConfirmed(e.code, e.message) && !s.retried) {
         return { ...s, retried: true, retryAt: e.now + MODE_RETRY_MS, deadline: e.now + MODE_RETRY_MS + MODE_CONFIRM_MS }
       }
-      return { phase: 'idle', error: failure(e.code, e.message), errorMode: normalizeMode(e.mode) }
+      return { phase: 'idle', error: failure(e.code, e.message, e.data), errorMode: normalizeMode(e.mode) }
     case 'retrying':
       if (s.phase !== 'pending' || s.retryAt === null) return s
       return { ...s, retryAt: null, deadline: e.now + MODE_CONFIRM_MS }
@@ -112,7 +113,7 @@ export function modeReducer(s: ModeSwitch, e: ModeEvent): ModeSwitch {
       if (normalizeMode(e.mode) === s.target) return idleMode
       return {
         phase: 'idle',
-        error: `Le passage en « ${modeLabel(s.target)} » n’a pas été confirmé : la session est en « ${modeLabel(e.mode)} ».`,
+        error: t('conversation.mode.notConfirmed', { target: modeLabel(s.target), mode: modeLabel(e.mode) }),
         errorMode: normalizeMode(e.mode),
       }
     }

@@ -36,7 +36,7 @@ import {
   setRatio,
   splitZone,
   TAB_IDS,
-  TAB_LABELS,
+  tabLabel,
   zoneOfTab,
   type DropRegion,
   type Layout,
@@ -45,6 +45,8 @@ import {
   type TabId,
   type Zone,
 } from '../state/layout'
+import type { PlainKey } from '../../../shared/i18n'
+import { useT } from '../i18n'
 
 const DRAG_TYPE = 'application/x-devmaestro-tab'
 
@@ -66,10 +68,10 @@ function bodyStyle(r: Rect): CSSProperties {
   return { left: pct(r.x), top: `calc(${pct(r.y)} + var(--zt-h))`, width: pct(r.w), height: `calc(${pct(r.h)} - var(--zt-h))` }
 }
 
-const DROP_TEXT: Record<DropRegion, string> = {
-  right: 'Scinder à droite',
-  bottom: 'Scinder en bas',
-  center: 'Déplacer ici',
+const DROP_TEXT: Record<DropRegion, PlainKey> = {
+  right: 'shell.zone.splitRight',
+  bottom: 'shell.zone.splitDown',
+  center: 'shell.zone.moveHere',
 }
 
 export function ZoneGrid({
@@ -110,6 +112,7 @@ export function ZoneGrid({
   onReset: (focusTab: TabId) => void
   renderPanel: (tab: TabId, visible: boolean) => ReactNode
 }) {
+  const t = useT()
   const box = useRef<HTMLDivElement>(null)
   /** Disposition affichée. */
   const view = useMemo(() => (unavailable.length ? removeTabs(layout, unavailable) : layout), [layout, unavailable])
@@ -226,7 +229,7 @@ export function ZoneGrid({
             <div
               className="tabs"
               role="tablist"
-              aria-label={multi ? `Zone ${i + 1} sur ${zones.length}${cur ? ' (zone courante)' : ''}` : 'Vues de la session'}
+              aria-label={multi ? cur ? t('shell.zone.labelCurrent', { n: i + 1, total: zones.length }) : t('shell.zone.label', { n: i + 1, total: zones.length }) : t('shell.zone.views')}
             >
               {zone.tabs.map((k) => (
                 <button
@@ -253,14 +256,14 @@ export function ZoneGrid({
                   }}
                   onDragEnd={endDrag}
                 >
-                  <span className="tlabel">{TAB_LABELS[k]}</span>
+                  <span className="tlabel">{tabLabel(k)}</span>
                   {extras.get(k)}
                 </button>
               ))}
             </div>
             {hover?.zone === zone.id && hover.region === 'center' && (
               <span className="zdrop-label in-bar" aria-hidden="true">
-                {DROP_TEXT.center}
+                {t(DROP_TEXT.center)}
               </span>
             )}
             <ZoneMenu
@@ -323,7 +326,7 @@ export function ZoneGrid({
           >
             {hover?.zone === r.zone.id && (
               <div className={`zdrop-hint ${hover.region}`}>
-                <span className="zdrop-label">{DROP_TEXT[hover.region]}</span>
+                <span className="zdrop-label">{t(DROP_TEXT[hover.region])}</span>
               </div>
             )}
           </div>
@@ -346,6 +349,7 @@ function ZoneSeparator({
   layout: Layout
   onChange: (next: Layout, opts?: { persist?: boolean }) => void
 }) {
+  const t = useT()
   const s = rect.split
   const row = s.dir === 'row'
   const drag = useRef<{ last: Layout | null } | null>(null)
@@ -388,14 +392,14 @@ function ZoneSeparator({
       className={`zsep ${row ? 'v' : 'h'}`}
       role="separator"
       aria-orientation={row ? 'vertical' : 'horizontal'}
-      aria-label={row ? 'Largeur des zones (flèches gauche et droite ; Entrée : moitié)' : 'Hauteur des zones (flèches haut et bas ; Entrée : moitié)'}
+      aria-label={row ? t('shell.zone.sepWidth') : t('shell.zone.sepHeight')}
       aria-valuemin={Math.round(MIN_RATIO * 100)}
       aria-valuemax={Math.round(MAX_RATIO * 100)}
       aria-valuenow={value}
-      aria-valuetext={`${value} % pour la zone ${row ? 'de gauche' : 'du haut'}`}
+      aria-valuetext={row ? t('shell.zone.sepValueLeft', { n: value }) : t('shell.zone.sepValueTop', { n: value })}
       tabIndex={0}
       style={style}
-      title="Glisser pour redimensionner ; double-clic : moitié"
+      title={t('shell.zone.sepTitle')}
       onPointerDown={(e) => {
         if (e.button !== 0) return
         e.preventDefault()
@@ -460,16 +464,17 @@ function ZoneMenu({
   onMove: (target: string) => void
   onReset: () => void
 }) {
+  const t = useT()
   const menu = useRef<HTMLDivElement>(null)
   const splittable = canSplit(layout, tab, zone.id)
   const items: { key: string; label: string; disabled?: boolean; run: () => void }[] = [
-    { key: 'right', label: 'Scinder à droite', disabled: !splittable, run: () => onSplit('right') },
-    { key: 'bottom', label: 'Scinder en bas', disabled: !splittable, run: () => onSplit('bottom') },
+    { key: 'right', label: t('shell.zone.splitRight'), disabled: !splittable, run: () => onSplit('right') },
+    { key: 'bottom', label: t('shell.zone.splitDown'), disabled: !splittable, run: () => onSplit('bottom') },
     ...zones
       .map((z, j) => ({ z, j }))
       .filter(({ z }) => z.id !== zone.id)
-      .map(({ z, j }) => ({ key: `move-${z.id}`, label: `Déplacer vers la zone ${j + 1}`, run: () => onMove(z.id) })),
-    { key: 'reset', label: 'Réinitialiser la disposition', run: onReset },
+      .map(({ z, j }) => ({ key: `move-${z.id}`, label: t('shell.zone.moveTo', { n: j + 1 }), run: () => onMove(z.id) })),
+    { key: 'reset', label: t('shell.zone.reset'), run: onReset },
   ]
 
   useEffect(() => {
@@ -511,14 +516,14 @@ function ZoneMenu({
         className="btn ghost sm zmenu-btn"
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={`Disposition de l’onglet ${TAB_LABELS[tab]}${count > 1 ? ` (zone ${index + 1} sur ${count})` : ''}`}
-        title="Disposition : scinder, déplacer vers une autre zone, réinitialiser"
+        aria-label={count > 1 ? t('shell.zone.menuLabelZone', { tab: tabLabel(tab), n: index + 1, total: count }) : t('shell.zone.menuLabel', { tab: tabLabel(tab) })}
+        title={t('shell.zone.menuTitle')}
         onClick={() => (open ? onClose(false) : onOpen())}
       >
         ⋯
       </button>
       {open && (
-        <div className="zmenu-pop" role="menu" aria-label={`Disposition de l’onglet ${TAB_LABELS[tab]}`} ref={menu} onKeyDown={onKey}>
+        <div className="zmenu-pop" role="menu" aria-label={t('shell.zone.menuLabel', { tab: tabLabel(tab) })} ref={menu} onKeyDown={onKey}>
           {items.map((it) => (
             <button
               key={it.key}
@@ -527,7 +532,7 @@ function ZoneMenu({
               tabIndex={-1}
               aria-disabled={it.disabled || undefined}
               className={it.key === 'reset' ? 'sep' : undefined}
-              title={it.disabled ? (zone.tabs.length === 1 && zone.tabs[0] === tab ? 'Dernier onglet de la zone' : 'Quatre zones au plus') : undefined}
+              title={it.disabled ? (zone.tabs.length === 1 && zone.tabs[0] === tab ? t('shell.zone.lastTab') : t('shell.zone.maxZones')) : undefined}
               onClick={() => {
                 if (it.disabled) return
                 onClose(false)

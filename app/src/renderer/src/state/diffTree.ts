@@ -12,6 +12,7 @@
  * dossier (la règle « non suivis à la fin » de la liste ne survit pas à
  * l'imbrication).
  */
+import { collator } from '../../../shared/i18n'
 import type { DiffFile } from '../../../shared/protocol'
 import type { KeyValueStorage } from './collapse'
 
@@ -67,11 +68,9 @@ export interface FileNode {
 
 export type TreeNode = DirNode | FileNode
 
-const collator = new Intl.Collator('fr', { numeric: true, sensitivity: 'base' })
-
 function byLabel(a: TreeNode, b: TreeNode): number {
   // Dossiers d'abord, puis fichiers, chacun dans l'ordre naturel.
-  return Number(a.kind === 'file') - Number(b.kind === 'file') || collator.compare(a.label, b.label) || (a.label < b.label ? -1 : 1)
+  return Number(a.kind === 'file') - Number(b.kind === 'file') || collator().compare(a.label, b.label) || (a.label < b.label ? -1 : 1)
 }
 
 function newDir(key: string, label: string): DirNode {

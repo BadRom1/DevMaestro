@@ -16,9 +16,11 @@ import {
   type RefObject,
 } from 'react'
 
+import { t as tGlobal } from '../../../shared/i18n'
 import type { DiffFile, FileDiff } from '../../../shared/protocol'
+import { useI18n, useT } from '../i18n'
 import { browserStorage } from '../state/collapse'
-import { STATUS_LABELS, countLabel, fileCounts, linesLabel, stepFile, type DiffRow, type LineAnchor } from '../state/diff'
+import { additionsLabel, countLabel, deletionsLabel, fileCounts, statusLabel, stepFile, type DiffRow, type LineAnchor } from '../state/diff'
 import {
   ancestorKeys,
   buildDiffTree,
@@ -211,15 +213,16 @@ export function fileKeys(
 }
 
 function commentsWord(n: number): string {
-  return n ? `, ${n} commentaire${n > 1 ? 's' : ''}` : ''
+  return n ? `, ${tGlobal('files.commentsCount', { count: n })}` : ''
 }
 
 function fileAria(f: DiffFile, n: number, isSeen: boolean): string {
-  return `${f.path}, ${STATUS_LABELS[f.status]}, ${linesLabel(f.additions, 'ajout')}, ${linesLabel(f.deletions, 'suppression')}${commentsWord(n)}${isSeen ? ', vu' : ''}`
+  return `${f.path}, ${statusLabel(f.status)}, ${additionsLabel(f.additions)}, ${deletionsLabel(f.deletions)}${commentsWord(n)}${isSeen ? `, ${tGlobal('files.reader.seen')}` : ''}`
 }
 
 function Counts({ binary, additions, deletions, unknown = false }: { binary?: boolean; additions: number | null; deletions: number | null; unknown?: boolean }) {
-  if (binary) return <>binaire</>
+  const t = useT()
+  if (binary) return <>{t('files.reader.binary')}</>
   return (
     <>
       <span className="plus">
@@ -236,13 +239,14 @@ function Counts({ binary, additions, deletions, unknown = false }: { binary?: bo
 
 /** Bascule Liste / Arborescence (choix retenu pour tous les lecteurs). */
 function ModeToggle({ nav }: { nav: FileNav }) {
+  const t = useT()
   return (
-    <div className="seg fmode" role="group" aria-label="Affichage des fichiers">
+    <div className="seg fmode" role="group" aria-label={t('files.reader.modeLabel')}>
       <button type="button" aria-pressed={nav.mode === 'list'} onClick={() => nav.setMode('list')}>
-        Liste
+        {t('files.reader.list')}
       </button>
       <button type="button" aria-pressed={nav.mode === 'tree'} onClick={() => nav.setMode('tree')}>
-        Arborescence
+        {t('files.reader.tree')}
       </button>
     </div>
   )
@@ -276,6 +280,7 @@ export function DiffFileList({
   /** Mode et arbre (`useFileNav`) ; absent : liste à plat sans bascule. */
   nav?: FileNav
 }) {
+  const { t, rich } = useI18n()
   const tree = nav?.mode === 'tree' && files.length > 0 ? nav : null
   const visible = tree ? tree.rows.filter((r) => r.visible) : []
   const selectedVisible = visible.some((r) => r.node.kind === 'file' && r.node.key === selected)
@@ -287,8 +292,10 @@ export function DiffFileList({
       {tree ? (
         <ul role="tree" aria-label={label} className="dtree">
           {visible.map((r, i) => {
+            // i18n-exempt: valeur CSS (largeur calculée)
             const style = { paddingLeft: `${8 + r.depth * 14}px` }
             const common = {
+              // i18n-exempt: rôle ARIA (identifiant technique)
               role: 'treeitem',
               'aria-level': r.depth + 1,
               'aria-setsize': r.size,
@@ -312,7 +319,15 @@ export function DiffFileList({
                   data-dir={d.key}
                   tabIndex={!selectedVisible && i === 0 ? 0 : -1}
                   aria-expanded={r.expanded}
-                  aria-label={`Dossier ${d.label}, ${r.expanded ? 'déplié' : 'replié'}, ${count} fichier${count > 1 ? 's' : ''}, ${linesLabel(d.additions, 'ajout')}, ${linesLabel(d.deletions, 'suppression')}${d.unknown ? ' (au moins un fichier non compté)' : ''}${commentsWord(n)}`}
+                  aria-label={t('files.reader.dirAria', {
+                    name: d.label,
+                    state: r.expanded ? t('files.reader.expanded') : t('files.reader.collapsed'),
+                    files: t('files.filesCount', { count }),
+                    additions: additionsLabel(d.additions),
+                    deletions: deletionsLabel(d.deletions),
+                    unknown: d.unknown ? t('files.reader.someUncounted') : '',
+                    comments: commentsWord(n),
+                  })}
                   onClick={() => tree.setExpanded(d.key, !r.expanded)}
                 >
                   <span className="chev" aria-hidden="true">
@@ -387,17 +402,17 @@ export function DiffFileList({
         </ul>
       )}
       <p className="hint pad">
-        <kbd>j</kbd> / <kbd>k</kbd> : fichier suivant / précédent
+        {rich('files.reader.navHint', { j: <kbd>j</kbd>, k: <kbd>k</kbd> })}
         {seen && (
           <>
             {' · '}
-            <kbd>l</kbd> : vu / non vu
+            {rich('files.reader.seenHint', { l: <kbd>l</kbd> })}
           </>
         )}
         {tree && (
           <>
             {' · '}
-            <kbd>←</kbd> / <kbd>→</kbd> : replier / déplier
+            {rich('files.reader.foldHint', { left: <kbd>←</kbd>, right: <kbd>→</kbd> })}
           </>
         )}
       </p>
@@ -411,14 +426,15 @@ export function DiffFileList({
  * sait pas.
  */
 export function FileHeadCounts({ file, fileDiff }: { file: DiffFile; fileDiff: FileDiff | null | undefined }) {
+  const t = useT()
   if (file.binary || fileDiff?.binary) {
-    return <span className="fcounts hint">binaire</span>
+    return <span className="fcounts hint">{t('files.reader.binary')}</span>
   }
   const c = fileCounts(file, fileDiff)
   if (!c) return null
   return (
     <span className="fcounts">
-      <span className="sr-only">{`${linesLabel(c.additions, 'ajout')}, ${linesLabel(c.deletions, 'suppression')}`}</span>
+      <span className="sr-only">{`${additionsLabel(c.additions)}, ${deletionsLabel(c.deletions)}`}</span>
       <span aria-hidden="true">
         <Counts additions={c.additions} deletions={c.deletions} />
       </span>
@@ -450,7 +466,7 @@ export function DiffTable({
   commentsAt,
   editingAt,
   onEdit,
-  pendingLabel = 'Toi · commentaire en attente',
+  pendingLabel,
   maxChars,
   readOnly = false,
 }: {
@@ -470,6 +486,8 @@ export function DiffTable({
   /** « + » d'une ligne : ouvre la boîte de commentaire. */
   onEdit: (a: LineAnchor, lineText: string) => void
 }) {
+  const t = useT()
+  const pending = pendingLabel ?? t('files.reader.pending')
   return (
     <table className="code">
       <tbody>
@@ -494,7 +512,7 @@ export function DiffTable({
                   {a && !full && !readOnly && (
                     <button
                       type="button"
-                      aria-label={`Commenter la ligne ${a.line} (${a.side === 'new' ? 'nouvelle' : 'ancienne'} version)`}
+                      aria-label={t('files.reader.commentLine', { line: a.line, version: a.side === 'new' ? t('files.newVersion') : t('files.oldVersion') })}
                       onClick={() => onEdit(a, r.text)}
                     >
                       +
@@ -507,7 +525,7 @@ export function DiffTable({
                   <span className="sign" aria-hidden="true">
                     {sign}{' '}
                   </span>
-                  <span className="sr-only">{r.kind === 'add' ? 'ajout : ' : r.kind === 'del' ? 'suppression : ' : ''}</span>
+                  <span className="sr-only">{r.kind === 'add' ? t('files.reader.srAdd') : r.kind === 'del' ? t('files.reader.srDel') : ''}</span>
                   {r.text}
                 </td>
               </tr>
@@ -516,11 +534,11 @@ export function DiffTable({
                   <td colSpan={4}>
                     <div className="cbox">
                       <div className="who">
-                        <span>{pendingLabel}</span>
+                        <span>{pending}</span>
                         <button
                           type="button"
                           className="btn sm ghost"
-                          aria-label={`Supprimer le commentaire de la ligne ${c.line}`}
+                          aria-label={t('files.reader.deleteComment', { line: c.line })}
                           onClick={() => review({ type: 'delete', id: c.id })}
                         >
                           ×

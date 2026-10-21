@@ -8,6 +8,7 @@
 import { useEffect, useState } from 'react'
 
 import { call, errorCode } from '../api'
+import { useT } from '../i18n'
 import { BRANCH_PULL_REFRESH_MS, branchPullOf, checksLabel, pullsErrorKind, type BranchPull } from '../state/forgePulls'
 import { branchNameProblem } from '../../../shared/worktrees'
 import { ForgeBadge } from './PullsPanel'
@@ -51,10 +52,13 @@ export function useBranchPull(root: string | null, branch: string | null, enable
 }
 
 export function PullChip({ pull, onOpen }: { pull: BranchPull; onOpen?: () => void }) {
+  const t = useT()
   const ci = checksLabel(pull.checks)
-  const title = `Demande de fusion #${pull.number}${pull.title ? ` : ${pull.title}` : ''}${pull.draft ? ' (brouillon)' : ''} · ${ci.label}`
+  const head = pull.title ? t('forge.pulls.chip.titleWith', { number: pull.number, title: pull.title }) : t('forge.pulls.chip.title', { number: pull.number })
+  const title = `${head}${pull.draft ? t('forge.pulls.chip.draft') : ''} · ${ci.label}`
   const body = (
     <>
+      {/* i18n-exempt: abréviation « PR » gardée dans les deux langues */}
       <span className="mono">PR #{pull.number}</span>
       <ForgeBadge b={ci} className="sm" />
     </>
@@ -67,7 +71,7 @@ export function PullChip({ pull, onOpen }: { pull: BranchPull; onOpen?: () => vo
     )
   }
   return (
-    <button type="button" className="chip pull-chip" title={`${title} (voir le détail)`} aria-label={`${title}, voir le détail`} onClick={onOpen}>
+    <button type="button" className="chip pull-chip" title={t('forge.pulls.chip.openTitle', { title })} aria-label={t('forge.pulls.chip.openAria', { title })} onClick={onOpen}>
       {body}
     </button>
   )

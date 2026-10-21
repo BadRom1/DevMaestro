@@ -3,6 +3,7 @@
  * Recherche sans accents ni majuscules dans le nom et la description ;
  * étiquettes choisies dans l'ordre du choix ; option active bornée.
  */
+import { t } from '../../../shared/i18n'
 import type { RepoLabel } from '../../../shared/protocol'
 
 /** Texte comparable : sans accents, minuscules, blancs réduits. */
@@ -44,6 +45,6 @@ export function moveActive(active: number, count: number, delta: 1 | -1): number
 
 /** Résumé lu par les lecteurs d'écran : « 2 étiquettes choisies : bug, interface ». */
 export function selectionSummary(selected: readonly string[]): string {
-  if (selected.length === 0) return 'Aucune étiquette choisie'
-  return `${selected.length} étiquette${selected.length > 1 ? 's' : ''} choisie${selected.length > 1 ? 's' : ''} : ${selected.join(', ')}`
+  if (selected.length === 0) return t('forge.issues.labels.noneSelected')
+  return t('forge.issues.labels.selected', { count: selected.length, names: selected.join(', ') })
 }

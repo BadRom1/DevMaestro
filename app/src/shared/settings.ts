@@ -8,7 +8,9 @@
  * - `applyPatch` : réglages + modification validée.
  */
 
-import { MAX_STORED_TEMPLATE, PROMPT_IDS, defaultPrompt, isPromptId, overridesFrom, promptDef, promptProblem, type PromptId, type PromptSettings } from './prompts'
+import { t } from './i18n'
+import { DEFAULT_LANGUAGE, LANGUAGE_PREFS, isLanguagePref, type LanguagePref } from './i18n/core'
+import { MAX_STORED_TEMPLATE, PROMPT_IDS, isDefaultPrompt, isPromptId, overridesFrom, promptDef, promptProblem, type PromptId, type PromptSettings } from './prompts'
 import { DELIVERY_MODES, type DeliveryMode } from './protocol'
 import { DEFAULT_WORKTREE_LOCATIONS, branchPrefixProblem, type DefaultWorktreeLocation } from './worktrees'
 
@@ -136,6 +138,7 @@ const LEGACY_DELIVERY_TEMPLATES = { prTemplate: 'deliveryPr', mergeTemplate: 'de
  */
 function promptsFrom(raw: Record<string, unknown>, warnings: string[]): PromptSettings {
   const p = isObj(raw.prompts) ? raw.prompts : {}
+  // i18n-exempt: journal technique (avertissements de lecture des réglages)
   if (raw.prompts !== undefined && !isObj(raw.prompts)) warnings.push('consignes illisibles : textes par défaut')
   const global = overridesFrom(p.global, null, warnings)
   const projects: Record<string, PromptSettings['projects'][string]> = {}
@@ -152,13 +155,16 @@ function promptsFrom(raw: Record<string, unknown>, warnings: string[]): PromptSe
       const t = src[field]
       if (t === undefined || t === '' || Object.prototype.hasOwnProperty.call(into, id)) continue
       if (typeof t !== 'string' || t.length > MAX_STORED_TEMPLATE) {
+        // i18n-exempt: journal technique (avertissements de lecture des réglages)
         warnings.push(`ancien modèle « ${promptDef(id).label} » ${where} illisible ou trop long : retiré`)
         continue
       }
       const problem = promptProblem(id, t)
       // Invalide : gardé (montré dans Réglages → Consignes pour être corrigé), jamais utilisé.
+      // i18n-exempt: journal technique (avertissements de lecture des réglages)
       if (problem) warnings.push(`ancien modèle « ${promptDef(id).label} » ${where} invalide (${problem}) : gardé pour correction, non utilisé`)
-      if (t !== defaultPrompt(id)) into[id] = t
+      // Égal à un des textes par défaut (français ou anglais) : pas une surcharge.
+      if (!isDefaultPrompt(id, t)) into[id] = t
     }
   }
   const d = raw.delivery
@@ -169,6 +175,7 @@ function promptsFrom(raw: Record<string, unknown>, warnings: string[]): PromptSe
         if (!isProjectKey(k) || !isObj(pd)) continue
         if (!projects[k] && Object.keys(projects).length >= MAX_PROJECT_PROFILES) break
         const ov = { ...(projects[k] ?? {}) }
+        // i18n-exempt: journal technique (avertissements de lecture des réglages)
         legacy(pd, ov, `du projet ${k}`)
         if (Object.keys(ov).length) projects[k] = ov
       }
@@ -232,6 +239,7 @@ function deliveryPatch(v: unknown): NonNullable<SettingsPatch['delivery']> {
   for (const k of Object.keys(v)) {
     if (!['notifyCiFailure', 'projects'].includes(k)) {
       throw new SettingsError(
+        // i18n-exempt: validation stricte d'un patch, détail technique (contrat du lot 20)
         k === 'prTemplate' || k === 'mergeTemplate' ? `« delivery.${k} » : les consignes se règlent dans « prompts »` : `réglage inconnu : delivery.${k}`,
       )
     }
@@ -290,6 +298,8 @@ export interface UiSettings {
   zoom: number
   /** Onglet ouvert par défaut dans le volet d'une session (v0.3, lot 11) ; « Terminal » tant que l'utilisateur n'a pas choisi. */
   sessionTab: SessionTab
+  /** Langue de l'interface (v0.3, lot 20) : « system » suit la langue du système (français en repli). */
+  language: LanguagePref
 }
 
 /** Onglets proposés comme onglet par défaut d'une session. */
@@ -371,7 +381,7 @@ export interface SettingsPatch {
     branchPrefix?: string
     notifyIntegrated?: boolean
   }
-  ui?: { zoom?: number; sessionTab?: SessionTab }
+  ui?: { zoom?: number; sessionTab?: SessionTab; language?: LanguagePref }
   forges?: { enabled: boolean }
   /** Champs fournis seulement ; `projects` fusionné (`null` retire l'entrée, une entrée remplace celle du projet). */
   delivery?: {
@@ -407,7 +417,7 @@ export function defaultSettings(): AppSettings {
     profileLabels: {},
     view: 'projet',
     worktrees: { location: 'sibling', projectLocations: {}, branchPrefix: '', notifyIntegrated: true },
-    ui: { zoom: DEFAULT_ZOOM, sessionTab: DEFAULT_SESSION_TAB },
+    ui: { zoom: DEFAULT_ZOOM, sessionTab: DEFAULT_SESSION_TAB, language: DEFAULT_LANGUAGE },
     forges: { enabled: true },
     runners: { confirmed: {} },
     delivery: { notifyCiFailure: true, projects: {} },
@@ -451,13 +461,13 @@ function chars(s: string): number {
 
 /** Libellés valides (blancs de bord retirés), ou message d'erreur en français. */
 export function checkProfileLabel(v: unknown): ProfileLabel | string {
-  if (!isObj(v) || typeof v.long !== 'string' || typeof v.short !== 'string') return 'libellés attendus : { long, short }'
+  if (!isObj(v) || typeof v.long !== 'string' || typeof v.short !== 'string') return t('settings.profileLabel.expected')
   const long = v.long.trim()
   const short = v.short.trim()
-  if (long === '' || chars(long) > MAX_LONG_LABEL) return `le libellé long doit compter de 1 à ${MAX_LONG_LABEL} caractères`
-  if (/\p{Cc}/u.test(long)) return 'le libellé long ne doit pas contenir de caractère de contrôle'
+  if (long === '' || chars(long) > MAX_LONG_LABEL) return t('settings.profileLabel.longLength', { max: MAX_LONG_LABEL })
+  if (/\p{Cc}/u.test(long)) return t('settings.profileLabel.longControl')
   if (chars(short) < 1 || chars(short) > MAX_SHORT_LABEL || INVISIBLE.test(short)) {
-    return `le libellé court doit compter de 1 à ${MAX_SHORT_LABEL} caractères visibles, sans espace`
+    return t('settings.profileLabel.shortLength', { max: MAX_SHORT_LABEL })
   }
   return { long, short }
 }
@@ -474,7 +484,7 @@ function capitalize(s: string): string {
  */
 export function profileLabel(name: string, labels: Record<string, ProfileLabel> | undefined): ProfileLabel {
   const set = labels?.[name]
-  const long = set?.long ?? (name === 'default' ? 'Défaut' : capitalize(name))
+  const long = set?.long ?? (name === 'default' ? t('settings.profileLabel.default') : capitalize(name))
   const firstVisible = [...long].find((c) => !INVISIBLE.test(c)) ?? '?'
   return { long, short: set?.short ?? firstVisible.toLocaleUpperCase('fr-FR') }
 }
@@ -664,6 +674,7 @@ export function readSettings(raw: unknown): { settings: AppSettings; warnings: s
     ui: {
       zoom: isObj(raw.ui) ? snapZoom(raw.ui.zoom) : DEFAULT_ZOOM,
       sessionTab: isObj(raw.ui) && isSessionTab(raw.ui.sessionTab) ? raw.ui.sessionTab : DEFAULT_SESSION_TAB,
+      language: isObj(raw.ui) && isLanguagePref(raw.ui.language) ? raw.ui.language : DEFAULT_LANGUAGE,
     },
     forges: {
       enabled: isObj(raw.forges) && typeof raw.forges.enabled === 'boolean' ? raw.forges.enabled : d.forges.enabled,
@@ -725,6 +736,7 @@ export function validatePatch(raw: unknown): SettingsPatch {
   const out: SettingsPatch = {}
   for (const k of Object.keys(raw)) {
     if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view', 'worktrees', 'ui', 'forges', 'delivery', 'prompts'].includes(k)) {
+      // i18n-exempt: validation stricte d'un patch, détail technique (contrat du lot 20)
       throw new SettingsError(k === 'runners' ? 'les commandes acceptées ne se modifient pas depuis la page' : `réglage inconnu : ${k}`)
     }
   }
@@ -786,7 +798,7 @@ export function validatePatch(raw: unknown): SettingsPatch {
 function uiPatch(v: unknown): NonNullable<SettingsPatch['ui']> {
   if (!isObj(v)) throw new SettingsError('« ui » doit être un objet')
   for (const k of Object.keys(v)) {
-    if (k !== 'zoom' && k !== 'sessionTab') throw new SettingsError(`réglage inconnu : ui.${k}`)
+    if (k !== 'zoom' && k !== 'sessionTab' && k !== 'language') throw new SettingsError(`réglage inconnu : ui.${k}`)
   }
   const out: NonNullable<SettingsPatch['ui']> = {}
   if (v.zoom !== undefined) {
@@ -796,6 +808,10 @@ function uiPatch(v: unknown): NonNullable<SettingsPatch['ui']> {
   if (v.sessionTab !== undefined) {
     if (!isSessionTab(v.sessionTab)) throw new SettingsError(`« ui.sessionTab » doit valoir ${SESSION_TABS.join(' ou ')}`)
     out.sessionTab = v.sessionTab
+  }
+  if (v.language !== undefined) {
+    if (!isLanguagePref(v.language)) throw new SettingsError(`« ui.language » doit valoir ${LANGUAGE_PREFS.join(', ')}`)
+    out.language = v.language
   }
   return out
 }

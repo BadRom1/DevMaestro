@@ -15,6 +15,7 @@
 import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 
 import type { RepoLabel } from '../../../shared/protocol'
+import { useT } from '../i18n'
 import { labelColors } from '../state/forge'
 import { filterLabels, moveActive, selectionSummary, toggleLabel } from '../state/labelPicker'
 
@@ -28,7 +29,7 @@ export function LabelPicker({
   selected,
   onChange,
   max = 20,
-  label = 'Étiquettes',
+  label,
   loading = false,
 }: {
   /** Étiquettes du dépôt (nettoyées). */
@@ -36,10 +37,12 @@ export function LabelPicker({
   selected: readonly string[]
   onChange: (next: string[]) => void
   max?: number
+  /** Par défaut « Étiquettes ». */
   label?: string
   /** Liste du dépôt en cours de lecture. */
   loading?: boolean
 }) {
+  const t = useT()
   const uid = useId()
   const input = useRef<HTMLInputElement>(null)
   const root = useRef<HTMLDivElement>(null)
@@ -113,7 +116,7 @@ export function LabelPicker({
       }}
     >
       <span className="lbl" id={`${uid}-l`}>
-        {label}
+        {label ?? t('forge.issues.labels.label')}
       </span>
       <div
         className="lpick-box"
@@ -129,7 +132,7 @@ export function LabelPicker({
           <span key={name} className="lchip">
             <Dot color={byName.get(name)?.color} />
             <span className="lchip-n">{name}</span>
-            <button type="button" className="lchip-x" aria-label={`Retirer l’étiquette ${name}`} title={`Retirer ${name}`} onClick={() => {
+            <button type="button" className="lchip-x" aria-label={t('forge.issues.labels.removeLabel', { name })} title={t('forge.issues.labels.removeTitle', { name })} onClick={() => {
                 onChange(selected.filter((x) => x !== name))
                 // Le bouton disparaît : le focus revient au champ.
                 input.current?.focus()
@@ -150,7 +153,7 @@ export function LabelPicker({
           aria-describedby={`${uid}-s`}
           value={query}
           maxLength={128}
-          placeholder={selected.length ? 'Ajouter…' : 'Toutes'}
+          placeholder={selected.length ? t('forge.issues.labels.add') : t('forge.issues.labels.all')}
           onChange={(e) => {
             setQuery(e.target.value)
             setOpen(true)
@@ -168,11 +171,11 @@ export function LabelPicker({
         <div className="lpick-pop" onMouseDown={(e) => e.preventDefault()}>
           {labels.length === 0 && (
             <p className="hint lpick-empty" role="status">
-              {loading ? 'Chargement des étiquettes du dépôt…' : 'Aucune étiquette dans le dépôt.'}
+              {loading ? t('forge.issues.labels.loading') : t('forge.issues.labels.emptyRepo')}
             </p>
           )}
-          {labels.length > 0 && shown.length === 0 && <p className="hint lpick-empty">Aucune étiquette ne correspond.</p>}
-          {full && <p className="hint lpick-empty">{max} étiquettes au plus : retires-en une pour en ajouter.</p>}
+          {labels.length > 0 && shown.length === 0 && <p className="hint lpick-empty">{t('forge.issues.labels.noMatch')}</p>}
+          {full && <p className="hint lpick-empty">{t('forge.issues.labels.full', { count: max })}</p>}
           <ul role="listbox" id={`${uid}-lb`} aria-multiselectable="true" aria-labelledby={`${uid}-l`} hidden={shown.length === 0}>
             {shown.map((l, i) => {
               const on = selected.includes(l.name)

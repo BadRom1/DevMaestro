@@ -477,7 +477,7 @@ describe('réglage « Onglet par défaut d’une session »', () => {
     expect(normalizeSettings({ ui: { zoom: 100, sessionTab: 'conversation' } }).ui.sessionTab).toBe('conversation')
     expect(normalizeSettings({ ui: { sessionTab: 'diff' } }).ui.sessionTab).toBe('terminal')
     const p = validatePatch({ ui: { sessionTab: 'conversation' } })
-    expect(applyPatch(defaultSettings(), p).ui).toEqual({ zoom: 100, sessionTab: 'conversation' })
+    expect(applyPatch(defaultSettings(), p).ui).toEqual({ zoom: 100, sessionTab: 'conversation', language: 'system' })
     expect(applyPatch(defaultSettings(), validatePatch({ ui: { zoom: 150 } })).ui.sessionTab).toBe('terminal')
     expect(() => validatePatch({ ui: { sessionTab: 'diff' } })).toThrow()
   })

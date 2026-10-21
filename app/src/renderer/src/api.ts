@@ -24,9 +24,9 @@ export async function call<M extends MethodName>(method: M, params: Methods[M]['
   return r.result
 }
 
-/** Message d'erreur à afficher (en français, selon le code du démon). */
+/** Message d'erreur à afficher (dans la langue de l'interface, selon le code du démon). */
 export function errorText(e: unknown): string {
-  if (e instanceof CallError) return describeError(e.failure.code, e.failure.message)
+  if (e instanceof CallError) return describeError(e.failure.code, e.failure.message, e.failure.data)
   if (e instanceof Error) return e.message
   return String(e)
 }

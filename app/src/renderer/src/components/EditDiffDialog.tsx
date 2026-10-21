@@ -5,6 +5,8 @@
  */
 import { useMemo, useState } from 'react'
 
+import type { PlainKey } from '../../../shared/i18n'
+import { useT } from '../i18n'
 import { diffRows } from '../state/diff'
 import { invisibleDifference, lineDiff } from '../state/lineDiff'
 import { emptyDraft } from '../state/review'
@@ -13,10 +15,11 @@ import { Modal } from './Modal'
 
 type Pair = 'disk' | 'mine' | 'overwrite'
 
-const PAIRS: readonly (readonly [Pair, string, string])[] = [
-  ['disk', 'Changements sur le disque', 'De la version ouverte à la version actuelle du fichier (sans doute modifiée par Claude).'],
-  ['mine', 'Mes modifications', 'De la version ouverte à ma version.'],
-  ['overwrite', 'Si j’écrase', 'De la version actuelle du fichier à ma version : ce que « Écraser quand même » changerait.'],
+/** Paires comparées : clé, libellé du bouton, aide (clés du catalogue, traduites au rendu). */
+const PAIRS: readonly (readonly [Pair, PlainKey, PlainKey])[] = [
+  ['disk', 'files.editDiff.disk', 'files.editDiff.diskHelp'],
+  ['mine', 'files.editDiff.mine', 'files.editDiff.mineHelp'],
+  ['overwrite', 'files.editDiff.overwrite', 'files.editDiff.overwriteHelp'],
 ]
 
 const NONE = () => []
@@ -40,6 +43,7 @@ export function EditDiffDialog({
   mine: string
   onClose: () => void
 }) {
+  const t = useT()
   const [pair, setPair] = useState<Pair>(current === null ? 'mine' : 'disk')
   const needsCurrent = pair !== 'mine'
   const result = useMemo(() => {
@@ -51,15 +55,15 @@ export function EditDiffDialog({
     return { ...r, invisible: r.identical ? invisibleDifference(before, after) : null }
   }, [pair, base, current, mine])
   const rows = useMemo(() => (result ? diffRows(result.diff) : []), [result])
-  const help = PAIRS.find(([k]) => k === pair)![2]
+  const help = t(PAIRS.find(([k]) => k === pair)![2])
 
   return (
-    <Modal title={`Différences : ${path}`} onClose={onClose} width={1100}>
+    <Modal title={t('files.editDiff.title', { path })} onClose={onClose} width={1100}>
       <div className="mb">
-        <div className="seg" role="group" aria-label="Versions comparées">
+        <div className="seg" role="group" aria-label={t('files.editDiff.pairsLabel')}>
           {PAIRS.map(([k, l]) => (
             <button key={k} aria-pressed={pair === k} onClick={() => setPair(k)}>
-              {l}
+              {t(l)}
             </button>
           ))}
         </div>
@@ -68,13 +72,13 @@ export function EditDiffDialog({
         </p>
         {needsCurrent && current === null ? (
           <p className="inline-err" role="alert">
-            {currentError ?? 'Version actuelle en cours de lecture…'}
+            {currentError ?? t('files.editDiff.readingCurrent')}
           </p>
         ) : result?.identical ? (
-          <p className="empty">{result.invisible ?? 'Aucune différence.'}</p>
+          <p className="empty">{result.invisible ?? t('files.editDiff.noDifference')}</p>
         ) : (
           <>
-            {result?.approximate && <p className="hint">Trop de différences pour un diff ligne à ligne : les lignes changées sont données en bloc.</p>}
+            {result?.approximate && <p className="hint">{t('files.editDiff.approximate')}</p>}
             <div className="ediff">
               <DiffTable rows={rows} draft={emptyDraft} review={NOOP} full commentsAt={NONE} editingAt={NO} onEdit={NOOP} />
             </div>
@@ -84,7 +88,7 @@ export function EditDiffDialog({
       <div className="mf">
         <span style={{ marginRight: 'auto' }} />
         <button className="btn" data-autofocus onClick={onClose}>
-          Fermer
+          {t('files.close')}
         </button>
       </div>
     </Modal>

@@ -20,6 +20,7 @@ import type {
   PromptEntry,
   SessionActivity,
 } from '../../../shared/protocol'
+import { numberFormat, t } from '../../../shared/i18n'
 
 /* ---------- Fusion des entrées ---------- */
 
@@ -348,10 +349,10 @@ export function conversationReducer(s: ConversationState, a: ConversationAction)
 
 /** Raison d'un segment pour son séparateur (« /clear », reprise…). */
 export function segmentLabel(seg: ConversationSegment | undefined): string {
-  if (!seg) return 'Nouvelle conversation'
-  if (seg.reason === 'clear') return 'Nouvelle conversation (/clear)'
-  if (seg.reason === 'resume') return 'Conversation reprise'
-  return 'Début de la conversation'
+  if (!seg) return t('conversation.segment.new')
+  if (seg.reason === 'clear') return t('conversation.segment.clear')
+  if (seg.reason === 'resume') return t('conversation.segment.resume')
+  return t('conversation.segment.start')
 }
 
 /* ---------- Historique des prompts ---------- */
@@ -397,8 +398,8 @@ export const MAX_PROMPT_BYTES = 256 * 1024
 
 /** Raison pour laquelle le prompt ne peut pas partir, ou `null`. */
 export function promptProblem(text: string): string | null {
-  if (!text.trim()) return 'Le prompt est vide.'
-  if (utf8Length(text) > MAX_PROMPT_BYTES) return 'Le prompt est trop long (256 Kio au plus) : colle-le dans le terminal.'
+  if (!text.trim()) return t('conversation.prompt.empty')
+  if (utf8Length(text) > MAX_PROMPT_BYTES) return t('conversation.prompt.tooLong')
   return null
 }
 
@@ -628,38 +629,38 @@ export function toolIcon(name: string): string {
 
 /** Statut d'un outil : glyphe et texte (jamais la couleur seule). */
 export function toolStatus(result: { status?: unknown } | null | undefined): { key: string; glyph: string; label: string } {
-  if (!result) return { key: 'running', glyph: '…', label: 'en cours' }
-  if (result.status === 'ok') return { key: 'ok', glyph: '✓', label: 'réussi' }
-  if (result.status === 'error') return { key: 'error', glyph: '×', label: 'erreur' }
-  if (result.status === 'interrupted') return { key: 'interrupted', glyph: '■', label: 'interrompu' }
-  return { key: 'other', glyph: '?', label: typeof result.status === 'string' ? result.status : 'statut inconnu' }
+  if (!result) return { key: 'running', glyph: '…', label: t('conversation.status.running') }
+  if (result.status === 'ok') return { key: 'ok', glyph: '✓', label: t('conversation.toolStatus.ok') }
+  if (result.status === 'error') return { key: 'error', glyph: '×', label: t('conversation.toolStatus.error') }
+  if (result.status === 'interrupted') return { key: 'interrupted', glyph: '■', label: t('conversation.status.interrupted') }
+  return { key: 'other', glyph: '?', label: typeof result.status === 'string' ? result.status : t('conversation.status.unknown') }
 }
 
 export function subagentStatusLabel(status: unknown): string {
   switch (status) {
     case 'running':
-      return 'en cours'
+      return t('conversation.status.running')
     case 'done':
-      return 'terminé'
+      return t('conversation.agentStatus.done')
     case 'failed':
-      return 'échoué'
+      return t('conversation.agentStatus.failed')
     case 'interrupted':
-      return 'interrompu'
+      return t('conversation.status.interrupted')
     default:
-      return typeof status === 'string' && status ? status : 'statut inconnu'
+      return typeof status === 'string' && status ? status : t('conversation.status.unknown')
   }
 }
 
 export function promptSourceLabel(source: unknown): string | null {
   switch (source) {
     case 'queued':
-      return 'mis en file'
+      return t('conversation.promptSource.queued')
     case 'suggestion':
-      return 'suggestion acceptée'
+      return t('conversation.promptSource.suggestion')
     case 'system':
-      return 'système'
+      return t('conversation.promptSource.system')
     case 'sdk':
-      return 'programme'
+      return t('conversation.promptSource.sdk')
     default:
       return null
   }
@@ -670,15 +671,15 @@ export function activityLabel(a: SessionActivity | null | undefined): string | n
   if (!a) return null
   switch (a.kind) {
     case 'prompt':
-      return 'Claude écrit…'
+      return t('conversation.activity.prompt')
     case 'tool':
-      return a.tool ? `Outil : ${a.tool}…` : 'Outil en cours…'
+      return a.tool ? t('conversation.activity.tool', { tool: a.tool }) : t('conversation.activity.toolAny')
     case 'subagents':
-      return 'Sous-agents en cours'
+      return t('conversation.activity.subagents')
     case 'compacting':
-      return 'Compaction…'
+      return t('conversation.activity.compacting')
     case 'waiting':
-      return 'Claude attend ta réponse'
+      return t('conversation.activity.waiting')
     default:
       return null
   }
@@ -697,10 +698,10 @@ export function formatElapsed(ms: number): string {
 export function tokensLabel(n: number | null | undefined): string {
   if (typeof n !== 'number' || !Number.isFinite(n)) return '?'
   if (n >= 10_000) return `${Math.round(n / 1000)} k`
-  return n.toLocaleString('fr-FR')
+  return numberFormat().format(n)
 }
 
 /** Taille d'un texte en caractères, lisible (« 1 234 caractères »). */
 export function charsLabel(n: number): string {
-  return `${n.toLocaleString('fr-FR')} caractère${n > 1 ? 's' : ''}`
+  return t('conversation.chars', { count: n, n: numberFormat().format(n) })
 }

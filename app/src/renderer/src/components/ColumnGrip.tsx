@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type RefObject } from 'react'
 
 import { clampColumn, columnMax, COLUMN_BOUNDS, COLUMN_KEY_STEP, type ColumnKey } from '../state/columnWidth'
+import { useT } from '../i18n'
 import { setColumn, useColumns } from './layoutStore'
 
 /**
@@ -72,6 +73,7 @@ export function ColumnGrip({
   max: number
   avail: number | undefined
 }) {
+  const t = useT()
   const b = COLUMN_BOUNDS[column]
   const drag = useRef<{ x: number; width: number; last: number | null } | null>(null)
 
@@ -111,13 +113,13 @@ export function ColumnGrip({
       className="col-grip"
       role="separator"
       aria-orientation="vertical"
-      aria-label={`${label} (flèches gauche et droite ; Entrée : largeur par défaut)`}
+      aria-label={t('shell.columnGrip.label', { label })}
       aria-valuemin={b.min}
       aria-valuemax={max}
       aria-valuenow={width}
-      aria-valuetext={`${width} pixels`}
+      aria-valuetext={t('shell.pixels', { n: width })}
       tabIndex={0}
-      title="Glisser pour redimensionner ; double-clic : largeur par défaut"
+      title={t('shell.columnGrip.title')}
       onPointerDown={onDown}
       onPointerMove={onMove}
       onPointerUp={onUp}
