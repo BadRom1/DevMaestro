@@ -2,41 +2,7 @@ import react from '@vitejs/plugin-react'
 import { defineConfig } from 'electron-vite'
 import type { Plugin } from 'vite'
 
-/**
- * Politique de sécurité du contenu de la page, injectée dans `index.html`.
- *
- * - En production (fichiers locaux) : rien hors de l'app, aucun script en
- *   ligne, aucune connexion réseau. `style-src 'unsafe-inline'` reste
- *   nécessaire : xterm.js insère ses propres éléments `<style>` (barre de
- *   défilement, dimensions des cellules).
- * - En développement : le serveur Vite sert la page et pousse les mises à
- *   jour par WebSocket ; le préambule de React Refresh est un script en ligne.
- */
-const PROD_CSP = [
-  "default-src 'none'",
-  "script-src 'self'",
-  "style-src 'self' 'unsafe-inline'",
-  "font-src 'self'",
-  "img-src 'self' data:",
-  "connect-src 'none'",
-  "base-uri 'none'",
-  "form-action 'none'",
-  "frame-src 'none'",
-  "object-src 'none'",
-].join('; ')
-
-const DEV_CSP = [
-  "default-src 'none'",
-  "script-src 'self' 'unsafe-inline'",
-  "style-src 'self' 'unsafe-inline'",
-  "font-src 'self'",
-  "img-src 'self' data:",
-  "connect-src 'self' ws://localhost:* ws://127.0.0.1:*",
-  "base-uri 'none'",
-  "form-action 'none'",
-  "frame-src 'none'",
-  "object-src 'none'",
-].join('; ')
+import { DEV_CSP, PROD_CSP } from './src/shared/csp'
 
 /**
  * `index.html` porte la politique stricte de production dans une balise

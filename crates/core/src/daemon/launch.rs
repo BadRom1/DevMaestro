@@ -303,6 +303,115 @@ pub fn build(spec: &LaunchSpec<'_>) -> CommandLine {
     }
 }
 
+/// Ce qu'il faut pour lancer un runner (v0.3, lot 14a).
+#[derive(Debug, Clone)]
+pub struct RunnerSpec<'a> {
+    /// Programme résolu dans le `PATH` du démon.
+    pub program: &'a Path,
+    /// Arguments construits par la détection (jamais venus de l'interface).
+    pub args: &'a [String],
+    pub cwd: &'a Path,
+    /// `PORT` du worktree.
+    pub port: u16,
+    /// Noms des variables héritées du démon (voir [`LaunchSpec::inherited_env`]).
+    pub inherited_env: &'a [String],
+    pub scope: Option<ScopeSpec<'a>>,
+}
+
+/// Préfixes des variables héritées retirées de l'environnement d'un runner,
+/// en plus de celles retirées pour `claude` ([`INHERITED_ENV_PREFIXES`],
+/// marqueurs de session) : un runner exécute du **code du dépôt**, qui n'a
+/// pas à recevoir les secrets ni les réglages de l'utilisateur pour Claude
+/// (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_*`,
+/// `CLAUDE_CONFIG_DIR`…).
+pub const RUNNER_REMOVED_PREFIXES: &[&str] = &["ANTHROPIC_", "CLAUDE_", "CLAUDECODE"];
+
+/// Jetons GitHub retirés de l'environnement d'un runner (même raison).
+pub const RUNNER_REMOVED_VARS: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
+/// Variable héritée retirée de l'environnement d'un runner ?
+pub fn removed_for_runner(name: &str) -> bool {
+    INHERITED_ENV_PREFIXES.iter().any(|p| name.starts_with(p))
+        || RUNNER_REMOVED_PREFIXES.iter().any(|p| name.starts_with(p))
+        || RUNNER_REMOVED_VARS.contains(&name)
+        || is_claude_session_marker(name)
+}
+
+/// Construit la commande d'un runner : environnement du démon sans
+/// `ORCH_*`, `DEVMAESTRO_*`, les marqueurs de session Claude Code,
+/// `ANTHROPIC_*`, `CLAUDE_*` / `CLAUDECODE` et les jetons GitHub
+/// ([`removed_for_runner`]) ; plus `PORT`, `HOST=127.0.0.1`, `TERM` et
+/// `COLORTERM`. Le reste (`PATH`, `HOME`, mandataires…) est gardé.
+pub fn build_runner(spec: &RunnerSpec<'_>) -> CommandLine {
+    let env: Vec<(String, OsString)> = vec![
+        ("PORT".into(), spec.port.to_string().into()),
+        ("HOST".into(), "127.0.0.1".into()),
+        ("TERM".into(), "xterm-256color".into()),
+        ("COLORTERM".into(), "truecolor".into()),
+    ];
+    let mut env_remove: Vec<String> = CLAUDE_SESSION_MARKERS
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    for fixed in [ENV_SOCKET, ENV_TOKEN, ENV_SESSION, "CLAUDE_CONFIG_DIR"]
+        .into_iter()
+        .chain(RUNNER_REMOVED_VARS.iter().copied())
+    {
+        env_remove.push(fixed.to_owned());
+    }
+    for key in spec.inherited_env {
+        if removed_for_runner(key) && !env_remove.contains(key) {
+            env_remove.push(key.clone());
+        }
+    }
+    let args: Vec<OsString> = spec.args.iter().map(OsString::from).collect();
+    let (program, args) = match spec.scope {
+        Some(ScopeSpec {
+            systemd_run, unit, ..
+        }) => {
+            let mut wrapped: Vec<OsString> = vec![
+                "--user".into(),
+                "--scope".into(),
+                "--quiet".into(),
+                "--collect".into(),
+                format!("--unit={unit}").into(),
+                "--".into(),
+                spec.program.into(),
+            ];
+            wrapped.extend(args);
+            (systemd_run.to_path_buf(), wrapped)
+        }
+        None => (spec.program.to_path_buf(), args),
+    };
+    let mut env = env;
+    if let Some(dir) = spec.scope.and_then(|s| s.runtime_dir) {
+        env.push(("XDG_RUNTIME_DIR".into(), dir.into()));
+    }
+    CommandLine {
+        program,
+        args,
+        cwd: spec.cwd.to_path_buf(),
+        env,
+        env_remove,
+    }
+}
+
+/// Premier exécutable `name` du `PATH` (un nom simple, sans `/`).
+pub fn find_in_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    std::env::split_paths(path?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|p| is_executable(p))
+}
+
 /// Chemin du binaire `claude` : `DEVMAESTRO_CLAUDE_BIN`, sinon le premier
 /// `claude` exécutable du `PATH`.
 pub fn find_claude(env_bin: Option<OsString>, path: Option<OsString>) -> Option<PathBuf> {
@@ -430,6 +539,101 @@ mod tests {
             assert!(!c.env_remove.iter().any(|r| r == k), "{k}");
         }
         assert_eq!(env(&c, "ORCH_SOCKET").unwrap(), "/run/orchd.sock");
+    }
+
+    #[test]
+    fn runner_environment_and_scope() {
+        let inherited: Vec<String> = [
+            "ORCH_TOKEN",
+            "ORCH_AUTRE",
+            "DEVMAESTRO_CLAUDE_BIN",
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GH_CONFIG_DIR",
+            "HTTPS_PROXY",
+            "PATH",
+        ]
+        .map(String::from)
+        .to_vec();
+        let argv = ["run".to_owned(), "dev".to_owned()];
+        let spec = RunnerSpec {
+            program: Path::new("/usr/bin/pnpm"),
+            args: &argv,
+            cwd: Path::new("/w/app"),
+            port: 41234,
+            inherited_env: &inherited,
+            scope: None,
+        };
+        let c = build_runner(&spec);
+        assert_eq!(c.program, Path::new("/usr/bin/pnpm"));
+        assert_eq!(args(&c), ["run", "dev"]);
+        assert_eq!(env(&c, "PORT").unwrap(), "41234");
+        assert_eq!(env(&c, "HOST").unwrap(), "127.0.0.1");
+        assert!(env(&c, "ORCH_TOKEN").is_none());
+        for k in [
+            "ORCH_TOKEN",
+            "ORCH_SOCKET",
+            "ORCH_SESSION",
+            "ORCH_AUTRE",
+            "DEVMAESTRO_CLAUDE_BIN",
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            "CLAUDE_CONFIG_DIR",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+        ] {
+            assert!(c.env_remove.iter().any(|r| r == k), "{k}");
+        }
+        for k in ["GH_CONFIG_DIR", "HTTPS_PROXY", "PATH"] {
+            assert!(!c.env_remove.iter().any(|r| r == k), "{k}");
+        }
+        let scoped = build_runner(&RunnerSpec {
+            scope: Some(ScopeSpec {
+                systemd_run: Path::new("/usr/bin/systemd-run"),
+                unit: "devmaestro-runner-1-2.scope",
+                runtime_dir: None,
+            }),
+            ..spec
+        });
+        assert_eq!(scoped.program, Path::new("/usr/bin/systemd-run"));
+        assert_eq!(
+            args(&scoped),
+            [
+                "--user",
+                "--scope",
+                "--quiet",
+                "--collect",
+                "--unit=devmaestro-runner-1-2.scope",
+                "--",
+                "/usr/bin/pnpm",
+                "run",
+                "dev",
+            ]
+        );
+    }
+
+    #[test]
+    fn find_in_path_takes_simple_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("outil");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(["relatif".into(), dir.path().to_path_buf()]).unwrap();
+        assert_eq!(find_in_path("outil", Some(&path)), Some(bin));
+        assert_eq!(find_in_path("../outil", Some(&path)), None);
+        assert_eq!(find_in_path("absent", Some(&path)), None);
     }
 
     #[test]

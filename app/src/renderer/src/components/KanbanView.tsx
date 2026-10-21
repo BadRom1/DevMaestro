@@ -5,6 +5,7 @@
  * volet à côté du kanban (on reste dans la vue par statut) ; filtre par projet
  * retenu localement.
  */
+import { runnersIndicator } from '../state/runners'
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 
 import type { PendingRequest, ProjectInfo, Profile, Session, Subagent } from '../../../shared/protocol'
@@ -101,7 +102,10 @@ function Card({
   selected,
   onOpen,
   onOpenIssue,
+  runnersRunning = 0,
 }: {
+  /** Runners en cours de la session (lot 14a). */
+  runnersRunning?: number
   session: Session
   onOpenIssue?: (s: Session) => void
   /** Carte de la session affichée dans le volet. */
@@ -180,6 +184,11 @@ function Card({
           <span className="st running" aria-hidden="true" /> {agentsRunning}
         </span>
       )}
+      {runnersIndicator(runnersRunning) && (
+        <span className="chip ag-chip run-chip" title="Voir l’onglet « Lancer » de la session">
+          <span aria-hidden="true">▶</span> {runnersIndicator(runnersRunning)}
+        </span>
+      )}
       <div className="kmeta hint">
         <span>contexte {formatPct(m?.context_used_pct)}</span>
         <span>{formatUsd(m?.cost_usd)}</span>
@@ -208,6 +217,7 @@ export function KanbanView({
   profiles,
   stale,
   subagents,
+  runnersRunning,
   selectedId,
   paneOpen,
   pane,
@@ -222,6 +232,8 @@ export function KanbanView({
   groups: readonly ProjectGroup[]
   /** Sous-agents connus, par session. */
   subagents: Record<string, Subagent[]>
+  /** Runners en cours, par session (lot 14a). */
+  runnersRunning?: Record<string, number>
   projects: Record<string, ProjectInfo>
   profiles: Profile[]
   /** Demandes signalées « peut-être obsolètes », par session. */
@@ -317,6 +329,7 @@ export function KanbanView({
                       session={s}
                       selected={cardSelected(s.id, showPane, selectedId)}
                       agents={subagents[s.id]}
+                      runnersRunning={runnersRunning?.[s.id] ?? 0}
                       project={projects[s.cwd]}
                       profiles={profiles}
                       stale={stale[s.id] ?? NO_STALE}

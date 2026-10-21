@@ -42,6 +42,8 @@ import { DiffView, useSessionDiff } from './DiffView'
 import { FilesView } from './FilesView'
 import { CommitsView } from './CommitsView'
 import { AgentsView } from './Subagents'
+import { RunnersView } from './RunnersView'
+import { runnersIndicator, type RunnerProc } from '../state/runners'
 import { ConversationView } from './ConversationView'
 import { runningCount, runningLabel } from '../state/subagents'
 import { ForgetConfirm } from './ForgetConfirm'
@@ -50,7 +52,7 @@ import { sortFiles } from '../state/diff'
 import { guardLeave } from '../state/unsaved'
 import type { DiffFile } from '../../../shared/protocol'
 
-type Tab = 'conversation' | 'terminal' | 'diff' | 'commits' | 'files' | 'agents'
+type Tab = 'conversation' | 'terminal' | 'diff' | 'commits' | 'files' | 'agents' | 'runners'
 
 const NO_FILES: readonly DiffFile[] = []
 
@@ -387,7 +389,17 @@ export function SessionPane({
   agentId,
   onSelectAgent,
   openAgents,
+  runnersSupported,
+  runnersRunning,
+  onRunnersRunning,
+  onRunnersUnsupported,
 }: {
+  /** Le démon connaît les runners (lot 14a) ; `false` : onglet « Lancer » masqué. */
+  runnersSupported: boolean | null
+  /** Exécutions en cours de la session affichée (badge de l'onglet). */
+  runnersRunning: number
+  onRunnersRunning: (sessionId: string, running: RunnerProc[]) => void
+  onRunnersUnsupported: () => void
   session: Session | null
   /** Sous-agents de la session affichée ; `undefined` tant que la liste est inconnue. */
   agents: readonly Subagent[] | undefined
@@ -467,7 +479,7 @@ export function SessionPane({
   const diff = useSessionDiff(
     session?.id ?? null,
     diffSeq,
-    (tab !== 'terminal' && tab !== 'conversation') || (!!session && diffOpened.has(session.id)),
+    (tab !== 'terminal' && tab !== 'conversation' && tab !== 'runners') || (!!session && diffOpened.has(session.id)),
   )
   const fileCount = diff.summary?.files.length ?? null
   /** Liste du diff dans l'ordre de l'onglet Diff : la revue part dans le même ordre d'où qu'on l'envoie. */
@@ -480,14 +492,20 @@ export function SessionPane({
     setTab('terminal')
     document.getElementById(`${tabsId}-terminal`)?.focus()
   }
-  const tabs = [
+  const tabs: (readonly [Tab, string])[] = [
     ['conversation', 'Conversation'],
     ['terminal', 'Terminal'],
     ['diff', 'Diff'],
     ['commits', 'Commits'],
     ['files', 'Fichiers'],
     ['agents', 'Agents'],
-  ] as const
+    // Démon trop ancien : pas d'onglet « Lancer ».
+    ...(runnersSupported === false ? [] : [['runners', 'Lancer'] as const]),
+  ]
+  // Onglet « Lancer » ouvert puis masqué (démon ancien) : retour au terminal.
+  useEffect(() => {
+    if (tab === 'runners' && runnersSupported === false) setTabNow('terminal')
+  }, [tab, runnersSupported])
   const agentsRunning = session ? runningCount(session, agents) : 0
 
   // Clic sur un sous-agent dans la barre latérale : onglet « Agents » (pas au montage du volet),
@@ -559,6 +577,11 @@ export function SessionPane({
             {k === 'diff' && fileCount !== null && fileCount > 0 && (
               <span className="badge" aria-label={`${fileCount} fichier${fileCount > 1 ? 's' : ''} changé${fileCount > 1 ? 's' : ''}`}>
                 {fileCount}
+              </span>
+            )}
+            {k === 'runners' && runnersRunning > 0 && (
+              <span className="badge" aria-label={runnersIndicator(runnersRunning) ?? undefined}>
+                {runnersRunning}
               </span>
             )}
             {k === 'agents' && agentsRunning > 0 && (
@@ -721,6 +744,24 @@ export function SessionPane({
               </ViewBoundary>
             ) : (
               <p className="empty">Choisis une session pour suivre ses sous-agents.</p>
+            )}
+          </div>
+        )}
+        {tab === 'runners' && runnersSupported !== false && (
+          <div className="diff-layer" role="tabpanel" id={`${tabsId}-runners-panel`} aria-labelledby={`${tabsId}-runners`}>
+            {session ? (
+              <ViewBoundary key={session.id} label="Lancer">
+                <RunnersView
+                  key={session.id}
+                  session={session}
+                  theme={termTheme}
+                  onLink={onLink}
+                  onRunning={onRunnersRunning}
+                  onUnsupported={onRunnersUnsupported}
+                />
+              </ViewBoundary>
+            ) : (
+              <p className="empty">Choisis une session pour lancer les commandes de son dépôt.</p>
             )}
           </div>
         )}

@@ -423,6 +423,43 @@ pub fn is_subsequence(seen: &[String], expected: &[&str]) -> bool {
     expected.iter().all(|e| it.any(|s| s == e))
 }
 
+/// Écrit un script exécutable puis attend qu'il soit lançable. Un fichier
+/// tout juste écrit peut encore être ouvert en écriture dans un enfant forké
+/// par un autre test entre son `fork` et son `exec` : son lancement échoue
+/// alors en `ETXTBSY`, quelques millisecondes. Le contenu est écrit, synchronisé
+/// et fermé, puis le script est lancé avec `DEVMAESTRO_PROBE=1` (il doit alors
+/// sortir aussitôt) jusqu'à ce que `ETXTBSY` disparaisse (2 s au plus).
+pub fn write_executable(path: &std::path::Path, content: &str) {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = std::fs::File::create(path).unwrap();
+    f.write_all(content.as_bytes()).unwrap();
+    f.sync_all().unwrap();
+    drop(f);
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let start = Instant::now();
+    loop {
+        match Command::new(path)
+            .env("DEVMAESTRO_PROBE", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            Ok(_) => return,
+            Err(e) if e.raw_os_error() == Some(nix::errno::Errno::ETXTBSY as i32) => {
+                assert!(
+                    start.elapsed() < Duration::from_secs(2),
+                    "{} reste occupé (ETXTBSY)",
+                    path.display()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("{} : {e}", path.display()),
+        }
+    }
+}
+
 pub fn git_available() -> bool {
     Command::new("git")
         .arg("--version")

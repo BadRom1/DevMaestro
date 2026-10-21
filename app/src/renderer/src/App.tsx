@@ -9,6 +9,7 @@ import { forgetDiffMemory } from './components/DiffView'
 import { forgetCommitsMemory } from './state/commits'
 import { forgetCommitDiffs } from './components/CommitsView'
 import { forgetFilesMemory } from './components/FilesView'
+import { useRunnersIndex } from './useRunnersIndex'
 import { LinkDialog } from './components/LinkDialog'
 import { ForgePanel, type EpicLaunchContext, type ForgeTab } from './components/IssuesPanel'
 import { resetBranchPullSupport } from './components/PullChip'
@@ -242,6 +243,12 @@ export function App() {
   }, [state.connection, loadPast, loadQuotas, setAgentsLoad])
 
   const sessions = useMemo(() => Object.values(state.sessions), [state.sessions])
+
+  /** Runners en cours par session (lot 14a) : indicateur et onglet « Lancer ». */
+  const runners = useRunnersIndex(state.connection, sessions)
+
+  // Fenêtre demandée par l'aperçu web : jamais ouverte, proposée par la confirmation des liens.
+  useEffect(() => api.onPreviewPopup?.((url) => setLink((cur) => cur ?? url)), [])
 
   /* ---------- Worktrees (lot 6) ---------- */
 
@@ -746,6 +753,10 @@ export function App() {
       agentId={(selected && agentSel[selected.id]) || null}
       onSelectAgent={selectAgent}
       openAgents={openAgents}
+      runnersSupported={runners.supported}
+      runnersRunning={selected ? (runners.counts[selected.id] ?? 0) : 0}
+      onRunnersRunning={runners.noteRunning}
+      onRunnersUnsupported={runners.markUnsupported}
       onOpenIssue={forgeOn ? openSessionIssue : undefined}
       onOpenPull={forgeOn ? openSessionPull : undefined}
     />
@@ -788,6 +799,7 @@ export function App() {
           profiles={state.profiles}
           stale={state.stale}
           subagents={state.subagents}
+          runnersRunning={runners.counts}
           groups={groups}
           selectedId={state.selectedId}
           paneOpen={kanbanPane}
@@ -811,6 +823,7 @@ export function App() {
           onSelect={select}
           onResumePast={resumePast}
           subagents={state.subagents}
+          runnersRunning={runners.counts}
           onOpenAgent={openAgent}
           worktrees={worktreeLists}
           worktreesWorked={wtWorked.current}

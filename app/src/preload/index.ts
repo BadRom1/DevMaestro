@@ -5,7 +5,7 @@
  */
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 
-import { Ipc, PORT_MESSAGE, type ConnectionState, type DevMaestroApi } from '../shared/bridge'
+import { Ipc, PORT_MESSAGE, RUNNER_PORT_MESSAGE, type ConnectionState, type DevMaestroApi } from '../shared/bridge'
 import type { Notification } from '../shared/protocol'
 
 ipcRenderer.on(Ipc.port, (e: IpcRendererEvent) => {
@@ -14,6 +14,12 @@ ipcRenderer.on(Ipc.port, (e: IpcRendererEvent) => {
   if (e.ports.length !== 1) return
   const origin = window.location.protocol === 'file:' ? '*' : window.location.origin
   window.postMessage({ type: PORT_MESSAGE }, origin, e.ports)
+})
+
+ipcRenderer.on(Ipc.runnerPort, (e: IpcRendererEvent) => {
+  if (e.ports.length !== 1) return
+  const origin = window.location.protocol === 'file:' ? '*' : window.location.origin
+  window.postMessage({ type: RUNNER_PORT_MESSAGE }, origin, e.ports)
 })
 
 const api: DevMaestroApi = {
@@ -31,6 +37,23 @@ const api: DevMaestroApi = {
     return () => void ipcRenderer.removeListener(Ipc.connectionChanged, h)
   },
   requestTerminalPort: () => ipcRenderer.send(Ipc.requestPort),
+  viewRunner: (req) =>
+    ipcRenderer.invoke(Ipc.viewRunner, {
+      session_id: req.session_id,
+      process_id: req.process_id,
+      ...('cols' in req ? { cols: req.cols, rows: req.rows } : {}),
+    }),
+  confirmRunner: (req) =>
+    ipcRenderer.invoke(Ipc.confirmRunner, { session_id: req.session_id, runner_id: req.runner_id, fingerprint: req.fingerprint }),
+  resizeRunner: (req) => ipcRenderer.send(Ipc.resizeRunner, { process_id: req.process_id, cols: req.cols, rows: req.rows }),
+  requestRunnerPort: () => ipcRenderer.send(Ipc.requestRunnerPort),
+  onPreviewPopup(cb) {
+    const h = (_e: IpcRendererEvent, url: unknown) => {
+      if (typeof url === 'string') cb(url)
+    }
+    ipcRenderer.on(Ipc.previewPopup, h)
+    return () => void ipcRenderer.removeListener(Ipc.previewPopup, h)
+  },
   openExternal: (url) => ipcRenderer.invoke(Ipc.openExternal, String(url)),
   home: () => ipcRenderer.invoke(Ipc.home) as Promise<string | null>,
   settings: () => ipcRenderer.invoke(Ipc.settingsGet),

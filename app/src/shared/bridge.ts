@@ -40,6 +40,29 @@ export interface ViewRequest {
   rows?: number
 }
 
+/**
+ * Commande du dépôt à faire accepter (lot 14a) : `data` d'un refus
+ * `RunnerConfirmationRequired` de `runners.start`, telle que le processus
+ * principal l'a relue au démon.
+ */
+export interface RunnerConfirmation {
+  worktree: string
+  runner_id: string
+  label: string
+  command: string[]
+  cwd: string
+  source: string
+  /** Contenu exécuté (texte du dépôt, non fiable), `null` si le démon n'en donne pas. */
+  body: string | null
+  /** Empreinte du démon (`Runner.fingerprint`) : renvoyée telle quelle par `confirmRunner`. */
+  fingerprint: string
+}
+
+/** Terminal d'un runner à afficher (lot 14a) : exécution et sa session, ou aucun. */
+export type RunnerViewRequest =
+  | { session_id: string; process_id: string; cols?: number; rows?: number }
+  | { session_id: null; process_id: null }
+
 export interface DevMaestroApi {
   call<M extends MethodName>(method: M, params: Methods[M]['params']): Promise<CallResult<M>>
   /** Choisit la session dont le terminal est transmis à la page. */
@@ -49,6 +72,23 @@ export interface DevMaestroApi {
   connection(): Promise<ConnectionState>
   /** Demande un nouveau canal de terminal (reçu par `window` en `message`). */
   requestTerminalPort(): void
+  /** Choisit l'exécution de runner dont le terminal est transmis à la page (second canal). */
+  viewRunner(req: RunnerViewRequest): Promise<{ ok: true } | { ok: false; error: RpcFailure }>
+  /**
+   * « Lancer » dans le dialogue de confirmation : le processus principal
+   * retient la commande montrée (empreinte) pour ce worktree, si elle n'a pas
+   * changé depuis.
+   */
+  confirmRunner(req: { session_id: string; runner_id: string; fingerprint: string }): Promise<{ ok: true } | { ok: false; error: RpcFailure }>
+  /** Taille du terminal des runners (exécution affichée seulement). */
+  resizeRunner(req: { process_id: string; cols: number; rows: number }): void
+  /** Demande un nouveau canal pour le terminal des runners (message `RUNNER_PORT_MESSAGE`). */
+  requestRunnerPort(): void
+  /**
+   * L'aperçu web (iframe) a voulu ouvrir une fenêtre : jamais ouverte par
+   * Electron, le lien est proposé à la page qui demande confirmation.
+   */
+  onPreviewPopup(cb: (url: string) => void): () => void
   /** Ouvre un lien http(s) dans le navigateur (après confirmation dans l'app). */
   openExternal(url: string): Promise<{ ok: true } | { ok: false; error: RpcFailure }>
   /** Dossier personnel de l'utilisateur (lecture seule), `null` si inconnu. */
@@ -102,6 +142,8 @@ export type PortUp =
 
 /** Type du message `window.postMessage` qui transmet le port à la page. */
 export const PORT_MESSAGE = 'devmaestro:terminal-port'
+/** Même chose pour le canal du terminal des runners (lot 14a). */
+export const RUNNER_PORT_MESSAGE = 'devmaestro:runner-port'
 
 /** Canaux IPC (préfixés, pour ne rien exposer d'autre). */
 export const Ipc = {
@@ -125,4 +167,10 @@ export const Ipc = {
   zoomStep: 'devmaestro:zoom-step',
   zoomChanged: 'devmaestro:zoom-changed',
   rendererError: 'devmaestro:renderer-error',
+  viewRunner: 'devmaestro:view-runner',
+  resizeRunner: 'devmaestro:resize-runner',
+  confirmRunner: 'devmaestro:confirm-runner',
+  requestRunnerPort: 'devmaestro:request-runner-port',
+  runnerPort: 'devmaestro:runner-port',
+  previewPopup: 'devmaestro:preview-popup',
 } as const

@@ -65,6 +65,30 @@ export interface AppSettings {
   ui: UiSettings
   /** « Accès aux forges » (v0.3, lot 13a, ADR 0006) : désactivé, aucune CLI de forge n'est lancée. */
   forges: { enabled: boolean }
+  /** Runners (v0.3, lot 14a). */
+  runners: RunnerSettings
+}
+
+export interface RunnerSettings {
+  /**
+   * Commandes acceptées par worktree (chemin absolu → empreintes du démon,
+   * `Runner.fingerprint` : commande, dossier, source, corps, verrou). Une
+   * commande qui change (fichier du dépôt modifié) redemande confirmation.
+   * Écrit **seulement** par le processus principal (après « Lancer » dans
+   * le dialogue de confirmation), jamais par une modification de la page.
+   */
+  confirmed: Record<string, string[]>
+}
+
+/** Au plus autant de worktrees retenus ; au-delà, les plus anciens sont oubliés. */
+export const MAX_CONFIRMED_WORKTREES = 500
+/** Au plus autant de commandes retenues par worktree (les plus anciennes partent). */
+export const MAX_CONFIRMED_COMMANDS = 200
+
+const FINGERPRINT_RE = /^[0-9a-f]{64}$/
+
+export function isFingerprint(v: unknown): v is string {
+  return typeof v === 'string' && FINGERPRINT_RE.test(v)
 }
 
 export interface UiSettings {
@@ -177,6 +201,7 @@ export function defaultSettings(): AppSettings {
     worktrees: { location: 'sibling', projectLocations: {}, branchPrefix: '', notifyIntegrated: true },
     ui: { zoom: DEFAULT_ZOOM, sessionTab: DEFAULT_SESSION_TAB },
     forges: { enabled: true },
+    runners: { confirmed: {} },
   }
 }
 
@@ -424,7 +449,41 @@ export function normalizeSettings(raw: unknown): AppSettings {
     forges: {
       enabled: isObj(raw.forges) && typeof raw.forges.enabled === 'boolean' ? raw.forges.enabled : d.forges.enabled,
     },
+    runners: runnersFrom(raw.runners),
   }
+}
+
+/** Réglages des runners lus d'un fichier : entrées invalides ignorées. */
+function runnersFrom(v: unknown): RunnerSettings {
+  const confirmed: Record<string, string[]> = {}
+  if (isObj(v) && isObj(v.confirmed)) {
+    for (const [k, c] of Object.entries(v.confirmed)) {
+      if (Object.keys(confirmed).length >= MAX_CONFIRMED_WORKTREES) break
+      // Ancien format (`true` par worktree, sans empreinte) : oublié, la confirmation sera redemandée.
+      if (!isProjectKey(k) || !Array.isArray(c)) continue
+      const fps = [...new Set(c.filter(isFingerprint))].slice(-MAX_CONFIRMED_COMMANDS)
+      if (fps.length > 0) confirmed[k] = fps
+    }
+  }
+  return { confirmed }
+}
+
+/** Cette commande (empreinte) a-t-elle déjà été acceptée dans ce worktree ? */
+export function runnerConfirmed(s: Pick<AppSettings, 'runners'>, worktree: string | null | undefined, fingerprint: string): boolean {
+  return !!worktree && Object.prototype.hasOwnProperty.call(s.runners.confirmed, worktree) && s.runners.confirmed[worktree]!.includes(fingerprint)
+}
+
+/** Réglages avec cette commande acceptée dans ce worktree (processus principal seulement). */
+export function withRunnerConfirmed(s: AppSettings, worktree: string, fingerprint: string): AppSettings {
+  if (!isProjectKey(worktree) || !isFingerprint(fingerprint)) throw new SettingsError('confirmation de runner invalide')
+  const confirmed = { ...s.runners.confirmed }
+  const prev = (confirmed[worktree] ?? []).filter((f) => f !== fingerprint)
+  delete confirmed[worktree]
+  // Réinsérée à la fin : les worktrees les moins récents partent les premiers.
+  confirmed[worktree] = [...prev, fingerprint].slice(-MAX_CONFIRMED_COMMANDS)
+  const keys = Object.keys(confirmed)
+  for (const k of keys.slice(0, Math.max(0, keys.length - MAX_CONFIRMED_WORKTREES))) delete confirmed[k]
+  return { ...s, runners: { confirmed } }
 }
 
 function labelsFrom(v: unknown): Record<string, ProfileLabel> {
@@ -444,7 +503,7 @@ export function validatePatch(raw: unknown): SettingsPatch {
   const out: SettingsPatch = {}
   for (const k of Object.keys(raw)) {
     if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view', 'worktrees', 'ui', 'forges'].includes(k)) {
-      throw new SettingsError(`réglage inconnu : ${k}`)
+      throw new SettingsError(k === 'runners' ? 'les commandes acceptées ne se modifient pas depuis la page' : `réglage inconnu : ${k}`)
     }
   }
   if (raw.theme !== undefined) out.theme = themePatch(raw.theme)

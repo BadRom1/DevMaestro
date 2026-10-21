@@ -24,8 +24,8 @@ use uuid::Uuid;
 use super::log::warning;
 use super::peer::Peer;
 use super::supervisor::{
-    DEFAULT_SIZE, Daemon, Event, PromptToSend, ReviewToSend, RpcError, SetModeError, opt_str,
-    session_id_param, size_param,
+    DEFAULT_SIZE, Daemon, Event, PromptToSend, ReviewToSend, RpcError, SetModeError, Subscription,
+    opt_str, runners::process_id_param, session_id_param, size_param,
 };
 use super::terminal::{Chunk, Snapshot, Terminal};
 use crate::protocol::{
@@ -127,6 +127,9 @@ pub async fn handle_connection(daemon: Arc<Daemon>, stream: UnixStream) {
                         Some(l) => Some(l.lock().await),
                         None => None,
                     };
+                    let _ = tx.send(data).await;
+                } else if let Ok(tx) = conn.daemon.runner_input_sender(&session) {
+                    // Identifiant d'un processus de runner (v0.3, lot 14a).
                     let _ = tx.send(data).await;
                 }
             }
@@ -325,7 +328,7 @@ impl Connection {
                 "protocol": PROTOCOL_VERSION,
                 "pid": std::process::id(),
                 // Fonctions du démon détectables par le client (lot 13a).
-                "capabilities": {"initial_prompt": true},
+                "capabilities": {"initial_prompt": true, "runners": true},
             }),
             "profiles.list" => d.profiles()?,
             "projects.resolve" => {
@@ -376,7 +379,44 @@ impl Connection {
                     .await
                     .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
             }
-            "sessions.stop" => d.stop(&session_id_param(params)?)?,
+            "sessions.stop" => {
+                let sid = session_id_param(params)?;
+                let stop_runners = match params.get("stop_runners") {
+                    None | Some(Value::Null) => false,
+                    Some(Value::Bool(b)) => *b,
+                    Some(_) => return Err(RpcError::params("« stop_runners » : booléen attendu")),
+                };
+                let mut v = d.stop(&sid)?;
+                if stop_runners {
+                    v["runners_stopping"] = json!(d.stop_session_runners(&sid));
+                }
+                v
+            }
+            "runners.list" | "runners.start" => {
+                // Disque (détection), sonde du port, lancement : hors du runtime.
+                let (d2, params, m) = (d.clone(), params.clone(), method.to_owned());
+                tokio::task::spawn_blocking(move || {
+                    if m == "runners.list" {
+                        d2.runners_list(&params)
+                    } else {
+                        d2.runners_start(&params)
+                    }
+                })
+                .await
+                .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
+            }
+            "runners.stop" => d.runners_stop(params)?,
+            "runners.resize" => d.runners_resize(params)?,
+            "runners.subscribe" => {
+                let (pid, sub) = d.runner_subscribe(params)?;
+                self.start_stream(Stream::Runner(pid), sub, id).await;
+                return Ok(None);
+            }
+            "runners.unsubscribe" => {
+                let pid = process_id_param(params)?;
+                let was = self.subscriptions.remove(&pid).map(|t| t.abort()).is_some();
+                json!({"unsubscribed": was})
+            }
             "sessions.resize" => {
                 let sid = session_id_param(params)?;
                 let size = size_param(params, DEFAULT_SIZE)?;
@@ -582,11 +622,22 @@ impl Connection {
         history: bool,
         id: Option<Value>,
     ) -> Result<(), RpcError> {
-        let (snap, hist, rx, terminal) = self.daemon.subscribe(&sid, history)?;
+        let sub = self.daemon.subscribe(&sid, history)?;
+        self.start_stream(Stream::Session(sid), sub, id).await;
+        Ok(())
+    }
+
+    /// Réponse (instantané) puis relais de la sortie d'un flux.
+    async fn start_stream(&mut self, stream: Stream, sub: Subscription, id: Option<Value>) {
+        let sid = stream.id();
+        let (snap, hist, rx, terminal) = sub;
         if let Some(old) = self.subscriptions.remove(&sid) {
             old.abort();
         }
-        let mut result = json!({"id": sid, "snapshot": snapshot_json(&snap)});
+        let mut result = match stream {
+            Stream::Session(_) => json!({"id": sid, "snapshot": snapshot_json(&snap)}),
+            Stream::Runner(_) => json!({"process_id": sid, "snapshot": snapshot_json(&snap)}),
+        };
         if let Some(hist) = hist {
             result["history"] = json!(String::from_utf8_lossy(&hist));
         }
@@ -594,9 +645,8 @@ impl Connection {
             self.send(response(id, result)).await;
         }
         let out = self.out.clone();
-        let task = tokio::spawn(forward_output(sid, rx, terminal, out));
+        let task = tokio::spawn(forward_output(stream, rx, terminal, out));
         self.subscriptions.insert(sid, task);
-        Ok(())
     }
 }
 
@@ -820,10 +870,27 @@ async fn set_mode_with_retry(d: &Arc<Daemon>, params: &Value) -> Result<Value, R
     }
 }
 
+/// Flux de terminal auquel un client s'abonne : une session, ou un
+/// processus de runner (v0.3, lot 14a). Les trames `0x02` / `0x03` portent
+/// l'UUID de l'un ou de l'autre.
+#[derive(Debug, Clone, Copy)]
+enum Stream {
+    Session(Uuid),
+    Runner(Uuid),
+}
+
+impl Stream {
+    fn id(self) -> Uuid {
+        match self {
+            Self::Session(id) | Self::Runner(id) => id,
+        }
+    }
+}
+
 /// Relaie la sortie d'un PTY vers un client, en regroupant les morceaux
 /// disponibles. Sur `Lagged`, renvoie un instantané (`session.resync`).
 async fn forward_output(
-    sid: Uuid,
+    stream: Stream,
     mut rx: broadcast::Receiver<Chunk>,
     terminal: Arc<Terminal>,
     out: mpsc::Sender<Frame>,
@@ -851,17 +918,26 @@ async fn forward_output(
             // Des octets manquent : on jette le lot et on renvoie l'écran.
             let (snap, new_rx) = terminal.subscribe();
             rx = new_rx;
-            let n = notification(
-                "session.resync",
-                json!({"id": sid, "snapshot": snapshot_json(&snap)}),
-            );
+            let n = match stream {
+                Stream::Session(sid) => notification(
+                    "session.resync",
+                    json!({"id": sid, "snapshot": snapshot_json(&snap)}),
+                ),
+                Stream::Runner(pid) => notification(
+                    "runners.resync",
+                    json!({"process_id": pid, "snapshot": snapshot_json(&snap)}),
+                ),
+            };
             if out.send(Frame::rpc(&n)).await.is_err() {
                 return;
             }
             continue;
         }
         if out
-            .send(Frame::PtyOutput { session: sid, data })
+            .send(Frame::PtyOutput {
+                session: stream.id(),
+                data,
+            })
             .await
             .is_err()
         {
@@ -898,6 +974,13 @@ fn queue_event(daemon: &Daemon, queue: &mut VecDeque<Event>, ev: Event) {
             .any(|e| matches!(e, Event::ConversationChanged(other) if other == id))
     {
         return; // Regroupé : calculé depuis la révision de la connexion à l'envoi.
+    }
+    if let Event::RunnersChanged(id) = &ev
+        && queue
+            .iter()
+            .any(|e| matches!(e, Event::RunnersChanged(other) if other == id))
+    {
+        return; // Regroupé : la liste est relue au moment d'envoyer.
     }
     if let Event::WorktreesChanged(root) = &ev
         && queue
@@ -950,6 +1033,12 @@ fn resync_events(daemon: &Daemon, queue: &mut VecDeque<Event>) {
             .into_iter()
             .map(Event::ConversationChanged),
     );
+    queue.extend(
+        daemon
+            .sessions_with_runners()
+            .into_iter()
+            .map(Event::RunnersChanged),
+    );
     queue.push_back(Event::Quotas);
 }
 
@@ -971,6 +1060,10 @@ fn event_frame(daemon: &Daemon, ev: Event) -> Option<Frame> {
         Event::WorktreesChanged(root) => {
             notification("project.worktrees_changed", json!({"root": root}))
         }
+        Event::RunnersChanged(id) => notification(
+            "runners.changed",
+            json!({"id": id, "running": daemon.runners_running_json(&id)}),
+        ),
         // Calculée par connexion (voir `forward_events`).
         Event::ConversationChanged(_) => return None,
     };

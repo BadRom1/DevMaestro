@@ -51,7 +51,7 @@ pub fn default_config(paths: Paths) -> Result<Config, String> {
         claude_bin_env: std::env::var_os("DEVMAESTRO_CLAUDE_BIN"),
         path_env: std::env::var_os("PATH"),
         exit_grace: Duration::from_millis(500),
-        stop_timeout: Duration::from_secs(3),
+        stop_timeout: stop_timeout(),
         // Réglage réservé aux tests : jamais transmis aux processus `claude`.
         permission_timeout_secs: std::env::var("DEVMAESTRO_PERMISSION_TIMEOUT_SECS")
             .ok()
@@ -80,6 +80,20 @@ fn quota_min_interval() -> Duration {
         return Duration::from_millis(ms);
     }
     supervisor::QUOTA_MIN_INTERVAL
+}
+
+/// Délai entre le premier signal d'arrêt (`SIGHUP` d'une session, `SIGTERM`
+/// d'un runner) et `SIGKILL` : 3 s. Seul un binaire de test
+/// (`test-support`) lit `DEVMAESTRO_STOP_TIMEOUT_MS`.
+fn stop_timeout() -> Duration {
+    #[cfg(feature = "test-support")]
+    if let Some(ms) = std::env::var("DEVMAESTRO_STOP_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    Duration::from_secs(3)
 }
 
 /// Délai du prompt initial. Seul un binaire de test (`test-support`) lit

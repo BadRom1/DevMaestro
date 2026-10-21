@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod profile;
 pub mod project;
 pub mod quota;
+pub mod runners;
 pub mod session;
 pub mod state;
 pub mod statusline;

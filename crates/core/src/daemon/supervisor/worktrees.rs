@@ -693,6 +693,15 @@ impl Daemon {
                 "une session tourne dans ce worktree",
             ));
         }
+        // Les runners du worktree (v0.3, lot 14a) s'arrêtent avant la
+        // suppression (attente bornée), et son port est libéré.
+        self.stop_worktree_runners(&target.path);
+        if in_use(self) {
+            return Err(RpcError::new(
+                error_code::WORKTREE_IN_USE,
+                "une session tourne dans ce worktree",
+            ));
+        }
         g.remove(&root, &target.path, force, target.locked)
             .map_err(git_error)?;
         info!(

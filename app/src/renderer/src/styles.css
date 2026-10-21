@@ -601,6 +601,53 @@ tr.cm td { padding: 6px 12px 8px 60px; white-space: normal }
 .ag-meta dd { margin: 0 }
 .ag-cut { margin: 12px 26px 0; padding: 6px 10px; border: 1px solid var(--wait); border-radius: var(--r); color: var(--wait-ink); font-size: 12.5px; max-width: 78ch }
 
+/* ---------- Onglet « Lancer » : runners et aperçu web (v0.3, lot 14a) ---------- */
+.runners-view { display: grid; grid-template-columns: 320px minmax(0, 1fr); height: 100%; min-height: 0 }
+.rn-list { border-right: 1px solid var(--line); overflow: auto; padding: 8px 6px; min-height: 0 }
+.rn-list .cap { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 2px 8px 8px }
+.rn-list .pad { padding: 4px 8px }
+.rn-list ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px }
+.rn-group { margin-bottom: 10px }
+.rn-gt { margin: 4px 8px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--faint) }
+.rn-item { display: grid; gap: 3px; padding: 5px 8px; border-radius: 5px }
+.rn-item:hover { background: var(--panel-2) }
+.rn-l1 { display: flex; align-items: center; gap: 6px; min-width: 0 }
+.rn-l1 .btn { margin-left: auto; flex: none }
+.rn-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.rn-cmd { display: block; font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere }
+.rn-proc { display: flex; align-items: center; gap: 7px; width: 100%; border: 0; background: transparent; text-align: left; padding: 5px 8px; border-radius: 5px }
+.rn-proc:hover { background: var(--panel-2) }
+.rn-proc[aria-current="true"] { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent) }
+.rn-proc .hint { margin-left: auto; white-space: nowrap }
+.rn-dot { flex: none; width: 8px; height: 8px; border-radius: 99px; background: var(--faint) }
+.rn-dot.run { background: var(--run) }
+.rn-dot.done { background: var(--done) }
+.rn-dot.err { background: var(--err) }
+.rn-state { flex: none; font-size: 11.5px; color: var(--muted) }
+.rn-state.run { color: var(--run-ink) }
+.rn-state.done { color: var(--done-ink) }
+.rn-state.err { color: var(--err-ink) }
+.rn-detail { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); min-height: 0; min-width: 0 }
+.rn-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); min-width: 0 }
+.rn-acts { margin-left: auto; display: flex; gap: 6px }
+.rn-none { padding: 10px 12px; margin: 0 }
+.rn-err { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--err) }
+.rn-err .btn { margin-left: auto }
+.rn-urls { list-style: none; margin: 0; padding: 6px 12px; display: grid; gap: 4px; border-bottom: 1px solid var(--line) }
+.rn-urls li { display: flex; align-items: center; gap: 8px; min-width: 0 }
+.rn-urls code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.rn-body { display: grid; grid-template-rows: minmax(0, 1fr); min-height: 0 }
+.rn-body.split { grid-template-rows: minmax(120px, 2fr) minmax(160px, 3fr) }
+.rn-term { display: grid; min-height: 0 }
+.rn-term > .term { min-height: 0 }
+.rn-preview { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; border-top: 1px solid var(--line) }
+.rn-pbar { display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: var(--panel-2) }
+.rn-pbar code { margin-right: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.rn-body-src { margin: 0; max-height: 240px; overflow: auto; padding: 8px 10px; border: 1px solid var(--line-2); border-radius: var(--r); background: var(--panel-2); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px }
+.rn-preview iframe { width: 100%; height: 100%; border: 0; background: #fff }
+.srow .sub .run-ind { color: var(--run-ink); white-space: nowrap; font-size: 11px }
+.kcard .run-chip { justify-self: start; width: fit-content; color: var(--run-ink) }
+
 /* ---------- Worktrees (v0.2, lot 6) ---------- */
 .proj-hrow { display: flex; align-items: center; gap: 2px; padding-right: 6px }
 .proj-hrow .proj-h { flex: 1; min-width: 0 }

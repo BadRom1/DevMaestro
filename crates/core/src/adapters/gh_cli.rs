@@ -957,10 +957,32 @@ mod tests {
     }
 
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::io::Write as _;
         let p = dir.join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(format!("#!/bin/sh\n{body}\n").as_bytes())
+            .unwrap();
+        f.sync_all().unwrap();
+        drop(f);
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         p
+    }
+
+    /// Relance bornée d'un lancement refusé par `ETXTBSY` : un script tout
+    /// juste écrit peut être encore ouvert en écriture dans un enfant forké
+    /// par un autre test (entre son `fork` et son `exec`), le temps de
+    /// quelques millisecondes. Propre aux tests : en production, `gh` n'est
+    /// pas écrit par le démon.
+    fn unbusy(run: impl Fn() -> GhRun) -> GhRun {
+        for _ in 0..50 {
+            match run() {
+                GhRun::SpawnFailed(e) if e.contains("os error 26") => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                other => return other,
+            }
+        }
+        run()
     }
 
     /// Le processus `pid` a-t-il disparu (au plus 3 s d'attente : un orphelin
@@ -1002,11 +1024,13 @@ mod tests {
                 "lent",
                 &format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
             )),
-            Duration::from_millis(300),
+            // Assez long pour que le script écrive le pid de son fils même
+            // sur une machine chargée (le fichier est lu ensuite).
+            Duration::from_secs(2),
         );
         let start = Instant::now();
-        assert!(matches!(slow.run(&[]), GhRun::TimedOut));
-        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(matches!(unbusy(|| slow.run(&[])), GhRun::TimedOut));
+        assert!(start.elapsed() < Duration::from_secs(6));
         assert!(gone(pid_in(&pid_file)), "le fils a survécu au délai");
 
         // Sortie normale avec un descendant qui garde les tubes : rendue
@@ -1021,7 +1045,7 @@ mod tests {
             Duration::from_secs(10),
         );
         let start = Instant::now();
-        match leaky.run(&[]) {
+        match unbusy(|| leaky.run(&[])) {
             GhRun::Done(o) => {
                 assert!(o.ok);
                 assert_eq!(o.stdout, b"fini\n");
@@ -1037,7 +1061,7 @@ mod tests {
             Duration::from_secs(5),
         );
         big.max_output = 1000;
-        match big.run(&[]) {
+        match unbusy(|| big.run(&[])) {
             GhRun::Done(o) => {
                 assert!(o.truncated && o.ok);
                 assert_eq!(o.stdout.len(), 1000);
@@ -1047,7 +1071,7 @@ mod tests {
         }
         // Binaire absent.
         assert!(matches!(
-            GhExec::new(None, Duration::from_secs(1)).run(&[]),
+            unbusy(|| GhExec::new(None, Duration::from_secs(1)).run(&[])),
             GhRun::Missing
         ));
         // Arguments séparés, sans shell ; code de sortie rendu ; lancé depuis
@@ -1056,7 +1080,7 @@ mod tests {
             Some(script(d, "echo", "printf '%s|' \"$@\" \"$(pwd)\"; exit 3")),
             Duration::from_secs(5),
         );
-        match echo.run(&["a b", "$(id)", "--x=;y"]) {
+        match unbusy(|| echo.run(&["a b", "$(id)", "--x=;y"])) {
             GhRun::Done(o) => {
                 assert_eq!(o.stdout, b"a b|$(id)|--x=;y|/|");
                 assert_eq!(o.code, Some(3));
@@ -1073,12 +1097,12 @@ mod tests {
         // L'entrée est lue en entier (au-delà de la taille d'un tube).
         let cat = GhExec::new(Some(script(d, "cat", "wc -c")), Duration::from_secs(5));
         let doc = vec![b'x'; 300_000];
-        match cat.run_input(&["api"], &doc) {
+        match unbusy(|| cat.run_input(&["api"], &doc)) {
             GhRun::Done(o) => assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "300000"),
             other => panic!("{other:?}"),
         }
         // `run` garde l'entrée fermée.
-        match cat.run(&[]) {
+        match unbusy(|| cat.run(&[])) {
             GhRun::Done(o) => assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "0"),
             other => panic!("{other:?}"),
         }
@@ -1088,14 +1112,20 @@ mod tests {
             Duration::from_millis(300),
         );
         let start = Instant::now();
-        assert!(matches!(deaf.run_input(&[], &doc), GhRun::TimedOut));
+        assert!(matches!(
+            unbusy(|| deaf.run_input(&[], &doc)),
+            GhRun::TimedOut
+        ));
         assert!(start.elapsed() < Duration::from_secs(3));
         // Un `gh` qui sort sans lire : rendu normalement.
         let quick = GhExec::new(Some(script(d, "vite", "echo ok")), Duration::from_secs(5));
-        assert!(matches!(quick.run_input(&[], &doc), GhRun::Done(o) if o.ok));
+        assert!(matches!(unbusy(|| quick.run_input(&[], &doc)), GhRun::Done(o) if o.ok));
         // Entrée trop grosse : rien n'est lancé.
         let huge = vec![b'x'; MAX_GH_INPUT + 1];
-        assert!(matches!(cat.run_input(&[], &huge), GhRun::SpawnFailed(_)));
+        assert!(matches!(
+            unbusy(|| cat.run_input(&[], &huge)),
+            GhRun::SpawnFailed(_)
+        ));
     }
 
     #[test]

@@ -77,6 +77,13 @@ pub mod error_code {
     /// `forge.submitReview` refusé : la tête de la demande de fusion a changé
     /// depuis sa lecture (`data: {head_sha}`) ; rien n'est publié.
     pub const PULL_HEAD_CHANGED: i64 = -32023;
+    /// `runners.start` : `runner_id` absent de la détection refaite à
+    /// l'instant (jamais de commande libre venue de l'interface).
+    pub const UNKNOWN_RUNNER: i64 = -32024;
+    /// `runners.start` : déjà 8 runners vivants pour cette session.
+    pub const TOO_MANY_RUNNERS: i64 = -32025;
+    /// `process_id` inconnu (`runners.stop`, `runners.subscribe`…).
+    pub const UNKNOWN_RUNNER_PROCESS: i64 = -32026;
 }
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {

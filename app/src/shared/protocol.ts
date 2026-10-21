@@ -150,6 +150,8 @@ export interface Session {
   activity?: SessionActivity | null
   /** Issue liée au lancement (v0.3, lot 13a) ; absent avec un démon plus ancien. */
   issue?: IssueRef | null
+  /** Runners vivants de la session (v0.3, lot 14a) ; absent avec un démon plus ancien. */
+  runners_running?: number
 }
 
 /* ---------- Forge (v0.3, lot 13a, ADR 0006) ---------- */
@@ -915,6 +917,60 @@ export const MAX_TITLE = 80
 /** Réponses à une question : libellé, liste de libellés (choix multiple) ou texte libre. */
 export type QuestionAnswers = Record<string, string | string[]>
 
+/* ---------- Runners (v0.3, lot 14a) ---------- */
+
+/** Type d'un runner, déduit du nom du script par le démon. */
+export type RunnerKind = 'dev' | 'test' | 'build' | 'lint' | 'other'
+export const RUNNER_KINDS: readonly RunnerKind[] = ['dev', 'test', 'build', 'lint', 'other']
+
+/**
+ * Commande détectée dans le worktree d'une session (`package.json`,
+ * `Makefile`, `justfile`, `Cargo.toml`…). Jamais une commande libre : seule
+ * une commande détectée par le démon peut être lancée.
+ */
+export interface Runner {
+  id: string
+  label: string
+  kind: RunnerKind
+  /** Arguments tels qu'exécutés (affichés à l'utilisateur avant le lancement). */
+  command: string[]
+  /** Dossier relatif au worktree (`""` ou `"."` : la racine). */
+  cwd: string
+  /** Origine : `fichier:clé` (ex. `package.json:scripts.dev`). */
+  source: string
+  /**
+   * Contenu réellement exécuté (corps du script, de la cible, de la recette),
+   * 4 Kio au plus ; texte du dépôt, non fiable : affiché tel quel, en code.
+   */
+  body?: string | null
+  /**
+   * Empreinte du démon (SHA-256 de la commande, du dossier, de la source, du
+   * corps et du verrou) : la confirmation porte sur elle ; absente d'un démon
+   * plus ancien (lancement refusé).
+   */
+  fingerprint?: string
+}
+
+export type RunnerState = 'running' | 'exited'
+
+/** Exécution d'un runner (protocole § 4, « Runners et aperçu web »). */
+export interface RunnerProcess {
+  process_id: string
+  runner_id: string
+  session_id: string
+  port: number | null
+  started_at: string
+  state: RunnerState
+  exit_code: number | null
+  /** Adresses locales repérées dans la sortie (http://localhost:…, 127.0.0.1, [::1]). */
+  urls: string[]
+}
+
+export interface RunnersList {
+  runners: Runner[]
+  running: RunnerProcess[]
+}
+
 /** Paramètres et résultats des méthodes appelables depuis la page. */
 export interface Methods {
   'profiles.list': { params: Record<string, never>; result: { profiles: Profile[] } }
@@ -1045,6 +1101,17 @@ export interface Methods {
    * depuis le bouton « Publier » du dialogue de confirmation (ADR 0006, point 5).
    */
   'forge.submitReview': { params: { root: string } & ForgeReviewPayload; result: { url: string | null } }
+  /** Runners détectés dans le worktree de la session, et ceux qui tournent (lot 14a). */
+  'runners.list': { params: { id: string }; result: RunnersList }
+  /** Lance un runner détecté (jamais une commande libre). */
+  /**
+   * `expected_fingerprint` : ajouté par le processus principal (empreinte
+   * acceptée par l'utilisateur), jamais pris de la page ; détection fraîche
+   * différente → `-32024`.
+   */
+  'runners.start': { params: { id: string; runner_id: string; expected_fingerprint?: string }; result: RunnerProcess }
+  /** Arrête une exécution (SIGTERM au groupe, SIGKILL après 3 s). */
+  'runners.stop': { params: { id: string; process_id: string }; result: unknown }
 }
 
 /** Méthodes de la forge : le processus principal y ajoute `enabled` (réglage global). */
@@ -1106,6 +1173,9 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'forge.pullFile',
   'forge.pullForBranch',
   'forge.submitReview',
+  'runners.list',
+  'runners.start',
+  'runners.stop',
 ]
 
 /** Codes d'erreur JSON-RPC du démon (protocole § 3). */
@@ -1129,6 +1199,18 @@ export const ErrorCode = {
   ForgeUnavailable: -32022,
   /** `forge.submitReview` : la tête de la demande a changé depuis sa lecture ; `data: {head_sha}`. */
   PullChanged: -32023,
+  /** `runners.start` : runner absent de la détection actuelle, ou commande changée depuis sa confirmation. */
+  RunnerUnknown: -32024,
+  /** `runners.start` : 8 runners vivants pour la session. */
+  TooManyRunners: -32025,
+  /** `runners.*` : exécution inconnue, ou d'une autre session. */
+  RunnerProcessUnknown: -32026,
+  /**
+   * Côté app (hors protocole) : `runners.start` refusé par le processus
+   * principal tant que l'utilisateur n'a pas accepté cette commande dans ce
+   * worktree ; `data` : `RunnerConfirmation`.
+   */
+  RunnerConfirmationRequired: -3,
   /** Côté client : délai dépassé, connexion perdue (hors protocole). */
   Timeout: -1,
   Disconnected: -2,
@@ -1156,3 +1238,5 @@ export type Notification =
       method: 'conversation.changed'
       params: { id: string; upserts: ConversationEntry[]; segment_started?: ConversationSegment | null }
     }
+  /** Runners d'une session changés (lancement, fin, URL repérée) : `running`, la liste à jour. */
+  | { method: 'runners.changed'; params: { id: string; running: RunnerProcess[] } }

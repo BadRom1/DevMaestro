@@ -19,6 +19,10 @@ const FRIENDLY: Record<number, string> = {
   [ErrorCode.WorktreeDirty]: 'le worktree a des modifications non commitées',
   [ErrorCode.FileChanged]: 'le fichier a été modifié depuis son ouverture',
   [ErrorCode.PullChanged]: 'la demande de fusion a changé depuis son ouverture',
+  [ErrorCode.RunnerUnknown]: 'cette commande n’est plus détectée telle quelle dans le worktree (fichier modifié ?) : actualise la liste',
+  [ErrorCode.TooManyRunners]: 'trop de runners en cours pour cette session (8 au plus) : arrêtes-en un d’abord',
+  [ErrorCode.RunnerProcessUnknown]: 'exécution inconnue du démon (terminée et retirée, ou d’une autre session)',
+  [ErrorCode.RunnerConfirmationRequired]: 'confirmation nécessaire avant de lancer cette commande du dépôt',
   [ErrorCode.Timeout]: 'le démon n’a pas répondu à temps',
   [ErrorCode.Disconnected]: 'démon non connecté',
 }

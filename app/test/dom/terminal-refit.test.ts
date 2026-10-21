@@ -24,6 +24,7 @@ vi.mock('@xterm/xterm', () => ({
     loadAddon(a: { activate?: (t: unknown) => void }) {
       a.activate?.(this)
     }
+    attachCustomKeyEventHandler() {}
     onData() {
       return { dispose() {} }
     }

@@ -11,6 +11,7 @@ import {
   defaultSettings,
   normalizeSettings,
   validatePatch,
+  withRunnerConfirmed,
   type AppSettings,
 } from '../shared/settings'
 
@@ -59,7 +60,19 @@ export class SettingsStore {
    */
   async update(rawPatch: unknown): Promise<AppSettings> {
     const patch = validatePatch(rawPatch)
-    this.current = applyPatch(this.current, patch)
+    return this.commit(applyPatch(this.current, patch))
+  }
+
+  /**
+   * Retient une commande de runner acceptée dans un worktree (lot 14a).
+   * Réservé au processus principal : la page ne peut pas l'écrire par `update`.
+   */
+  async confirmRunner(worktree: string, fingerprint: string): Promise<AppSettings> {
+    return this.commit(withRunnerConfirmed(this.current, worktree, fingerprint))
+  }
+
+  private async commit(next: AppSettings): Promise<AppSettings> {
+    this.current = next
     const snapshot = this.current
     this.inFlight++
     // Écritures en série : la dernière l'emporte toujours sur disque.

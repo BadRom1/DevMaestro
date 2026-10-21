@@ -90,11 +90,11 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `-32021` | `files.write` refusé : « le fichier a été modifié depuis son ouverture » ; `data: {version}` (version actuelle, `null` si le fichier n'existe plus) ; rien n'est écrit |
 | `-32022` | forge indisponible (toutes les méthodes `forge.*` sauf `forge.status`) : accès désactivé, dépôt hors GitHub, `gh` absent ou non connecté ; message « forge indisponible : <raison> », `data: {reason}` (la raison seule, en français) |
 | `-32023` | `forge.submitReview` refusé : « la demande de fusion a changé depuis son ouverture » (la tête relue n'est plus `expected_head_sha`) ; `data: {head_sha}` (tête actuelle) ; rien n'est publié |
-| `-32024` | `runners.start` : `runner_id` absent de la détection refaite à l'instant par le démon (« runner inconnu : « … » (absent de la détection actuelle) ») ; jamais de commande libre (§ 4, « Runners ») |
+| `-32024` | `runners.start` : `runner_id` absent de la détection refaite à l'instant par le démon (« runner inconnu : « … » (absent de la détection actuelle) »), ou empreinte différente de `expected_fingerprint` (« la commande a changé depuis sa confirmation », `data: {fingerprint}` : l'empreinte actuelle) ; jamais de commande libre (§ 4, « Runners ») |
 | `-32025` | `runners.start` : 8 runners vivants pour cette session (« 8 runners tournent déjà pour cette session : en arrêter un d'abord ») |
 | `-32026` | processus de runner inconnu (`process_id`), ou qui n'appartient pas à la session `id` donnée (`runners.stop`, `runners.subscribe`, `runners.resize`) |
 
-Une erreur peut porter un champ `data` (objet) avec des détails structurés, en plus de `code` et `message` ; il n'est présent que là où ce document le décrit (aujourd'hui : commentaires de fichier de `sessions.sendReview`, `{index, path, line, line_end}` ; `-32020` de `worktrees.remove`, `{files, total}` ; `-32021` de `files.write`, `{version}` ; `-32022` des méthodes `forge.*`, `{reason}` ; `-32023` de `forge.submitReview`, `{head_sha}` ; `-32602` d'un commentaire de `forge.submitReview`, `{index, path, line, side}`). Un client doit ignorer un `data` qu'il ne connaît pas.
+Une erreur peut porter un champ `data` (objet) avec des détails structurés, en plus de `code` et `message` ; il n'est présent que là où ce document le décrit (aujourd'hui : commentaires de fichier de `sessions.sendReview`, `{index, path, line, line_end}` ; `-32020` de `worktrees.remove`, `{files, total}` ; `-32021` de `files.write`, `{version}` ; `-32022` des méthodes `forge.*`, `{reason}` ; `-32023` de `forge.submitReview`, `{head_sha}` ; `-32024` de `runners.start` (empreinte changée), `{fingerprint}` ; `-32602` d'un commentaire de `forge.submitReview`, `{index, path, line, side}`). Un client doit ignorer un `data` qu'il ne connaît pas.
 
 ## 4. Méthodes
 
@@ -147,7 +147,7 @@ Une erreur peut porter un champ `data` (objet) avec des détails structurés, en
 | `forge.pullForBranch` | `{root, branch, enabled?, refresh?}` | `Pull` sans corps, ou `null` |
 | `forge.submitReview` | `{root, number, expected_head_sha, event, body?, comments?, enabled?}` | `{url}` — **écriture** vers la forge, socket de contrôle seulement |
 | `runners.list` | `{id}` | `{runners: [Runner], running: [RunnerProcess]}` (voir « Runners ») |
-| `runners.start` | `{id, runner_id, cols?, rows?}` | `RunnerProcess` |
+| `runners.start` | `{id, runner_id, expected_fingerprint, cols?, rows?}` | `RunnerProcess` + `warnings: [texte]` |
 | `runners.stop` | `{id?, process_id}` | `{stopping: bool, alive: bool}` |
 | `runners.subscribe` | `{id?, process_id, history?, cols?, rows?}` | `{process_id, snapshot: Écran, history?}` puis le flux (§ 6) |
 | `runners.unsubscribe` | `{process_id}` | `{unsubscribed: bool}` |
@@ -637,24 +637,27 @@ Un runner est une commande **détectée par le démon** dans le worktree d'une s
 
 Un nom (script, cible, recette, membre) qui commence par `-`, contient un blanc ou un caractère de contrôle, ou dépasse 200 octets est écarté : il devient toujours un argument, jamais une option. Type (`kind`) d'après le nom (premier mot avant `:`, `-`, `_`, `.`) : `dev`/`start`/`serve`/`watch`/`preview`… → `dev`, `test`/`e2e`/`spec`/`coverage`… → `test`, `build`/`compile`/`bundle`… → `build`, `lint`/`fmt`/`format`/`check`/`typecheck`… → `lint`, sinon `other` ; `cargo run`, `go run`, `docker compose up` → `dev`.
 
-**`runners.start {id, runner_id, cols?, rows?}`** (120×30 par défaut) :
+**Corps et empreinte** : chaque `Runner` porte `body`, ce qui va réellement s'exécuter tel que lu dans la source (corps du script de `package.json` ou de `pyproject.toml`, ligne(s) de règle et recette d'un Makefile, en-tête et lignes de la recette d'un justfile, contenu du fichier compose ; pour Cargo et Go, la commande seule), montré sur 4 Kio au plus (`body_truncated: true` au-delà), et `fingerprint` : SHA-256 hexadécimal du JSON `[command, cwd, source, body, verrou]`, `body` **entier** et `verrou` le fichier de verrou qui a choisi l'outil (`pnpm-lock.yaml`, `uv.lock`… ou `null`). Un corps de script modifié change l'empreinte même si la commande (`npm run dev`) est la même. L'app confirme une empreinte, pas une commande.
+
+**`runners.start {id, runner_id, expected_fingerprint, cols?, rows?}`** (120×30 par défaut) :
 
 - session inconnue `-32001`, dossier disparu `-32016`, worktree en cours de suppression `-32019`, démon qui s'arrête `-32002` ;
-- `runner_id` absent de la détection actuelle : `-32024` ; même runner déjà vivant pour cette session : `-32002` ; 8 runners vivants pour la session : `-32025` ;
+- `expected_fingerprint` manquant : `-32602` ; `runner_id` absent de la détection actuelle : `-32024` ; empreinte de la détection refaite différente de `expected_fingerprint` (fichier modifié entre l'affichage et le lancement) : `-32024`, « la commande a changé depuis sa confirmation », `data: {fingerprint}`, rien n'est lancé ; même runner déjà vivant pour cette session : `-32002` ; 8 runners vivants pour la session : `-32025` ;
 - programme (`npm`, `make`…) introuvable dans le `PATH` du démon, aucun port libre, échec du PTY : `-32004`.
-- Lancement dans un PTY du démon, dossier = racine du worktree + `cwd` du runner, dans un scope systemd utilisateur `devmaestro-runner-<id8 session>-<id8 processus>.scope` quand les sessions en ont un (§ 9). Environnement : celui du démon **sans** `ORCH_*`, `DEVMAESTRO_*`, `CLAUDE_CONFIG_DIR` ni les marqueurs de session Claude Code (§ 9, § 10) ; plus `PORT`, `HOST=127.0.0.1`, `TERM=xterm-256color`, `COLORTERM=truecolor`. Les réglages de l'utilisateur (`ANTHROPIC_*`, mandataires…) sont gardés.
-- **`PORT`** : un par worktree, partagé par ses runners, dans 41 000–41 999. Port préféré dérivé du chemin du worktree (le même d'un démarrage du démon à l'autre), gardé tant que le worktree existe (libéré par `worktrees.remove`). À chaque lancement, s'il n'est tenu par aucun runner vivant du worktree, il est sondé (`bind` sans `listen` sur `127.0.0.1` et `::1`, `SO_REUSEADDR`) ; pris par un autre programme : le suivant libre de la plage (en bouclant), jamais celui d'un autre worktree. Entre la sonde et l'écoute du runner, un autre programme peut le prendre (accepté).
+- Lancement dans un PTY du démon, dossier = racine du worktree + `cwd` du runner, dans un scope systemd utilisateur `devmaestro-runner-<id8 session>-<id8 processus>.scope` quand les sessions en ont un (§ 9). Environnement : un runner exécute du **code du dépôt**, qui ne reçoit ni les secrets ni les réglages de l'utilisateur pour Claude et GitHub. Retirés de l'environnement du démon : `ORCH_*`, `DEVMAESTRO_*`, les marqueurs de session Claude Code (§ 9, § 10), **tout** `ANTHROPIC_*` (clé d'API, jeton, URL…), **tout** `CLAUDE_*` et `CLAUDECODE` (réglages comme `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CONFIG_DIR`), et les jetons GitHub `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`. Le reste est gardé (`PATH`, `HOME`, langue, mandataires, `GH_CONFIG_DIR`…). Posés : `PORT`, `HOST=127.0.0.1`, `TERM=xterm-256color`, `COLORTERM=truecolor`.
+- **`PORT`** : un par worktree, **partagé par tous ses runners** (deux serveurs du même worktree reçoivent le même `PORT` et se le disputent : au lancement d'un runner `dev` alors qu'un autre runner `dev` du même worktree tourne, la réponse porte un avertissement dans `warnings` ; le lancement a lieu quand même), dans 41 000–41 999. Port préféré dérivé du chemin du worktree (le même d'un démarrage du démon à l'autre), gardé tant que le worktree existe (libéré par `worktrees.remove`) ; une attribution n'est retenue qu'après un lancement réussi. À chaque lancement, s'il n'est tenu par aucun runner vivant du worktree, il est sondé (`bind` sans `listen` sur `127.0.0.1` et `::1`, `SO_REUSEADDR`) ; pris par un autre programme : le suivant libre de la plage (en bouclant), jamais celui d'un autre worktree. Entre la sonde et l'écoute du runner, un autre programme peut le prendre (accepté).
 - Relancer un runner terminé remplace son ancien processus dans `running`.
+- `warnings` : textes en français, vide le plus souvent (aujourd'hui : `PORT` partagé avec un autre runner `dev` vivant du worktree).
 
-**`runners.stop {id?, process_id}`** : `SIGTERM` au groupe de processus, `SIGKILL` au bout de 3 s s'il tourne encore ; réponse immédiate `{stopping: true, alive: true}` (déjà terminé : `{stopping: false, alive: false}`), la fin arrive par `runners.changed`. Un processus qui sort seul : `SIGHUP` aux restes de son groupe (comme une session), `SIGKILL` 3 s plus tard.
+**`runners.stop {id?, process_id}`** : `SIGTERM` au groupe de processus, `SIGKILL` au bout de 3 s s'il tourne encore ; réponse immédiate `{stopping: true, alive: true}` (déjà terminé : `{stopping: false, alive: false}`), la fin arrive par `runners.changed`. Un processus qui sort seul : `SIGHUP` aux restes de son groupe (comme une session), `SIGKILL` 3 s plus tard. Tests seulement : un binaire construit avec `test-support` lit `DEVMAESTRO_STOP_TIMEOUT_MS` (ce délai de 3 s, pour les sessions et les runners).
 
 `id` (la session) est facultatif pour `runners.stop`, `runners.subscribe`, `runners.resize` ; donné, le processus doit appartenir à cette session (`-32026` sinon).
 
 **Durée de vie** : un runner survit à la fermeture de l'app et à l'arrêt de sa session (sauf `sessions.stop {stop_runners: true}`) ; il s'arrête avec `sessions.forget` de sa session (retiré de la liste), avec `worktrees.remove` de son worktree (toutes sessions : `SIGTERM`, `SIGKILL` après 3 s, la suppression attend leur fin, 5 s au plus) et avec le démon (§ 9). Par session, au plus 8 vivants et 16 terminés gardés (les plus anciens partent).
 
-**URL** : la sortie est lue par lignes (fin `\n` ou `\r`, 4 Kio au plus par ligne) après retrait des séquences ANSI (CSI, OSC dont les liens OSC 8, DCS…, même coupées entre deux lectures). Sont repérés `localhost`, `127.0.0.1`, `[::1]` suivis de `:port` (1–65535), avec ou sans `http(s)://` (sans schéma : `http`), avec leur chemin ; `0.0.0.0` et `[::]` sont publiés en `127.0.0.1` et `[::1]`. Pas de chemin : `/`. Dédoublonnées, dans l'ordre d'apparition, 16 au plus, publiées dans `urls` (notification `runners.changed`).
+**URL** : la sortie est lue par lignes (fin `\n` ou `\r`, 4 Kio au plus par ligne) après retrait des séquences ANSI (CSI, OSC dont les liens OSC 8, DCS…, même coupées entre deux lectures ; une séquence abandonnée par CAN ou SUB, ou plus longue que 4 Kio, est quittée et le texte reprend : une chaîne jamais terminée n'absorbe pas la suite). Sont repérés `localhost`, `127.0.0.1`, `[::1]` suivis de `:port` (1–65535), avec ou sans `http(s)://` (sans schéma : `http`), avec leur chemin ; `0.0.0.0` et `[::]` sont publiés en `127.0.0.1` et `[::1]`. Pas de chemin : `/`. Dédoublonnées, dans l'ordre d'apparition, 16 au plus, publiées dans `urls` (notification `runners.changed`).
 
-Exemple : `{"id": "…", "runner_id": "package.json:dev"}` → `{"process_id": "…", "runner_id": "package.json:dev", "session_id": "…", "label": "dev", "kind": "dev", "command": ["pnpm", "run", "dev"], "cwd": "", "port": 41372, "started_at": "…", "ended_at": null, "state": "running", "exit_code": null, "signal": null, "urls": []}`.
+Exemple : `{"id": "…", "runner_id": "package.json:dev", "expected_fingerprint": "9f2c…"}` → `{"process_id": "…", "runner_id": "package.json:dev", "session_id": "…", "label": "dev", "kind": "dev", "command": ["pnpm", "run", "dev"], "cwd": "", "port": 41372, "started_at": "…", "ended_at": null, "state": "running", "exit_code": null, "signal": null, "urls": [], "warnings": []}`.
 
 ### Changer de mode (`sessions.setMode`)
 
@@ -802,7 +805,10 @@ Runner: {
   "kind": "dev" | "test" | "build" | "lint" | "other",
   "command": ["pnpm", "run", "dev"],   // argv construit par le démon
   "cwd": "app",                        // relatif à la racine du worktree, "" pour la racine
-  "source": "app/package.json:dev"     // fichier:clé
+  "source": "app/package.json:dev",    // fichier:clé
+  "body": "vite --host",               // ce qui s'exécute vraiment (4 Kio au plus)
+  "body_truncated": false,
+  "fingerprint": "9f2c…"               // SHA-256 à renvoyer dans runners.start (expected_fingerprint)
 }
 RunnerProcess: {
   "process_id": "uuid",                // identifiant de l'exécution (trames 0x02/0x03)

@@ -669,7 +669,83 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
     case 'forge.submitReview':
       forgeReview(o, out)
       return out
+    case 'runners.list':
+      out.id = uuid(o, 'id')
+      return out
+    case 'runners.start':
+      // Seulement un runner détecté, désigné par son identifiant : jamais de commande venue de la page.
+      out.id = uuid(o, 'id')
+      out.runner_id = runnerId(o, 'runner_id')
+      return out
+    case 'runners.stop':
+      out.id = uuid(o, 'id')
+      out.process_id = processId(o, 'process_id')
+      return out
   }
+}
+
+/**
+ * Identifiant d'un runner détecté : sa source, forme choisie par le démon
+ * (ex. `app/package.json:dev`) ; texte de 1 à 1 024 caractères, sans caractère de
+ * contrôle ni invisible de mise en forme (un nom de script peut contenir
+ * des espaces ou des deux-points).
+ */
+export const MAX_RUNNER_ID = 1024
+
+export function isRunnerId(v: unknown): v is string {
+  if (typeof v !== 'string' || v.length === 0 || [...v].length > MAX_RUNNER_ID) return false
+  if (v.trim() !== v) return false
+  return !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(v)
+}
+
+function runnerId(o: Obj, k: string): string {
+  const v = o[k]
+  if (!isRunnerId(v)) throw new ValidationError(`« ${k} » doit être un identifiant de runner (1 à ${MAX_RUNNER_ID} caractères visibles)`)
+  return v
+}
+
+/**
+ * Identifiant d'une exécution de runner : un UUID, comme une session (le flux
+ * de sortie passe par les mêmes trames 0x02/0x03, qui portent un UUID).
+ */
+export function isProcessId(v: unknown): v is string {
+  return isUuid(v)
+}
+
+function processId(o: Obj, k: string): string {
+  const v = o[k]
+  if (!isProcessId(v)) throw new ValidationError(`« ${k} » doit être un identifiant d'exécution (UUID)`)
+  return v
+}
+
+/** « Lancer » dans le dialogue de confirmation : session, runner et empreinte de la commande montrée. */
+export function validateRunnerConfirm(raw: unknown): { session_id: string; runner_id: string; fingerprint: string } {
+  const o = obj(raw)
+  const fp = o.fingerprint
+  if (typeof fp !== 'string' || !/^[0-9a-f]{64}$/.test(fp)) throw new ValidationError('« fingerprint » doit être une empreinte SHA-256')
+  return { session_id: uuid(o, 'session_id'), runner_id: runnerId(o, 'runner_id'), fingerprint: fp }
+}
+
+/** Taille du terminal d'une exécution de runner : entiers de 1 à 1000. */
+export function validateRunnerResize(raw: unknown): { process_id: string; cols: number; rows: number } {
+  const o = obj(raw)
+  return { process_id: processId(o, 'process_id'), cols: int(o, 'cols', 1, 1000), rows: int(o, 'rows', 1, 1000) }
+}
+
+/** Requête d'affichage du terminal d'un runner : session et exécution, ou rien. */
+export function validateRunnerView(
+  raw: unknown,
+): { session_id: string; process_id: string; cols?: number; rows?: number } | { session_id: null; process_id: null } {
+  const o = obj(raw)
+  if (o.process_id === null || o.process_id === undefined) {
+    if (o.session_id !== null && o.session_id !== undefined) throw new ValidationError('« session_id » sans « process_id »')
+    return { session_id: null, process_id: null }
+  }
+  const out: Obj = {}
+  out.session_id = uuid(o, 'session_id')
+  out.process_id = processId(o, 'process_id')
+  size(o, out)
+  return out as { session_id: string; process_id: string; cols?: number; rows?: number }
 }
 
 /** Requête `view` : `id` UUID ou `null`, taille facultative bornée. */

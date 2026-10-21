@@ -22,6 +22,7 @@ use uuid::Uuid;
 mod commits;
 mod conversation;
 pub mod forge;
+pub mod runners;
 mod subagents;
 mod worktrees;
 
@@ -268,6 +269,9 @@ pub enum Event {
     /// La conversation d'une session a changé (`conversation.changed`,
     /// calculée par connexion depuis sa révision au moment d'envoyer).
     ConversationChanged(Uuid),
+    /// Les processus de runners d'une session ont changé (`runners.changed`,
+    /// liste relue au moment d'envoyer).
+    RunnersChanged(Uuid),
 }
 
 /// Anti-rebond du recalcul du diff d'une session.
@@ -577,6 +581,14 @@ pub struct Daemon {
     conv_rev_floor: AtomicU64,
     /// Réponses récentes de la forge (60 s).
     forge_cache: Mutex<forge::ForgeCache>,
+    /// Processus des runners et ports des worktrees (v0.3, lot 14a).
+    runners: Mutex<runners::RunnerTable>,
+    /// Sérialise les lancements de runners (limite, port, inscription) et
+    /// la suppression d'un worktree.
+    runner_start: Mutex<()>,
+    /// Runners vivants par session (`Session.runners_running`). Verrou
+    /// feuille : aucun autre verrou n'est pris pendant qu'on le tient.
+    runner_live: Mutex<HashMap<Uuid, usize>>,
 }
 
 /// Liste des fichiers d'un dépôt, quand, pour quelle empreinte du diff et
@@ -931,6 +943,9 @@ impl Daemon {
             conv_wake: tokio::sync::Notify::new(),
             conv_rev_floor: AtomicU64::new(0),
             forge_cache: Mutex::new(forge::ForgeCache::default()),
+            runners: Mutex::new(runners::RunnerTable::default()),
+            runner_start: Mutex::new(()),
+            runner_live: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1340,7 +1355,15 @@ impl Daemon {
         let reg = self.lock();
         let mut entries: Vec<&Entry> = reg.sessions.values().collect();
         entries.sort_by_key(|e| std::cmp::Reverse(e.updated_at));
-        json!({"sessions": entries.iter().map(|e| e.json()).collect::<Vec<_>>()})
+        json!({"sessions": entries.iter().map(|e| self.entry_json(e)).collect::<Vec<_>>()})
+    }
+
+    /// JSON d'une session, avec `runners_running` (runners vivants, lu dans
+    /// un compteur à part : verrou feuille, pris sous celui du registre).
+    fn entry_json(&self, e: &Entry) -> Value {
+        let mut v = e.json();
+        v["runners_running"] = json!(self.live_runners_of(&e.session.id));
+        v
     }
 
     /// Identifiants de toutes les sessions.
@@ -1350,7 +1373,7 @@ impl Daemon {
 
     /// État courant d'une session, `None` si elle n'existe pas.
     pub fn session_json(&self, id: &Uuid) -> Option<Value> {
-        self.lock().sessions.get(id).map(Entry::json)
+        self.lock().sessions.get(id).map(|e| self.entry_json(e))
     }
 
     /// `sessions.get`.
@@ -1605,6 +1628,7 @@ impl Daemon {
             .unwrap_or_else(|e| e.into_inner())
             .remove(id);
         self.drop_conversation(id);
+        self.forget_session_runners(id);
         info!("session {id} oubliée (retirée du registre et de la base, transcript masqué)");
         let _ = self.events.send(Event::Removed(*id));
         Ok(json!({"forgotten": true}))
@@ -2813,7 +2837,7 @@ impl Daemon {
             entry.session.profile
         );
         self.commit(&mut entry);
-        let mut result = json!({"session": entry.json(), "warnings": warnings});
+        let mut result = json!({"session": self.entry_json(&entry), "warnings": warnings});
         if let Some(c) = &created {
             result["worktree"] = c.json();
         }
@@ -3031,7 +3055,7 @@ impl Daemon {
             if entry.session.state.subagents().total() > 0 {
                 self.signal_subagents(id, SubagentChange::Structural);
             }
-            let result = json!({"session": entry.json(), "warnings": warnings});
+            let result = json!({"session": self.entry_json(&entry), "warnings": warnings});
             reg.sessions.insert(id, entry);
             return Ok(result);
         }
@@ -3111,7 +3135,7 @@ impl Daemon {
             entry.session.claude_session_id
         );
         self.commit(&mut entry);
-        let result = json!({"session": entry.json(), "warnings": warnings});
+        let result = json!({"session": self.entry_json(&entry), "warnings": warnings});
         reg.sessions.insert(id, entry);
         Ok(result)
     }
@@ -3817,7 +3841,7 @@ impl Daemon {
         if (entry.session.title.clone(), entry.session.color.clone()) != before {
             self.commit(entry);
         }
-        Ok(json!({"session": entry.json()}))
+        Ok(json!({"session": self.entry_json(entry)}))
     }
 
     /// Trame de statusline d'un relais.
@@ -3954,7 +3978,7 @@ impl Daemon {
     /// `SIGKILL` immédiat à toutes les sessions (second signal d'arrêt).
     pub fn kill_all(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
-        for pid in self.running_pids() {
+        for pid in self.running_pids().into_iter().chain(self.runner_pids()) {
             self.signal_group(pid, nix::sys::signal::Signal::SIGKILL);
         }
     }
@@ -3978,26 +4002,36 @@ impl Daemon {
                 })
                 .collect()
         };
-        if pids.is_empty() {
+        // Les runners (v0.3, lot 14a) s'arrêtent avec le démon : SIGTERM.
+        let runner_pids = self.runner_pids();
+        if pids.is_empty() && runner_pids.is_empty() {
             return;
         }
-        info!("arrêt : SIGHUP à {} session(s)", pids.len());
+        info!(
+            "arrêt : SIGHUP à {} session(s), SIGTERM à {} runner(s)",
+            pids.len(),
+            runner_pids.len()
+        );
         for pid in &pids {
             self.signal_group(*pid, nix::sys::signal::Signal::SIGHUP);
         }
+        for pid in &runner_pids {
+            self.signal_group(*pid, nix::sys::signal::Signal::SIGTERM);
+        }
+        let busy = |d: &Self| d.running_count() + d.runners_alive() > 0;
         let deadline = tokio::time::Instant::now() + self.config.stop_timeout;
-        while self.running_count() > 0 && tokio::time::Instant::now() < deadline {
+        while busy(self) && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if self.running_count() == 0 {
+        if !busy(self) {
             return;
         }
-        for pid in self.running_pids() {
+        for pid in self.running_pids().into_iter().chain(self.runner_pids()) {
             self.signal_group(pid, nix::sys::signal::Signal::SIGKILL);
         }
         let deadline =
             tokio::time::Instant::now() + self.config.exit_grace + Duration::from_secs(1);
-        while self.running_count() > 0 && tokio::time::Instant::now() < deadline {
+        while busy(self) && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         self.mark_all_stopped();

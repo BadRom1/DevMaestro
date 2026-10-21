@@ -1,3 +1,4 @@
+import { runnersIndicator } from '../state/runners'
 import { useCallback, useId, useState, type ReactNode } from 'react'
 
 import type { Profile, ProjectInfo, Session, Subagent } from '../../../shared/protocol'
@@ -110,6 +111,8 @@ export function Sidebar(props: {
   onHidePast: (p: PastEntry) => Promise<void>
   /** Sous-agents connus, par session. */
   subagents: Record<string, Subagent[]>
+  /** Runners en cours, par session (lot 14a) ; absent : aucun. */
+  runnersRunning?: Record<string, number>
   /** Ouvre l'onglet « Agents » de la session (sur cet agent, ou sans choix). */
   onOpenAgent: (sessionId: string, agentId: string | null) => void
   /** Worktrees connus, par racine de dépôt (lot 6). */
@@ -169,13 +172,14 @@ export function Sidebar(props: {
     const forgettable = !s.alive
     const missing = folderMissing(s, props.projects[s.cwd])
     const iss = sessionIssue(s)
+    const runners = runnersIndicator(props.runnersRunning?.[s.id] ?? 0)
     return (
       <li key={s.id} className="srow-wrap">
         <div className="srow-line">
         <button
           className="srow"
           aria-current={s.id === props.selectedId}
-          aria-label={`${name}, ${branch}, ${glyph.label}, profil ${labelOf(s.profile).long}${color ? `, couleur ${COLOR_LABELS[color].toLowerCase()}` : ''}${missing ? ', dossier supprimé' : ''}${integratedWt ? ', branche intégrée' : ''}, dernière activité ${relativeTime(s.last_activity)}`}
+          aria-label={`${name}, ${branch}, ${glyph.label}, profil ${labelOf(s.profile).long}${color ? `, couleur ${COLOR_LABELS[color].toLowerCase()}` : ''}${missing ? ', dossier supprimé' : ''}${integratedWt ? ', branche intégrée' : ''}${runners ? `, ${runners}` : ''}, dernière activité ${relativeTime(s.last_activity)}`}
           title={`${name}\n${branch} · ${s.cwd}${missing ? ' (dossier supprimé)' : ''}`}
           onClick={() => props.onSelect(s.id)}
           onContextMenu={(e) => {
@@ -191,12 +195,17 @@ export function Sidebar(props: {
               <ColorBar color={color} />
               <span className="nm-t">{name}</span>
             </span>
-            {(branch !== name || missing || integratedWt) && (
+            {(branch !== name || missing || integratedWt || runners) && (
               <span className="sub">
                 {branch !== name && <span className="br">{branch}</span>}
                 {missing && (
                   <span className="gone" title={`ancien emplacement : ${s.cwd}`}>
                     dossier supprimé
+                  </span>
+                )}
+                {runners && (
+                  <span className="run-ind" title={`${runners} (onglet « Lancer »)`}>
+                    <span aria-hidden="true">▶</span> {props.runnersRunning?.[s.id]}
                   </span>
                 )}
                 {integratedWt && (

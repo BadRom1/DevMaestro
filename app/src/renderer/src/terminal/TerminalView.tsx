@@ -1,6 +1,8 @@
 /**
- * Terminal de la session affichée : un seul xterm.js pour toute l'app
+ * Terminal de la session affichée : un seul xterm.js pour les sessions
  * (moteur WebGL, repli sur le moteur DOM), alimenté par le canal du terminal.
+ * L'onglet « Lancer » (lot 14a) en monte un second, le temps de l'onglet,
+ * pour l'exécution de runner choisie (`stream` : autre canal, autres appels).
  *
  * Sa taille ne dépend que de la place disponible (la zone des demandes, au
  * bas du volet, la réduit : le terminal est réajusté quand elle apparaît,
@@ -18,9 +20,11 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import { Terminal, type ITheme } from '@xterm/xterm'
 import { useEffect, useRef, useState } from 'react'
 
-import { ackTerminal, api, call, onTerminalMessage, sendTerminalInput } from '../api'
+import { api, call, sessionChannel, type TerminalChannel } from '../api'
+import type { RpcFailure } from '../../../shared/bridge'
 import { describeError } from '../state/errors'
 import { TerminalFeed } from './feed'
+import { keyOverride, swallowedByOverride } from './keys'
 
 interface Live {
   term: Terminal
@@ -31,6 +35,25 @@ interface Live {
 }
 
 const encoder = new TextEncoder()
+
+/**
+ * Ce que le terminal affiche : la session (par défaut), ou l'exécution d'un
+ * runner (lot 14a), par un autre canal et d'autres appels.
+ */
+export interface TerminalStream {
+  channel: TerminalChannel
+  view(id: string | null, size: { cols?: number; rows?: number }): Promise<{ ok: true } | { ok: false; error: RpcFailure }>
+  resize(id: string, cols: number, rows: number): void
+  /** Libellé de la région (lecteurs d'écran). */
+  label: string
+}
+
+export const SESSION_TERMINAL: TerminalStream = {
+  channel: sessionChannel,
+  view: (id, size) => api.view({ id, ...size }),
+  resize: (id, cols, rows) => void call('sessions.resize', { id, cols, rows }).catch(() => {}),
+  label: 'Terminal de la session',
+}
 
 /** Taille plausible (un conteneur en cours de mise en page donne 1 ligne). */
 const usable = (cols: number, rows: number): boolean => cols >= 20 && rows >= 4
@@ -43,7 +66,10 @@ export function TerminalView({
   onLink,
   emptyText,
   hostRef,
+  stream = SESSION_TERMINAL,
 }: {
+  /** Flux affiché (session par défaut) ; fixé au montage. */
+  stream?: TerminalStream
   sessionId: string | null
   alive: boolean
   /** Couleurs du terminal, calculées par l'app à partir des jetons du thème. */
@@ -68,6 +94,7 @@ export function TerminalView({
   onSizeRef.current = onSize
   const onLinkRef = useRef(onLink)
   onLinkRef.current = onLink
+  const streamRef = useRef(stream)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [shown, setShown] = useState(false)
@@ -113,13 +140,14 @@ export function TerminalView({
       } catch (e) {
         console.warn('[terminal] WebGL indisponible, moteur DOM :', e)
       }
+      const st = streamRef.current
       const feed = new TerminalFeed(term, {
-        ack: ackTerminal,
+        ack: (gen, bytes) => st.channel.ack(gen, bytes),
         sizeMismatch: (cols, rows) => {
           const id = idRef.current
           if (aliveRef.current && id && usable(term.cols, term.rows)) {
             // Session vivante (un autre client a changé la taille) : on redemande la nôtre.
-            call('sessions.resize', { id, cols: term.cols, rows: term.rows }).catch(() => {})
+            st.resize(id, term.cols, term.rows)
             return
           }
           // Le démon garde sa taille (session arrêtée) : on prend celle de l'écran.
@@ -128,20 +156,30 @@ export function TerminalView({
         },
         paused: () => setCatchingUp(true),
       })
-      const offPort = onTerminalMessage((m) => {
+      const offPort = st.channel.onMessage((m) => {
         if (feed.handle(m) && m.t === 'reset') {
           setError(null)
           setShown(true)
           setCatchingUp(false)
         }
       })
+      term.attachCustomKeyEventHandler((e) => {
+        const seq = keyOverride(e)
+        if (seq !== null) {
+          const id = idRef.current
+          if (id) st.channel.sendInput(id, encoder.encode(seq))
+          e.preventDefault()
+          return false
+        }
+        return !swallowedByOverride(e)
+      })
       const d1 = term.onData((s) => {
         const id = idRef.current
-        if (id) sendTerminalInput(id, encoder.encode(s))
+        if (id) st.channel.sendInput(id, encoder.encode(s))
       })
       const d2 = term.onBinary((s) => {
         const id = idRef.current
-        if (id) sendTerminalInput(id, Uint8Array.from(s, (c) => c.charCodeAt(0) & 0xff))
+        if (id) st.channel.sendInput(id, Uint8Array.from(s, (c) => c.charCodeAt(0) & 0xff))
       })
       let resizeTimer: ReturnType<typeof setTimeout> | null = null
       const d3 = term.onResize(({ cols, rows }) => {
@@ -151,7 +189,7 @@ export function TerminalView({
         if (resizeTimer) clearTimeout(resizeTimer)
         resizeTimer = setTimeout(() => {
           const id = idRef.current
-          if (id) call('sessions.resize', { id, cols, rows }).catch(() => {})
+          if (id) st.resize(id, cols, rows)
         }, 80)
       })
       const refit = () => {
@@ -228,7 +266,7 @@ export function TerminalView({
     setCatchingUp(false)
     l.refit()
     const size = usable(l.term.cols, l.term.rows) ? { cols: l.term.cols, rows: l.term.rows } : {}
-    void api.view({ id: sessionId, ...size }).then((r) => {
+    void streamRef.current.view(sessionId, size).then((r) => {
       if (!r.ok && idRef.current === sessionId) setError(describeError(r.error.code, r.error.message))
     })
   }, [sessionId, ready])
@@ -242,7 +280,7 @@ export function TerminalView({
     const id = idRef.current
     if (id && usable(l.term.cols, l.term.rows)) {
       onSizeRef.current?.(l.term.cols, l.term.rows)
-      call('sessions.resize', { id, cols: l.term.cols, rows: l.term.rows }).catch(() => {})
+      streamRef.current.resize(id, l.term.cols, l.term.rows)
     }
   }, [alive, ready])
 
@@ -252,7 +290,7 @@ export function TerminalView({
 
   return (
     <div className="term">
-      <div className="term-host" ref={host} role="region" aria-label="Terminal de la session" />
+      <div className="term-host" ref={host} role="region" aria-label={stream.label} />
       {!sessionId && <div className="overlay">{emptyText}</div>}
       {sessionId && !shown && (
         <div className="overlay" role="status">

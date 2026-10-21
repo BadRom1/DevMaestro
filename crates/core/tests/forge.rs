@@ -592,7 +592,7 @@ fn initial_prompt_is_typed_then_pasted_once_the_tui_is_ready() {
     let _daemon = env.start_daemon();
     let mut c = Client::connect(&env);
     let hello = c.call("hello", json!({}));
-    assert_eq!(hello["capabilities"], json!({"initial_prompt": true}));
+    assert_eq!(hello["capabilities"]["initial_prompt"], true);
     let r = c.call(
         "sessions.launch",
         json!({"cwd": env.proj, "mode": "default", "initial": {

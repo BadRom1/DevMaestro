@@ -519,7 +519,12 @@ fn app_answer_racing_the_terminal_answer_resolves_once() {
     c.call("hello", json!({}));
     let id = session(&mut c, &env, json!({"mode": "default"}));
     for round in 0..5 {
-        c.input(id, b"/perm Bash\r");
+        // Quand l'app a gagné le tour précédent, son « o » n'a pas été lu par
+        // le dialogue : il attend dans la ligne de saisie (comme dans la vraie
+        // TUI). Sans l'effacer, la commande suivante deviendrait « o/perm
+        // Bash », un prompt ordinaire. Un retour arrière sur une ligne vide
+        // est sans effet.
+        c.input(id, b"\x7f/perm Bash\r");
         let req = c.wait_answerable(id, "permission");
         // Les deux réponses partent ensemble.
         c.input(id, b"o");
@@ -537,7 +542,14 @@ fn app_answer_racing_the_terminal_answer_resolves_once() {
             assert_eq!(how, ["answered_by_app"]);
         }
     }
-    // Chaque demande n'a exécuté l'outil qu'une fois.
+    // Chaque demande n'a exécuté l'outil qu'une fois. La sortie du terminal
+    // peut arriver après la notification « inactive » du dernier tour : on
+    // l'attend, puis on lit tout ce qui reste avant de compter.
+    c.wait_until("sortie du dernier tour", |c| {
+        c.output_text(id).matches("Bash autorisé").count() >= 5
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    while c.pump(Duration::from_millis(50)) {}
     let text = c.output_text(id);
     let done = text.matches("Bash autorisé").count();
     assert_eq!(done, 5, "{text}");
@@ -644,8 +656,11 @@ fn late_hook_does_not_override_the_mode_shown_by_the_footer() {
         c.last_session(id)
             .is_some_and(|s| s["mode"] == "acceptEdits")
     });
+    // Le hook en retard (mode « default ») puis la relecture du pied peuvent
+    // arriver après la condition ci-dessus : tout ce qui est en attente est
+    // lu (un seul `pump` ne lirait qu'une trame) avant de juger le dernier état.
     std::thread::sleep(Duration::from_millis(500));
-    c.pump(Duration::from_millis(50));
+    while c.pump(Duration::from_millis(50)) {}
     assert_eq!(c.last_session(id).unwrap()["mode"], "acceptEdits");
     // Même sans sortie du terminal après le hook : le démon relit le pied
     // de lui-même (~200 ms) et le garde.

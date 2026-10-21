@@ -35,13 +35,14 @@ import {
   type WorktreeInfo,
   type WorktreesList,
 } from '../shared/protocol'
-import { SettingsError, stepZoom, type ZoomDirection } from '../shared/settings'
+import { SettingsError, runnerConfirmed, stepZoom, type ZoomDirection } from '../shared/settings'
 import { managedWorktreesDir, rootFromCommonDir } from '../shared/worktrees'
 import { IntegratedNotifier, NotifyDecider, integratedContent, notificationContent } from './notifyLogic'
 import { SettingsStore } from './settingsStore'
 import { DaemonClient } from './daemon/client'
 import { defaultSocketPath } from './daemon/paths'
 import { TerminalRelay } from './daemon/relay'
+import { RUNNER_STREAM } from './daemon/runnerStream'
 import { RpcError } from './daemon/rpc'
 import { resolveOrchdBin, spawnDaemon } from './daemon/spawn'
 import {
@@ -51,11 +52,16 @@ import {
   validateExternalUrl,
   validateParams,
   validateRendererError,
+  validateRunnerConfirm,
+  validateRunnerResize,
+  validateRunnerView,
   validateView,
   validateZoomDirection,
 } from './validate'
 import { zoomKey } from './zoom'
 import { RendererErrorLog } from './errorLog'
+import { frameNavigationAllowed, mainFrameUrlAllowed } from './frameGuard'
+import { checkStart, confirmRunner, type GuardDeps } from './runnerGuard'
 
 const log = (msg: string): void => console.log(`[devmaestro] ${msg}`)
 
@@ -84,8 +90,18 @@ const client = new DaemonClient({
   log,
 })
 const relay = new TerminalRelay(client, { log })
+/** Terminal d'un runner (lot 14a) : second relais, second canal, une exécution affichée à la fois. */
+const runnerRelay = new TerminalRelay(client, { log: (m) => log(`runner : ${m}`), methods: RUNNER_STREAM })
 const settings = new SettingsStore(app.getPath('userData'), log)
 const settingsLoaded = settings.load()
+/** Confirmation des commandes du dépôt (lot 14a) : détection relue au démon, réglages du processus principal. */
+const runnerGuard: GuardDeps = {
+  request: (method, params) => client.request(method, params),
+  isConfirmed: (worktree, fingerprint) => runnerConfirmed(settings.settings, worktree, fingerprint),
+  remember: async (worktree, fingerprint) => {
+    await settings.confirmRunner(worktree, fingerprint)
+  },
+}
 
 /* ---------- Notifications desktop ---------- */
 
@@ -243,10 +259,18 @@ function onEffect(id: string, effect: Effect): void {
   else if (effect.type === 'request_resolved' && decider.resolved(id, effect.request_id)) closeNotification(id)
 }
 
-client.on('pty', (id, data) => relay.onPty(id, data))
+client.on('pty', (id, data) => {
+  // Chaque relais ne garde que les octets de sa cible (session ou exécution de runner).
+  relay.onPty(id, data)
+  runnerRelay.onPty(id, data)
+})
 client.on('notification', (n) => {
   if (n.method === 'session.resync') {
     relay.onNotification(n)
+    return
+  }
+  if (RUNNER_STREAM.resync.includes(n.method)) {
+    runnerRelay.onNotification(n)
     return
   }
   if (n.method === 'session.updated') {
@@ -278,17 +302,22 @@ client.on('notification', (n) => {
     n.method === 'session.diff_changed' ||
     n.method === 'session.subagents_changed' ||
     n.method === 'project.worktrees_changed' ||
-    n.method === 'conversation.changed'
+    n.method === 'conversation.changed' ||
+    n.method === 'runners.changed'
   ) {
     toPage(Ipc.notification, { method: n.method, params: n.params })
   }
 })
 client.on('connected', () => {
   relay.onConnected()
+  runnerRelay.onConnected()
   void settingsLoaded.then(() => baselineWorktrees())
 })
 client.on('state', (s) => {
-  if (s.state !== 'connected') relay.onDisconnected()
+  if (s.state !== 'connected') {
+    relay.onDisconnected()
+    runnerRelay.onDisconnected()
+  }
   toPage(Ipc.connectionChanged, s)
 })
 
@@ -296,6 +325,7 @@ let mainWindow: BrowserWindow | null = null
 /** Contenus de la page de la fenêtre (gardé après sa fermeture, pour les réglages envoyés en partant). */
 let pageContentsId: number | null = null
 let port: MessagePortMain | null = null
+let runnerPort: MessagePortMain | null = null
 
 function toPage(channel: string, payload: unknown): void {
   const wc = mainWindow?.webContents
@@ -327,32 +357,34 @@ async function changeZoom(dir: ZoomDirection): Promise<number> {
   return next
 }
 
-/** Nouveau canal du terminal pour la page ; l'ancien est fermé. */
-function openTerminalPort(win: BrowserWindow): void {
-  port?.close()
+/** Canal d'un relais vers la page : touches et accusés montent, écran et octets descendent. */
+function openPort(win: BrowserWindow, r: TerminalRelay, channel: string): MessagePortMain {
   const { port1, port2 } = new MessageChannelMain()
-  port = port1
   port1.on('message', (e) => {
     const m = e.data as Record<string, unknown> | null
     if (!m || typeof m !== 'object') return
     if (m.t === 'input' && typeof m.id === 'string' && m.data instanceof Uint8Array) {
-      relay.input(m.id, m.data)
+      r.input(m.id, m.data)
     } else if (m.t === 'ack' && Number.isInteger(m.gen) && Number.isInteger(m.bytes)) {
-      relay.ack(m.gen as number, m.bytes as number)
+      r.ack(m.gen as number, m.bytes as number)
     }
   })
   port1.start()
-  relay.setSink({ post: (msg: PortDown) => port1.postMessage(msg) })
-  win.webContents.postMessage(Ipc.port, null, [port2])
+  r.setSink({ post: (msg: PortDown) => port1.postMessage(msg) })
+  win.webContents.postMessage(channel, null, [port2])
+  return port1
 }
 
-/**
- * La page est une application d'une seule page : elle ne navigue jamais.
- * Seul le rechargement de la même adresse (développement, Ctrl+R) passe.
- */
-function rendererUrlAllowed(contents: Electron.WebContents, url: string): boolean {
-  const strip = (u: string) => u.split('#')[0]
-  return strip(url) === strip(contents.getURL())
+/** Nouveau canal du terminal pour la page ; l'ancien est fermé. */
+function openTerminalPort(win: BrowserWindow): void {
+  port?.close()
+  port = openPort(win, relay, Ipc.port)
+}
+
+/** Nouveau canal du terminal des runners ; l'ancien est fermé. */
+function openRunnerPort(win: BrowserWindow): void {
+  runnerPort?.close()
+  runnerPort = openPort(win, runnerRelay, Ipc.runnerPort)
 }
 
 function createWindow(): BrowserWindow {
@@ -408,8 +440,11 @@ function createWindow(): BrowserWindow {
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null
     relay.setSink(null)
+    runnerRelay.setSink(null)
     port?.close()
     port = null
+    runnerPort?.close()
+    runnerPort = null
   })
   const devUrl = process.env.ELECTRON_RENDERER_URL
   if (dev && devUrl) void win.loadURL(devUrl)
@@ -442,20 +477,62 @@ function logDisplayPlatform(): void {
   )
 }
 
+/** Navigation d'un cadre de `contents` : règle de `frameGuard`, journalisée quand elle refuse. */
+function guardFrame(
+  contents: Electron.WebContents,
+  ev: { url: string; isMainFrame: boolean; frame: Electron.WebFrameMain | null; preventDefault(): void },
+  what: string,
+): void {
+  const allowed = frameNavigationAllowed({
+    url: ev.url,
+    isMainFrame: ev.isMainFrame,
+    hasFrame: ev.frame !== null,
+    directChild: ev.frame?.parent?.frameTreeNodeId === contents.mainFrame.frameTreeNodeId,
+    pageUrl: contents.getURL(),
+  })
+  if (allowed) return
+  if (!ev.isMainFrame) log(`${what} d'un cadre refusée : ${ev.url.slice(0, 200)}`)
+  ev.preventDefault()
+}
+
+/** Dernière fenêtre demandée par l'aperçu et proposée à la page (une par seconde au plus). */
+let lastPopup = 0
+
 function hardenSessions(): void {
   // Aucune permission web (caméra, notifications web, géolocalisation…) pour la page.
   session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false))
   session.defaultSession.setPermissionCheckHandler(() => false)
   app.on('web-contents-created', (_e, contents) => {
-    contents.on('will-navigate', (ev, url) => {
-      if (!rendererUrlAllowed(contents, url)) ev.preventDefault()
+    // La page ne navigue jamais (seul le rechargement de la même adresse passe).
+    contents.on('will-navigate', (ev) => {
+      if (!mainFrameUrlAllowed(contents.getURL(), ev.url)) ev.preventDefault()
     })
-    contents.on('will-redirect', (ev, url) => {
-      if (!rendererUrlAllowed(contents, url)) ev.preventDefault()
-    })
+    // Redirection serveur : comparée à l'adresse de la page pour le cadre principal seulement
+    // (les 302 de l'aperçu passent), règle des cadres pour les autres.
+    contents.on('will-redirect', (ev) => guardFrame(contents, ev, 'redirection'))
     contents.on('will-attach-webview', (ev) => ev.preventDefault())
-    // Jamais de nouvelle fenêtre : les liens passent par `openExternal`, après confirmation dans l'app.
-    contents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    // Cadres enfants, à toute profondeur (le cadre principal est vu par `will-navigate`).
+    contents.on('will-frame-navigate', (ev) => {
+      if (!ev.isMainFrame) guardFrame(contents, ev, 'navigation')
+    })
+    // Jamais de nouvelle fenêtre Electron. La page de l'app n'en ouvre pas (ses liens passent par
+    // `openExternal`) : une demande vient de l'aperçu web ; son lien http(s) est proposé à la page,
+    // qui demande confirmation avant de l'ouvrir dans le navigateur.
+    contents.setWindowOpenHandler((details) => {
+      if (contents === mainWindow?.webContents) {
+        try {
+          const url = validateExternalUrl(details.url)
+          const now = Date.now()
+          if (now - lastPopup >= 1000) {
+            lastPopup = now
+            toPage(Ipc.previewPopup, url)
+          }
+        } catch {
+          /* lien non http(s) : refusé sans rien proposer */
+        }
+      }
+      return { action: 'deny' }
+    })
   })
 }
 
@@ -492,6 +569,12 @@ function registerIpc(): void {
         await settingsLoaded
         clean.enabled = settings.settings.forges.enabled
       }
+      // Commande du dépôt : lancée seulement si l'utilisateur l'a acceptée dans ce worktree (lot 14a).
+      if (method === 'runners.start') {
+        await settingsLoaded
+        // Le démon refuse (-32024) si sa détection au lancement n'a plus cette empreinte.
+        clean.expected_fingerprint = await checkStart(runnerGuard, clean.id as string, clean.runner_id as string)
+      }
       const result = await client.request(method, clean, requestTimeoutMs(method as MethodName, clean))
       if (method === 'sessions.resize') relay.noteSize(clean.id as string, clean.cols as number, clean.rows as number)
       return { ok: true, result } as CallResult<MethodName>
@@ -507,6 +590,41 @@ function registerIpc(): void {
     } catch (err) {
       return failure(err)
     }
+  })
+  ipcMain.handle(Ipc.viewRunner, async (e, req: unknown) => {
+    if (!trusted(e)) return UNTRUSTED
+    try {
+      const r = validateRunnerView(req)
+      await runnerRelay.view(
+        r.process_id === null ? { id: null } : { id: r.process_id, owner: r.session_id, cols: r.cols, rows: r.rows },
+      )
+      return { ok: true }
+    } catch (err) {
+      return failure(err)
+    }
+  })
+  ipcMain.handle(Ipc.confirmRunner, async (e, req: unknown) => {
+    if (!trusted(e)) return UNTRUSTED
+    try {
+      const r = validateRunnerConfirm(req)
+      await settingsLoaded
+      await confirmRunner(runnerGuard, r.session_id, r.runner_id, r.fingerprint)
+      return { ok: true }
+    } catch (err) {
+      return failure(err)
+    }
+  })
+  ipcMain.on(Ipc.resizeRunner, (e, req: unknown) => {
+    if (!trusted(e)) return
+    try {
+      const r = validateRunnerResize(req)
+      runnerRelay.resize(r.process_id, r.cols, r.rows)
+    } catch {
+      /* taille refusée : ignorée */
+    }
+  })
+  ipcMain.on(Ipc.requestRunnerPort, (e) => {
+    if (mainWindow && trusted(e)) openRunnerPort(mainWindow)
   })
   ipcMain.handle(Ipc.connection, (e) => (trusted(e) ? client.state : null))
   ipcMain.handle(Ipc.home, (e) => (trusted(e) ? validHome(homedir()) : null))

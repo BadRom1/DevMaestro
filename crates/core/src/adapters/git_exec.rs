@@ -172,16 +172,16 @@ impl GitExec {
         });
         let deadline = Instant::now() + timeout;
         let status = loop {
+            // Délai d'abord : un délai nul tue toujours le processus, même
+            // s'il a fini avant le premier coup d'œil (machine chargée).
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(None);
+            }
             match child.try_wait() {
                 Ok(Some(s)) => break s,
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Ok(None);
-                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(5)),
                 Err(e) => return Err(failed(what, e)),
             }
         };

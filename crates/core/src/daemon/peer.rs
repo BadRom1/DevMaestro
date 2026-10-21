@@ -51,6 +51,11 @@ use std::os::fd::{AsFd, OwnedFd};
 /// Préfixe des scopes systemd des sessions (`devmaestro-session-<id>.scope`).
 pub const SCOPE_PREFIX: &str = "devmaestro-session-";
 
+/// Préfixe des scopes systemd des runners (`devmaestro-runner-<…>.scope`,
+/// v0.3, lot 14a) : du code du dépôt, aussi peu sûr qu'une commande Bash
+/// d'une session ; refusé au socket de contrôle de la même façon.
+pub const RUNNER_SCOPE_PREFIX: &str = "devmaestro-runner-";
+
 /// Profondeur maximale de la chaîne des parents remontée.
 const MAX_DEPTH: usize = 4096;
 
@@ -114,11 +119,12 @@ pub fn cgroup(pid: u32) -> Option<String> {
     std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()
 }
 
-/// Ce cgroup est-il celui d'un scope de session ?
+/// Ce cgroup est-il celui d'un scope de session (ou de runner) ?
 pub fn in_session_scope(cgroup: &str) -> bool {
-    cgroup
-        .lines()
-        .any(|l| l.contains(&format!("/{SCOPE_PREFIX}")) && l.trim_end().ends_with(".scope"))
+    cgroup.lines().any(|l| {
+        (l.contains(&format!("/{SCOPE_PREFIX}")) || l.contains(&format!("/{RUNNER_SCOPE_PREFIX}")))
+            && l.trim_end().ends_with(".scope")
+    })
 }
 
 /// Ce cgroup est-il exactement le scope `unit` ?
@@ -370,6 +376,9 @@ mod tests {
         assert!(in_session_scope(c));
         assert!(in_scope(c, "devmaestro-session-1a2b3c4d-5e6f7a8b.scope"));
         assert!(!in_scope(c, "devmaestro-session-autre.scope"));
+        assert!(in_session_scope(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/devmaestro-runner-1a2b3c4d-5e6f7a8b.scope\n"
+        ));
         assert!(!in_session_scope(
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome-x.scope\n"
         ));

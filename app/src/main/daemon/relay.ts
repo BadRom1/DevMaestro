@@ -1,5 +1,8 @@
 /**
- * Relais du terminal de la session affichée vers la page (ADR 0004) :
+ * Relais du terminal de la session affichée vers la page (ADR 0004). Les
+ * noms de méthodes cités ici sont ceux des sessions (`SESSION_STREAM`) ; le
+ * terminal d'un runner (lot 14a) utilise le même relais avec les siens
+ * (`RUNNER_STREAM`, `runnerStream.ts`), sur un second canal :
  *
  * - une seule session transmise à la fois ; changer de session désabonne
  *   la précédente ;
@@ -38,7 +41,35 @@ export interface RelaySink {
   post(msg: PortDown): void
 }
 
+/**
+ * Méthodes du flux d'un terminal : celles des sessions par défaut ; le
+ * terminal d'un runner (lot 14a) passe par les siennes (`runnerStream`).
+ */
+export interface StreamMethods {
+  subscribe: string
+  unsubscribe: string
+  /** `null` : pas de redimensionnement côté démon. */
+  resize: string | null
+  /** Notifications d'un nouvel instantané (abonné en retard). */
+  resync: readonly string[]
+  /** Paramètres d'une requête pour une cible (`owner` : session d'un runner). */
+  params(id: string, owner: string | undefined): Record<string, unknown>
+  /** Cible d'une notification de resynchronisation (`undefined` : pas pour nous). */
+  resyncTarget(params: Record<string, unknown>): string | undefined
+}
+
+export const SESSION_STREAM: StreamMethods = {
+  subscribe: 'sessions.subscribe',
+  unsubscribe: 'sessions.unsubscribe',
+  resize: 'sessions.resize',
+  resync: ['session.resync'],
+  params: (id) => ({ id }),
+  resyncTarget: (p) => (typeof p.id === 'string' ? p.id : undefined),
+}
+
 export interface RelayOptions {
+  /** Méthodes du flux (sessions par défaut). */
+  methods?: StreamMethods
   minBatchBytes?: number
   maxDelayMs?: number
   highWaterBytes?: number
@@ -52,6 +83,8 @@ export interface RelayOptions {
 
 interface Target {
   id: string
+  /** Session propriétaire (terminal d'un runner). */
+  owner?: string | undefined
   gen: number
   /** Vrai une fois l'instantané envoyé : les octets suivants sont relayés. */
   accepting: boolean
@@ -82,6 +115,7 @@ export class TerminalRelay {
       subscribeRetries: 3,
       subscribeBackoffMs: 300,
       subscribeTimeoutMs: 5_000,
+      methods: SESSION_STREAM,
       log: () => {},
       ...opts,
     }
@@ -107,31 +141,37 @@ export class TerminalRelay {
   }
 
   /** Affiche une session (ou aucune). Rejette si l'abonnement échoue. */
-  async view(req: { id: string | null; cols?: number | undefined; rows?: number | undefined }): Promise<void> {
+  async view(req: {
+    id: string | null
+    owner?: string | undefined
+    cols?: number | undefined
+    rows?: number | undefined
+  }): Promise<void> {
+    const m = this.o.methods
     const gen = ++this.gen
     const previous = this.target
     this.dropBatch()
     this.unacked = 0
     this.paused = false
     if (previous && previous.id !== req.id) {
-      this.client.request('sessions.unsubscribe', { id: previous.id }).catch(() => {})
+      this.client.request(m.unsubscribe, m.params(previous.id, previous.owner)).catch(() => {})
     }
     if (!req.id) {
       this.target = null
       this.sink?.post({ t: 'none', gen })
       return
     }
-    const target: Target = { id: req.id, gen, accepting: false, cols: req.cols, rows: req.rows }
+    const target: Target = { id: req.id, owner: req.owner, gen, accepting: false, cols: req.cols, rows: req.rows }
     this.target = target
-    if (req.cols && req.rows) {
+    if (req.cols && req.rows && m.resize) {
       // Avant l'abonnement : l'instantané est rendu à la taille de la page.
-      this.client.request('sessions.resize', { id: req.id, cols: req.cols, rows: req.rows }).catch(() => {})
+      this.client.request(m.resize, { ...m.params(req.id, req.owner), cols: req.cols, rows: req.rows }).catch(() => {})
     }
     for (let attempt = 0; ; attempt++) {
       try {
         await this.client.request<{ id: string; snapshot: Snapshot }>(
-          'sessions.subscribe',
-          { id: req.id },
+          m.subscribe,
+          m.params(req.id, req.owner),
           this.o.subscribeTimeoutMs,
           (result) => {
             // Synchrone, avant les trames 0x02 qui suivent la réponse.
@@ -153,7 +193,7 @@ export class TerminalRelay {
         this.o.log(`abonnement à ${req.id} sans réponse, nouvel essai`)
         await new Promise((r) => setTimeout(r, this.o.subscribeBackoffMs * 2 ** attempt))
         if (this.target !== target) return
-        this.client.request('sessions.unsubscribe', { id: req.id }).catch(() => {})
+        this.client.request(m.unsubscribe, m.params(req.id, req.owner)).catch(() => {})
       }
     }
   }
@@ -164,6 +204,18 @@ export class TerminalRelay {
       this.target.cols = cols
       this.target.rows = rows
     }
+  }
+
+  /**
+   * Redimensionne le terminal affiché (flux sans méthode relayée de la page,
+   * comme celui des runners) ; ignoré pour une autre cible.
+   */
+  resize(id: string, cols: number, rows: number): void {
+    const t = this.target
+    const m = this.o.methods
+    if (!t || t.id !== id || !m.resize) return
+    this.noteSize(id, cols, rows)
+    this.client.request(m.resize, { ...m.params(t.id, t.owner), cols, rows }).catch(() => {})
   }
 
   /** Octets d'un terminal reçus du démon. */
@@ -186,10 +238,10 @@ export class TerminalRelay {
   }
 
   onNotification(n: RpcNotification): void {
-    if (n.method !== 'session.resync') return
-    const p = n.params as { id?: string; snapshot?: Snapshot }
+    if (!this.o.methods.resync.includes(n.method)) return
+    const p = (n.params ?? {}) as Record<string, unknown> & { snapshot?: Snapshot }
     const t = this.target
-    if (!t || !t.accepting || p.id !== t.id || !p.snapshot) return
+    if (!t || !t.accepting || this.o.methods.resyncTarget(p) !== t.id || !p.snapshot) return
     if (this.paused) return // un instantané sera redemandé à la reprise
     this.flush()
     this.sink?.post({ t: 'reset', id: t.id, gen: t.gen, snapshot: p.snapshot, reason: 'resync' })
@@ -242,7 +294,7 @@ export class TerminalRelay {
     const t = this.target
     if (!t) return
     this.o.log(`nouvel instantané de ${t.id} (${why})`)
-    this.view({ id: t.id, cols: t.cols, rows: t.rows }).catch((e: Error) =>
+    this.view({ id: t.id, owner: t.owner, cols: t.cols, rows: t.rows }).catch((e: Error) =>
       this.o.log(`réabonnement impossible : ${e.message}`),
     )
   }
