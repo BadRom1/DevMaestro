@@ -31,18 +31,20 @@ Tout le travail est sur la branche locale `v0.1` (non poussée). `main` (publié
 | `32b25ba` | v0.2 lot 3 bis : coloration, sélection envoyée à Claude |
 | `954ba26` | v0.2 lot 6 : worktrees ; filtre et volet du kanban, palette par mode, numéros de ligne |
 
-## Point de reprise (2026-10-21)
+## Point de reprise (2026-10-21, soir)
 
-Commité sur `v0.1`, **démon et app non redémarrés** (tu les utilises) : la nouvelle version est prête, à toi de choisir quand relancer.
+Tout est commité sur `v0.1`. **Le démon tourne encore sur le code de ce matin** (non redémarré, tu l'utilises) ; l'app se relance seule sans arrêter les sessions (`pnpm -C app start`).
 
-- **Maj+Entrée** dans le terminal : retour à la ligne au lieu de valider.
-- **Lot 14a** : runners (détection, lancement sans shell, port par worktree) et aperçu web ; confirmation sur une empreinte qui couvre chaque fichier lu en entier (scripts, Makefile et inclusions, compose et `env_file`…), listés dans le dialogue.
-- **Lot 15** : filtres de la forge alignés, étiquettes choisies parmi celles du dépôt, cases à cocher Markdown, panneau Forge redimensionnable et plein écran, bouton de lancement en bas, noms de session et de branche courts.
-- **Reprise d'une ancienne session** : relancée depuis le dossier où la conversation a commencé (celui sous lequel Claude Code l'a rangée) ; avertissement si on force un autre dossier, message clair si Claude Code ne la trouve pas.
+Livré aujourd'hui, à essayer :
+- **Terminal** : Maj+Entrée = retour à la ligne.
+- **14a** runners et aperçu web ; **14b** livraison (PR par l'agent ou fusion) et suivi de CI.
+- **15** retours sur la forge ; **15 bis** arborescence, compteurs +/−, j/k dans Commits, `l` pour « vu » ; **15 ter** changer de compte (et choix du profil à la reprise, anciennes sessions sans doublons).
+- **16** colonnes redimensionnables, grille de 1 à 4 zones ; **17** slash commands ; **18** consignes personnalisables (Réglages → Consignes) ; **19** revue assistée par IA ; **20** interface FR/EN (Réglages → Général → Langue).
+- **Reprise** depuis le dossier de départ de la conversation.
 
-- **Lot 14b** (livraison et CI, non commité) : sous l'en-tête d'une session, « Ouvrir une demande de fusion » et « Fusionner dans <branche par défaut> » (bouton principal selon le mode du projet, consigne montrée puis tapée, modèles dans Réglages → Général → Livraison) ; « Livrée » / « PR #n ouverte » et CI de la session dans l'en-tête, la barre latérale et le kanban ; notification « CI en échec sur … » ; « Voir l'échec » et « Envoyer l'échec à Claude » (journal nettoyé, secrets masqués, borné, collé comme donnée). Démon et app à relancer pour l'essayer.
+Actifs seulement après redémarrage du démon (arrête les sessions) : forge et CI du 14b, empreinte des runners du 15, reprise depuis le bon dossier, commandes `/` du disque (17), consigne de revue personnalisée (18).
 
-Prochaines étapes : essayer 14b et 15 bis (arborescence dans le lecteur de diff, compteurs +/−, j/k dans Commits, `l` pour « vu ») ; puis 16 (disposition), 17 (slash commands), 18 (consignes personnalisables : les modèles de livraison du 14b en sont un premier morceau).
+Restent : 13c (presque entièrement couvert par 13a, 13b et 14b : à revoir), 21 dictée, 22 plugins, paquet `.deb`.
 
 ## Point de reprise précédent (2026-10-20, soir)
 
