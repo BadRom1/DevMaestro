@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod plugin;
+
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;

@@ -10,7 +10,7 @@ import {
   type Subagent,
 } from '../../../shared/protocol'
 import { CallError, call, errorCode, errorText } from '../api'
-import { useT } from '../i18n'
+import { useI18n, useT } from '../i18n'
 import {
   basename,
   folderMissing,
@@ -57,10 +57,27 @@ import { CeilingHint, SwitchAccountButton, SwitchArea, SwitchStatus, type Header
 import { switchInFlight } from '../state/accountSwitch'
 import { sortFiles } from '../state/diff'
 import { guardLeave } from '../state/unsaved'
-import { activateTab, defaultLayout, isVisible, removeTabs, TAB_IDS, tabLabel, zoneOfTab, type Layout, type TabId } from '../state/layout'
+import {
+  activateTab,
+  defaultLayout,
+  ensureTabs,
+  isPluginTabId,
+  isVisible,
+  pluginTabId,
+  pluginTabsOf,
+  removeTabs,
+  TAB_IDS,
+  tabLabel,
+  zoneOfTab,
+  type Layout,
+  type PluginTabId,
+  type TabId,
+} from '../state/layout'
+import { localized } from '../pluginsStore'
+import { PluginPanel } from './PluginPanel'
 import { getZones, resetLayout, setZones, useZones } from './layoutStore'
 import { ZoneGrid } from './ZoneGrid'
-import type { DiffFile } from '../../../shared/protocol'
+import type { DiffFile, PluginInfo } from '../../../shared/protocol'
 
 const NO_FILES: readonly DiffFile[] = []
 
@@ -423,6 +440,8 @@ function typingElsewhere(terminalHost: HTMLElement | null): boolean {
   return a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement || a instanceof HTMLSelectElement
 }
 
+const NO_PLUGINS: readonly PluginInfo[] = []
+
 export function SessionPane({
   session,
   project,
@@ -455,7 +474,13 @@ export function SessionPane({
   onRunnersUnsupported,
   integrated = false,
   accountSwitch,
+  plugins = NO_PLUGINS,
 }: {
+  /**
+   * Plugins actifs qui contribuent un onglet de session (lot 22a) ; vide
+   * sans la capacité `plugins` : aucun onglet de plugin.
+   */
+  plugins?: readonly PluginInfo[]
   /** Changer de compte de la session affichée (lot 15 ter) ; absent : action masquée. */
   accountSwitch?: HeaderSwitch
   /** Branche de la session affichée intégrée dans la référence (lot 6). */
@@ -520,7 +545,21 @@ export function SessionPane({
    * Onglets indisponibles (« Lancer » si le démon ne connaît pas les runners) : retirés de l'affichage
    * seulement ; toutes les opérations portent sur la disposition complète, qui garde leur place.
    */
-  const unavailable = useMemo<readonly TabId[]>(() => (runnersSupported === false ? ['runners'] : []), [runnersSupported])
+  const { locale } = useI18n()
+  /** Onglets des plugins actifs (lot 22a), par nom. */
+  const pluginTabs = useMemo(
+    () => new Map<PluginTabId, PluginInfo>(plugins.filter((p) => p.tab).map((p) => [pluginTabId(p.name), p])),
+    [plugins],
+  )
+  const pluginKey = [...pluginTabs.keys()].join(',')
+  const unavailable = useMemo<readonly TabId[]>(
+    () => [
+      ...(runnersSupported === false ? (['runners'] as const) : []),
+      // Plugin retiré, révoqué ou modifié : son onglet est masqué, sa place gardée.
+      ...pluginTabsOf(stored).filter((id) => !pluginTabs.has(id)),
+    ],
+    [runnersSupported, stored, pluginKey],
+  )
   const shownOf = (l: Layout) => (unavailable.length ? removeTabs(l, unavailable) : l)
   /** Disposition affichée. */
   const layout = useMemo(() => shownOf(stored), [stored, unavailable])
@@ -537,6 +576,13 @@ export function SessionPane({
     const next = activateTab(l, settings.ui.sessionTab)
     if (next !== l) setZones(next, false)
   }, [])
+  // Plugin devenu actif et absent de la disposition retenue : son onglet rejoint la première zone.
+  useEffect(() => {
+    if (!pluginKey) return
+    const l = getZones()
+    const next = ensureTabs(l, [...pluginTabs.keys()])
+    if (next !== l) setZones(next)
+  }, [pluginKey, stored])
   const visible = (tab: TabId) => isVisible(layout, tab)
   /**
    * Nouvelle disposition : confirmation d'abord si elle masque l'onglet
@@ -678,9 +724,21 @@ export function SessionPane({
       )}
     </>
   )
-  const zoneTabs = TAB_IDS.filter((k) => k !== 'runners' || runnersSupported !== false).map((id) => ({ id, extra: extra(id) }))
+  const zoneTabs = [
+    ...TAB_IDS.filter((k) => k !== 'runners' || runnersSupported !== false).map((id) => ({ id: id as TabId, extra: extra(id) })),
+    ...[...pluginTabs].map(([id, p]) => ({ id: id as TabId, label: localized(p.tab?.label, locale) ?? p.name, plugin: p.name })),
+  ]
 
   function renderPanel(k: TabId, shown: boolean): ReactNode {
+    if (isPluginTabId(k)) {
+      const p = pluginTabs.get(k)
+      if (!shown || !p) return null
+      return (
+        <ViewBoundary key={`${session?.id ?? ''}:${p.name}`} label={localized(p.tab?.label, locale) ?? p.name}>
+          <PluginPanel key={`${session?.id ?? ''}:${p.name}`} plugin={p} session={session} visible={shown} onLink={onLink} />
+        </ViewBoundary>
+      )
+    }
     switch (k) {
       case 'terminal':
         return (

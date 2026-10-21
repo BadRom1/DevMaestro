@@ -11,7 +11,9 @@ import {
   defaultSettings,
   readSettings,
   validatePatch,
+  withPluginAccepted,
   withRunnerConfirmed,
+  withoutPlugin,
   type AppSettings,
 } from '../shared/settings'
 
@@ -72,6 +74,17 @@ export class SettingsStore {
    */
   async confirmRunner(worktree: string, fingerprint: string): Promise<AppSettings> {
     return this.commit(withRunnerConfirmed(this.current, worktree, fingerprint))
+  }
+
+  /** Retient un plugin accepté (lot 22a). Réservé au processus principal. */
+  async acceptPlugin(name: string, fingerprint: string): Promise<AppSettings> {
+    return this.commit(withPluginAccepted(this.current, name, fingerprint))
+  }
+
+  /** Oublie l'accord d'un plugin (lot 22a). Réservé au processus principal. */
+  async forgetPlugin(name: string): Promise<AppSettings> {
+    const next = withoutPlugin(this.current, name)
+    return next === this.current ? this.current : this.commit(next)
   }
 
   private async commit(next: AppSettings): Promise<AppSettings> {

@@ -10,7 +10,8 @@
 
 import { t } from './i18n'
 import { DEFAULT_LANGUAGE, LANGUAGE_PREFS, isLanguagePref, type LanguagePref } from './i18n/core'
-import { MAX_STORED_TEMPLATE, PROMPT_IDS, isDefaultPrompt, isPromptId, overridesFrom, promptDef, promptProblem, type PromptId, type PromptSettings } from './prompts'
+import { MAX_PLUGIN_PROMPTS, MAX_STORED_TEMPLATE, PROMPT_IDS, isDefaultPrompt, isPromptId, isPromptKey, overridesFrom, promptBase, promptDef, promptProblem, type PromptId, type PromptKey, type PromptSettings } from './prompts'
+import { isPluginFingerprint, isPluginName } from './pluginDocument'
 import { DELIVERY_MODES, type DeliveryMode } from './protocol'
 import { DEFAULT_WORKTREE_LOCATIONS, branchPrefixProblem, type DefaultWorktreeLocation } from './worktrees'
 
@@ -75,7 +76,22 @@ export interface AppSettings {
   delivery: DeliverySettings
   /** Consignes tapées personnalisées (v0.3, lot 18), globales et par projet. */
   prompts: PromptSettings
+  /** Plugins (v0.3, lot 22a). */
+  plugins: PluginSettings
 }
+
+export interface PluginSettings {
+  /**
+   * Plugins acceptés (nom → empreinte sha256 acceptée), doublant l'accord
+   * tenu par le démon. Écrit **seulement** par le processus principal
+   * (canaux `acceptPlugin` / `revokePlugin`), jamais par une modification
+   * de la page.
+   */
+  accepted: Record<string, string>
+}
+
+/** Plugins retenus au plus (le démon en charge 32). */
+export const MAX_ACCEPTED_PLUGINS = 64
 
 /**
  * Livraison d'un projet : mode (bouton principal, CI suivie). Ses consignes
@@ -185,19 +201,21 @@ function promptsFrom(raw: Record<string, unknown>, warnings: string[]): PromptSe
 }
 
 type PromptsPatch = NonNullable<SettingsPatch['prompts']>
-type OverridesPatch = Partial<Record<PromptId, string | null>>
+type OverridesPatch = Partial<Record<PromptKey, string | null>>
 
 function overridesPatch(v: unknown, where: string): OverridesPatch {
   if (!isObj(v)) throw new SettingsError(`« ${where} » doit être un objet`)
   const out: OverridesPatch = {}
-  for (const [k, t] of Object.entries(v)) {
-    if (!isPromptId(k)) throw new SettingsError(`consigne inconnue : ${where}.${k}`)
+  const entries = Object.entries(v)
+  if (entries.length > PROMPT_IDS.length + MAX_PLUGIN_PROMPTS) throw new SettingsError(`trop de consignes : ${where}`)
+  for (const [k, t] of entries) {
+    if (!isPromptKey(k)) throw new SettingsError(`consigne inconnue : ${where}.${k}`)
     if (t === null) {
       out[k] = null
       continue
     }
-    const problem = promptProblem(k, t)
-    if (problem) throw new SettingsError(`consigne « ${promptDef(k).label} » : ${problem}`)
+    const problem = promptProblem(promptBase(k), t)
+    if (problem) throw new SettingsError(`consigne « ${isPromptId(k) ? promptDef(k).label : k} » : ${problem}`)
     out[k] = t as string
   }
   return out
@@ -224,7 +242,7 @@ function promptsPatch(v: unknown): PromptsPatch {
   return out
 }
 
-function applyOverrides<T extends Partial<Record<PromptId, string>>>(base: T, patch: OverridesPatch): T {
+function applyOverrides<T extends Partial<Record<PromptKey, string>>>(base: T, patch: OverridesPatch): T {
   const next = { ...base } as Record<string, string>
   for (const [k, t] of Object.entries(patch)) {
     if (t === null || t === undefined) delete next[k]
@@ -394,8 +412,8 @@ export interface SettingsPatch {
    * projet à `null` perd toutes ses surcharges.
    */
   prompts?: {
-    global?: Partial<Record<PromptId, string | null>>
-    projects?: Record<string, Partial<Record<PromptId, string | null>> | null>
+    global?: Partial<Record<PromptKey, string | null>>
+    projects?: Record<string, Partial<Record<PromptKey, string | null>> | null>
   }
 }
 
@@ -422,6 +440,7 @@ export function defaultSettings(): AppSettings {
     runners: { confirmed: {} },
     delivery: { notifyCiFailure: true, projects: {} },
     prompts: { global: {}, projects: {} },
+    plugins: { accepted: {} },
   }
 }
 
@@ -682,8 +701,45 @@ export function readSettings(raw: unknown): { settings: AppSettings; warnings: s
     runners: runnersFrom(raw.runners),
     delivery: deliveryFrom(raw.delivery),
     prompts: promptsFrom(raw, warnings),
+    plugins: pluginsFrom(raw.plugins),
   }
   return { settings, warnings }
+}
+
+/** Plugins acceptés lus d'un fichier : seulement des noms et empreintes valides. */
+function pluginsFrom(v: unknown): PluginSettings {
+  const accepted: Record<string, string> = {}
+  if (isObj(v) && isObj(v.accepted)) {
+    for (const [k, fp] of Object.entries(v.accepted)) {
+      if (Object.keys(accepted).length >= MAX_ACCEPTED_PLUGINS) break
+      if (isPluginName(k) && isPluginFingerprint(fp)) accepted[k] = fp
+    }
+  }
+  return { accepted }
+}
+
+/** Ce plugin est-il accepté avec cette empreinte dans les réglages de l'app ? */
+export function pluginAccepted(s: Pick<AppSettings, 'plugins'>, name: string, fingerprint: string | null | undefined): boolean {
+  return !!fingerprint && Object.prototype.hasOwnProperty.call(s.plugins.accepted, name) && s.plugins.accepted[name] === fingerprint
+}
+
+/** Réglages avec ce plugin accepté (processus principal seulement). */
+export function withPluginAccepted(s: AppSettings, name: string, fingerprint: string): AppSettings {
+  if (!isPluginName(name) || !isPluginFingerprint(fingerprint)) throw new SettingsError('accord de plugin invalide')
+  const accepted = { ...s.plugins.accepted }
+  delete accepted[name]
+  accepted[name] = fingerprint
+  const keys = Object.keys(accepted)
+  for (const k of keys.slice(0, Math.max(0, keys.length - MAX_ACCEPTED_PLUGINS))) delete accepted[k]
+  return { ...s, plugins: { accepted } }
+}
+
+/** Réglages sans l'accord de ce plugin (processus principal seulement). */
+export function withoutPlugin(s: AppSettings, name: string): AppSettings {
+  if (!Object.prototype.hasOwnProperty.call(s.plugins.accepted, name)) return s
+  const accepted = { ...s.plugins.accepted }
+  delete accepted[name]
+  return { ...s, plugins: { accepted } }
 }
 
 /** Réglages des runners lus d'un fichier : entrées invalides ignorées. */
@@ -737,7 +793,11 @@ export function validatePatch(raw: unknown): SettingsPatch {
   for (const k of Object.keys(raw)) {
     if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view', 'worktrees', 'ui', 'forges', 'delivery', 'prompts'].includes(k)) {
       // i18n-exempt: validation stricte d'un patch, détail technique (contrat du lot 20)
-      throw new SettingsError(k === 'runners' ? 'les commandes acceptées ne se modifient pas depuis la page' : `réglage inconnu : ${k}`)
+      const runners = 'les commandes acceptées ne se modifient pas depuis la page'
+      // i18n-exempt: validation stricte d'un patch, détail technique (contrat du lot 20)
+      const plugins = 'les plugins acceptés ne se modifient pas depuis la page'
+      // i18n-exempt: validation stricte d'un patch, détail technique (contrat du lot 20)
+      throw new SettingsError(k === 'runners' ? runners : k === 'plugins' ? plugins : `réglage inconnu : ${k}`)
     }
   }
   if (raw.theme !== undefined) out.theme = themePatch(raw.theme)

@@ -672,4 +672,173 @@ pub trait SessionStore: Send {
     fn delete_worktree(&self, path: &Path) -> io::Result<()>;
     /// Worktrees créés par le démon.
     fn load_worktrees(&self) -> io::Result<Vec<WorktreeRecord>>;
+    /// Accords donnés aux plugins (v0.3, lot 22a), triés par nom.
+    fn plugin_acceptances(&self) -> io::Result<Vec<crate::domain::plugins::Acceptance>>;
+    /// Enregistre (ou remplace) l'accord donné à un plugin.
+    fn accept_plugin(&self, acceptance: &crate::domain::plugins::Acceptance) -> io::Result<()>;
+    /// Retire l'accord donné à un plugin ; `false` s'il n'y en avait pas.
+    fn revoke_plugin(&self, name: &str) -> io::Result<bool>;
+}
+
+/// Scope systemd utilisateur d'un plugin (`devmaestro-plugin-<nom>-<n>.scope`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginScope {
+    /// Binaire `systemd-run`.
+    pub systemd_run: PathBuf,
+    /// Binaire `systemctl` (arrêt : `systemctl --user kill`).
+    pub systemctl: PathBuf,
+    /// Nom de l'unité.
+    pub unit: String,
+    /// `XDG_RUNTIME_DIR` à donner à `systemd-run` et `systemctl` pour
+    /// joindre le gestionnaire utilisateur (tests seulement).
+    pub runtime_dir: Option<OsString>,
+}
+
+/// Lancement d'un plugin (v0.3, lot 22a, ADR 0007) : argv sans shell,
+/// environnement vidé puis `env` seul, groupe de processus propre, stdio en
+/// tubes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginLaunch {
+    pub name: String,
+    /// Programme résolu (chemin absolu).
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    /// Dossier résolu du plugin.
+    pub cwd: PathBuf,
+    /// Seules variables de l'environnement du processus.
+    pub env: Vec<(String, OsString)>,
+    pub scope: Option<PluginScope>,
+}
+
+/// Défaillance d'un plugin (`data.reason` de `-32033`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginError {
+    /// Lancement impossible (message en français).
+    Launch(String),
+    /// Délai de la requête dépassé.
+    Timeout,
+    /// Le processus est sorti, ou a fermé sa sortie.
+    Closed,
+    /// Ligne de plus de [`crate::domain::plugins::MAX_LINE_BYTES`] octets.
+    LineTooLong,
+    /// Ligne qui n'est pas du JSON (ou pas de l'UTF-8).
+    NotJson,
+    /// Objet qui n'est pas du JSON-RPC 2.0 attendu : réponse à un `id`
+    /// inconnu, requête du plugin vers l'hôte, `initialize` refusé…
+    Protocol(String),
+    /// Plus de [`crate::domain::plugins::MAX_NOTIFICATIONS`] notifications
+    /// pendant une requête.
+    Flood,
+    /// Réponse `error` du plugin : le processus continue.
+    Error { code: i64, message: String },
+}
+
+impl PluginError {
+    /// Raison stable (`data.reason`).
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Launch(_) => "launch",
+            Self::Timeout => "timeout",
+            Self::Closed => "closed",
+            Self::LineTooLong => "line_too_long",
+            Self::NotJson => "not_json",
+            Self::Protocol(_) => "protocol",
+            Self::Flood => "flood",
+            Self::Error { .. } => "error",
+        }
+    }
+
+    /// Message en français (celui d'une réponse `error` n'est pas nettoyé ici).
+    pub fn message(&self) -> String {
+        match self {
+            Self::Launch(m) => format!("lancement impossible : {m}"),
+            Self::Timeout => "le plugin n'a pas répondu à temps".into(),
+            Self::Closed => "le processus du plugin s'est arrêté".into(),
+            Self::LineTooLong => "ligne trop longue sur la sortie du plugin".into(),
+            Self::NotJson => "ligne qui n'est pas du JSON sur la sortie du plugin".into(),
+            Self::Protocol(m) => format!("protocole non respecté : {m}"),
+            Self::Flood => "trop de notifications du plugin".into(),
+            Self::Error { message, .. } => message.clone(),
+        }
+    }
+
+    /// Défaillance qui arrête le plugin (toutes sauf une réponse `error`).
+    pub fn is_fatal(&self) -> bool {
+        !matches!(self, Self::Error { .. })
+    }
+}
+
+/// Processus d'un plugin. Bloquant ; `request` sérialise les requêtes
+/// (une à la fois). Après une défaillance fatale, toute requête rend la
+/// même erreur : l'appelant arrête le processus.
+pub trait PluginProcess: Send + Sync {
+    fn pid(&self) -> Option<u32>;
+    /// Requête JSON-RPC (`params` `None` : sans paramètres) et sa réponse
+    /// (`result`), au plus `timeout`.
+    fn request(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, PluginError>;
+    /// Arrêt complet (bloquant, idempotent) : `shutdown` poli s'il répond,
+    /// fermeture de stdin, `SIGTERM` puis `SIGKILL` au scope (même si le
+    /// processus est sorti seul), `SIGKILL` au groupe, attente de la fin.
+    fn stop(&self);
+    /// `SIGKILL` immédiat au scope et au groupe, sans attente.
+    fn kill(&self);
+    /// Fin de stderr ([`crate::domain::plugins::STDERR_TAIL_BYTES`] au plus), nettoyée.
+    fn stderr_tail(&self) -> String;
+    /// Le processus tourne encore.
+    fn alive(&self) -> bool;
+}
+
+/// Lancement des plugins.
+pub trait PluginHost: Send + Sync {
+    /// Lance le plugin ; `on_exit` est appelé une fois, à la fin du
+    /// processus (sortie seule ou arrêt).
+    fn spawn(
+        &self,
+        launch: &PluginLaunch,
+        on_exit: Box<dyn FnOnce() + Send>,
+    ) -> Result<Arc<dyn PluginProcess>, PluginError>;
+}
+
+/// Échec de lecture d'un fichier de plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginFileError {
+    NotFound,
+    /// Plus gros que la limite (taille réelle).
+    TooLarge(u64),
+    /// Hors du dossier du plugin, pas un fichier ordinaire, illisible…
+    Refused(String),
+}
+
+/// Lecture seule du dossier des plugins (jamais créé ni écrit). Bloquant.
+pub trait PluginFiles: Send + Sync {
+    /// Noms des dossiers de plugins (liens symboliques vers un dossier
+    /// compris), triés, sans les noms cachés ni les entrées qui ne sont pas
+    /// des dossiers ; vide si le dossier n'existe pas.
+    fn list(&self, dir: &Path) -> Vec<String>;
+    /// Dossier résolu (liens suivis) du plugin `name`, si c'est un dossier.
+    fn resolve(&self, dir: &Path, name: &str) -> Option<PathBuf>;
+    /// Fichier ordinaire `rel` sous `root` (résolu), liens suivis seulement
+    /// s'ils y restent, `max` octets au plus.
+    fn read(&self, root: &Path, rel: &str, max: u64) -> Result<Vec<u8>, PluginFileError>;
+    /// Identité et état d'un fichier ordinaire `rel` resté sous `root` (liens
+    /// suivis), sans le lire : clé du cache des empreintes. `None` s'il est
+    /// absent, hors de `root` ou pas un fichier ordinaire.
+    fn stamp(&self, root: &Path, rel: &str) -> Option<FileStamp>;
+}
+
+/// Identité et état d'un fichier (cache des empreintes des plugins) : un
+/// fichier réécrit change de taille, de date de modification ou de
+/// changement d'état (`ctime`, que l'utilisateur ne peut pas remettre).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    pub dev: u64,
+    pub ino: u64,
+    pub size: u64,
+    pub mtime_ns: i128,
+    pub ctime_ns: i128,
 }

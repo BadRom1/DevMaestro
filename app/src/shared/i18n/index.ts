@@ -10,6 +10,7 @@ import { files } from './catalog/files'
 import { forge } from './catalog/forge'
 import { format } from './catalog/format'
 import { main } from './catalog/main'
+import { plugins } from './catalog/plugins'
 import { prompts } from './catalog/prompts'
 import { sessions } from './catalog/sessions'
 import { settings } from './catalog/settings'
@@ -19,7 +20,7 @@ import { getLocale, interpolate, pluralForm, type Locale, type Message, type Var
 export * from './core'
 
 /** Domaines, chacun dans son fichier : ses clés commencent par `<domaine>.`. */
-export const NAMESPACES = { common, conversation, errors, files, forge, format, main, prompts, sessions, settings, shell } as const
+export const NAMESPACES = { common, conversation, errors, files, forge, format, main, plugins, prompts, sessions, settings, shell } as const
 
 const FR = {
   ...common.fr,
@@ -29,6 +30,7 @@ const FR = {
   ...forge.fr,
   ...format.fr,
   ...main.fr,
+  ...plugins.fr,
   ...prompts.fr,
   ...sessions.fr,
   ...settings.fr,
@@ -74,6 +76,7 @@ const EN: Record<MessageKey, Message> = {
   ...forge.en,
   ...format.en,
   ...main.en,
+  ...plugins.en,
   ...prompts.en,
   ...sessions.en,
   ...settings.en,

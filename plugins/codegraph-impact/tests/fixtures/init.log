@@ -1,0 +1,15 @@
+┌  Initializing CodeGraph
+│
+◆  Initialized in /chemin/du/worktree
+│
+Scanning files...
+Parsing code...
+Resolving refs...
+Linking dynamic dispatch...
+│
+◆  Indexed 355 files
+│
+●  10 050 nodes, 36 665 edges in 941ms
+│
+└  Done
+

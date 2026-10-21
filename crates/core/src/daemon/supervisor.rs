@@ -23,6 +23,7 @@ mod commands;
 mod commits;
 mod conversation;
 pub mod forge;
+pub mod plugins;
 pub mod runners;
 mod subagents;
 mod worktrees;
@@ -230,6 +231,17 @@ pub struct Config {
     /// Intervalle du sondage de la CI des sessions suivies
     /// ([`forge::runs::CI_POLL_INTERVAL`] ; plus court dans les tests).
     pub ci_poll_interval: Duration,
+    /// Dossier des plugins (v0.3, lot 22a) : `$XDG_CONFIG_HOME/devmaestro/plugins`,
+    /// ou `DEVMAESTRO_PLUGINS_DIR` lue au démarrage. Lu seulement, jamais
+    /// créé ni écrit par le démon.
+    pub plugins_dir: PathBuf,
+    /// Arrêt d'un plugin sans requête ([`plugins::IDLE_TIMEOUT`] ; plus court
+    /// dans les tests).
+    pub plugin_idle_timeout: Duration,
+    /// Délai d'`initialize` ([`plugins::INIT_TIMEOUT`]).
+    pub plugin_init_timeout: Duration,
+    /// Délai de `panel.render` et `action.run` ([`plugins::REQUEST_TIMEOUT`]).
+    pub plugin_request_timeout: Duration,
 }
 
 /// Adaptateurs utilisés par le démon.
@@ -250,6 +262,10 @@ pub struct Deps {
     pub forge: Box<dyn crate::ports::Forge>,
     /// Fichiers des slash commands, en lecture seule (v0.3, lot 17).
     pub commands: Box<dyn crate::ports::CommandFiles>,
+    /// Processus des plugins (v0.3, lot 22a).
+    pub plugin_host: Box<dyn crate::ports::PluginHost>,
+    /// Dossier des plugins, en lecture seule.
+    pub plugin_files: Box<dyn crate::ports::PluginFiles>,
 }
 
 /// Événement diffusé aux connexions. Léger : une connexion lente regroupe
@@ -281,6 +297,9 @@ pub enum Event {
     /// L'état de la CI d'une session suivie a changé (`forge.ci_changed`,
     /// v0.3, lot 14b).
     CiChanged { id: Uuid, state: &'static str },
+    /// Accord, révocation ou état du processus d'un plugin
+    /// (`plugins.changed {}`, v0.3, lot 22a).
+    PluginsChanged,
 }
 
 /// Anti-rebond du recalcul du diff d'une session.
@@ -640,6 +659,19 @@ pub struct Daemon {
     /// Dernier réglage « Accès aux forges » reçu (`enabled` d'un appel
     /// `forge.*`, `forge.configure`) : coupé, le sondage de la CI ne lance rien.
     forge_enabled: AtomicBool,
+    /// Tenu pendant une passe du sondage de la CI, et par la coupure de
+    /// l'accès aux forges : une passe déjà partie finit (ses `gh` compris)
+    /// avant que le suivi soit vidé, et ne le remplit pas de nouveau après.
+    ci_poll_pass: Mutex<()>,
+    /// Plugins demandés depuis le démarrage (v0.3, lot 22a).
+    plugins: Mutex<plugins::PluginTable>,
+    /// Numéro des scopes des plugins.
+    plugin_seq: AtomicU64,
+    /// Empreintes des plugins déjà calculées, par nom (manifeste exact et
+    /// état des fichiers hachés) : `plugins.list` ne rehache pas tout.
+    plugin_fp_cache: Mutex<HashMap<String, plugins::FingerprintCache>>,
+    /// Plugins en cours d'arrêt avec le démon (atteints par un second signal).
+    plugins_stopping: Mutex<Vec<Arc<dyn crate::ports::PluginProcess>>>,
 }
 
 /// Liste des fichiers d'un dépôt, quand, pour quelle empreinte du diff et
@@ -1013,6 +1045,11 @@ impl Daemon {
             runner_live: Mutex::new(HashMap::new()),
             ci_watch: Mutex::new(HashMap::new()),
             forge_enabled: AtomicBool::new(true),
+            ci_poll_pass: Mutex::new(()),
+            plugins: Mutex::new(HashMap::new()),
+            plugin_seq: AtomicU64::new(0),
+            plugin_fp_cache: Mutex::new(HashMap::new()),
+            plugins_stopping: Mutex::new(Vec::new()),
         })
     }
 
@@ -4223,6 +4260,7 @@ impl Daemon {
     /// `SIGKILL` immédiat à toutes les sessions (second signal d'arrêt).
     pub fn kill_all(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
+        self.kill_all_plugins();
         for pid in self.running_pids().into_iter().chain(self.runner_pids()) {
             self.signal_group(pid, nix::sys::signal::Signal::SIGKILL);
         }
@@ -4232,6 +4270,15 @@ impl Daemon {
     /// `SIGKILL`. Les sessions restent reprenables.
     pub async fn shutdown(self: &Arc<Self>) {
         self.shutting_down.store(true, Ordering::SeqCst);
+        // Les plugins (v0.3, lot 22a) s'arrêtent avec le démon, en parallèle
+        // des sessions.
+        let d = Arc::clone(self);
+        let plugins = tokio::task::spawn_blocking(move || d.stop_all_plugins());
+        self.shutdown_sessions().await;
+        let _ = plugins.await;
+    }
+
+    async fn shutdown_sessions(self: &Arc<Self>) {
         let pids: Vec<u32> = {
             let mut reg = self.lock();
             // Les relais en attente rendent la main tout de suite, sans décision.

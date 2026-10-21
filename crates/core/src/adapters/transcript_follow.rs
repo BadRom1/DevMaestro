@@ -42,18 +42,41 @@ pub struct FsTranscriptFollower {
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
     watched: Mutex<HashSet<PathBuf>>,
     waker: Arc<Mutex<Option<Waker>>>,
-    /// La création du surveillant a échoué : plus d'essai (scrutation seule).
-    unavailable: std::sync::atomic::AtomicBool,
+    /// La création du surveillant a échoué (avec son code d'erreur système,
+    /// s'il y en a un) : plus d'essai, relecture périodique seule.
+    unavailable: Mutex<Option<Option<i32>>>,
+}
+
+/// La surveillance des dossiers n'a pas pu être créée : le suivi continue par
+/// la seule relecture périodique.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchUnavailable {
+    /// Code d'erreur système de l'échec (`EMFILE`…), s'il est connu.
+    pub errno: Option<i32>,
 }
 
 impl FsTranscriptFollower {
+    /// Crée le surveillant au besoin et dit s'il est actif. Sinon (inotify
+    /// indisponible), le suivi reste assuré par la relecture périodique.
+    pub fn watching_available(&self) -> Result<(), WatchUnavailable> {
+        if self.ensure_watcher() {
+            return Ok(());
+        }
+        let errno = self
+            .unavailable
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .flatten();
+        Err(WatchUnavailable { errno })
+    }
+
     fn ensure_watcher(&self) -> bool {
-        use std::sync::atomic::Ordering;
         let mut w = self.watcher.lock().unwrap_or_else(|e| e.into_inner());
         if w.is_some() {
             return true;
         }
-        if self.unavailable.load(Ordering::SeqCst) {
+        let mut unavailable = self.unavailable.lock().unwrap_or_else(|e| e.into_inner());
+        if unavailable.is_some() {
             return false;
         }
         let waker = self.waker.clone();
@@ -79,9 +102,24 @@ impl FsTranscriptFollower {
                 *w = Some(watcher);
                 true
             }
-            Err(_) => {
-                // Scrutation seule (le démon relit les tailles toutes les 250 ms).
-                self.unavailable.store(true, Ordering::SeqCst);
+            Err(e) => {
+                // Relecture périodique seule (le démon relit les tailles toutes
+                // les 250 ms) ; journalisé une fois, plus d'essai ensuite.
+                let errno = match &e.kind {
+                    notify::ErrorKind::Io(io) => io.raw_os_error(),
+                    _ => None,
+                };
+                if errno == Some(nix::errno::Errno::EMFILE as i32) {
+                    crate::daemon::log::warning!(
+                        "inotify indisponible (EMFILE : limite fs.inotify.max_user_instances \
+                         atteinte) : relecture périodique seule"
+                    );
+                } else {
+                    crate::daemon::log::warning!(
+                        "inotify indisponible ({e}) : relecture périodique seule"
+                    );
+                }
+                *unavailable = Some(errno);
                 false
             }
         }
@@ -449,6 +487,36 @@ mod tests {
         f.set_waker(Box::new(move || {
             h.fetch_add(1, Ordering::SeqCst);
         }));
+        // Plus d'instance inotify disponible (limite `max_user_instances`
+        // atteinte par les autres programmes de la machine) : le suivi ne
+        // plante pas et la relecture périodique lit la nouvelle ligne ; le
+        // réveil n'est pas vérifié. En CI (`CI` définie), inotify doit être
+        // là : le test échoue sinon. Tout autre échec le fait échouer.
+        match f.watching_available() {
+            Ok(()) => {}
+            Err(WatchUnavailable { errno: Some(errno) })
+                if errno == nix::errno::Errno::EMFILE as i32 =>
+            {
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "inotify indisponible (EMFILE) en CI : surveillance impossible"
+                );
+                eprintln!(
+                    "inotify indisponible (EMFILE) : réveil non vérifié, relecture périodique seule"
+                );
+                f.watch(dir.path());
+                f.unwatch(dir.path());
+                f.watch(dir.path());
+                let path = dir.path().join("t.jsonl");
+                let mut pos = TailPos::default();
+                assert!(f.read_new(&path, &mut pos).unwrap().lines.is_empty());
+                append(&path, b"{}\n");
+                let r = f.read_new(&path, &mut pos).unwrap();
+                assert_eq!(r.lines, [line(0, 2, "{}")]);
+                return;
+            }
+            Err(e) => panic!("inotify : {e:?}"),
+        }
         f.watch(&dir.path().join("absent"));
         f.watch(dir.path());
         f.watch(dir.path());

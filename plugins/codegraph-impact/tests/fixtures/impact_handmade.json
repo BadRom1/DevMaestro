@@ -1,0 +1,229 @@
+{
+ "symbol": "alpha",
+ "depth": 2,
+ "ambiguous": true,
+ "aggregation": "union",
+ "file": "src/a.ts",
+ "filteredOut": false,
+ "targets": [
+  {
+   "id": "fn:A",
+   "name": "alpha",
+   "kind": "function",
+   "filePath": "src/a.ts",
+   "startLine": 10
+  },
+  {
+   "id": "fn:OTHER",
+   "name": "alpha",
+   "kind": "function",
+   "filePath": "src/other.ts",
+   "startLine": 99
+  }
+ ],
+ "definitions": [
+  {
+   "definition": {
+    "id": "fn:A",
+    "name": "alpha",
+    "kind": "function",
+    "filePath": "src/a.ts",
+    "startLine": 10
+   },
+   "roots": [
+    "fn:A",
+    "fn:A2"
+   ],
+   "nodeCount": 9,
+   "edgeCount": 9,
+   "affected": [
+    {
+     "id": "fn:E",
+     "name": "epsilon",
+     "kind": "function",
+     "filePath": "src/e.ts",
+     "startLine": 1
+    },
+    {
+     "id": "fn:D",
+     "name": "delta",
+     "kind": "function",
+     "filePath": "src/d.ts",
+     "startLine": 3
+    },
+    {
+     "id": "fn:G",
+     "name": "eta",
+     "kind": "function",
+     "filePath": "src/c.ts",
+     "startLine": 2
+    },
+    {
+     "id": "fn:H",
+     "name": "theta",
+     "kind": "function",
+     "filePath": "src/b.ts",
+     "startLine": 40
+    },
+    {
+     "id": "fn:C",
+     "name": "gamma",
+     "kind": "function",
+     "filePath": "src/c.ts",
+     "startLine": 7
+    },
+    {
+     "id": "fn:B",
+     "name": "beta",
+     "kind": "function",
+     "filePath": "src/b.ts",
+     "startLine": 5
+    },
+    {
+     "id": "fn:A",
+     "name": "alpha",
+     "kind": "function",
+     "filePath": "src/a.ts",
+     "startLine": 10
+    },
+    {
+     "id": "fn:A2",
+     "name": "alpha",
+     "kind": "function",
+     "filePath": "src/a.ts",
+     "startLine": 10
+    }
+   ],
+   "edges": [
+    {
+     "source": "fn:B",
+     "target": "fn:A",
+     "kind": "calls",
+     "metadata": {
+      "refName": "x",
+      "confidence": 0.9
+     },
+     "line": 1,
+     "provenance": null
+    },
+    {
+     "source": "fn:C",
+     "target": "fn:A",
+     "kind": "calls",
+     "metadata": {
+      "refName": "x",
+      "confidence": 0.5
+     },
+     "line": 1,
+     "provenance": null
+    },
+    {
+     "source": "fn:D",
+     "target": "fn:B",
+     "kind": "calls",
+     "metadata": {
+      "refName": "x",
+      "confidence": 0.8
+     },
+     "line": 1,
+     "provenance": null
+    },
+    {
+     "source": "fn:D",
+     "target": "fn:C",
+     "kind": "calls",
+     "metadata": {
+      "refName": "x"
+     },
+     "line": 1,
+     "provenance": "heuristic"
+    },
+    {
+     "source": "fn:E",
+     "target": "fn:D",
+     "kind": "calls",
+     "metadata": {
+      "refName": "x",
+      "confidence": 1.0
+     },
+     "line": 1,
+     "provenance": null
+    },
+    {
+     "source": "fn:G",
+     "target": "fn:C",
+     "kind": "calls",
+     "metadata": {
+      "refName": "x"
+     },
+     "line": 1,
+     "provenance": "heuristic"
+    },
+    {
+     "source": "file:test/a.test.ts",
+     "target": "fn:A",
+     "kind": "calls",
+     "metadata": {
+      "refName": "x"
+     },
+     "line": 1,
+     "provenance": null
+    },
+    {
+     "source": "fn:H",
+     "target": "fn:A2",
+     "kind": "calls",
+     "metadata": {
+      "refName": "x",
+      "confidence": 1.0
+     },
+     "line": 1,
+     "provenance": null
+    }
+   ]
+  },
+  {
+   "definition": {
+    "id": "fn:OTHER",
+    "name": "alpha",
+    "kind": "function",
+    "filePath": "src/other.ts",
+    "startLine": 99
+   },
+   "roots": [
+    "fn:OTHER"
+   ],
+   "affected": [
+    {
+     "id": "fn:OTHER",
+     "name": "alpha",
+     "kind": "function",
+     "filePath": "src/other.ts",
+     "startLine": 99
+    },
+    {
+     "id": "fn:Z",
+     "name": "zeta",
+     "kind": "function",
+     "filePath": "src/z.ts",
+     "startLine": 1
+    }
+   ],
+   "edges": [
+    {
+     "source": "fn:Z",
+     "target": "fn:OTHER",
+     "kind": "calls",
+     "metadata": {
+      "refName": "x",
+      "confidence": 1.0
+     },
+     "line": 1,
+     "provenance": null
+    }
+   ]
+  }
+ ],
+ "nodeCount": 11,
+ "edgeCount": 9
+}

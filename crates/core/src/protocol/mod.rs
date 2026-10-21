@@ -84,6 +84,18 @@ pub mod error_code {
     pub const TOO_MANY_RUNNERS: i64 = -32025;
     /// `process_id` inconnu (`runners.stop`, `runners.subscribe`…).
     pub const UNKNOWN_RUNNER_PROCESS: i64 = -32026;
+    /// Plugin inconnu, ou manifeste invalide (v0.3, lot 22a).
+    pub const UNKNOWN_PLUGIN: i64 = -32030;
+    /// Plugin pas accepté, ou modifié depuis l'accord
+    /// (`data: {acceptance, fingerprint}`).
+    pub const PLUGIN_NOT_ACCEPTED: i64 = -32031;
+    /// Empreinte actuelle différente de `expected_fingerprint`
+    /// (`data: {fingerprint}`).
+    pub const PLUGIN_FINGERPRINT_MISMATCH: i64 = -32032;
+    /// Défaillance du processus du plugin (`data: {reason, stderr_tail?}`).
+    pub const PLUGIN_FAILED: i64 = -32033;
+    /// Document ou résultat invalide, ou permission refusée (`data: {problem}`).
+    pub const PLUGIN_INVALID_RESULT: i64 = -32034;
 }
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {

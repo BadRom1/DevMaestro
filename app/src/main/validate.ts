@@ -16,6 +16,7 @@ import {
   SESSION_COLORS,
   type MethodName,
 } from '../shared/protocol'
+import { checkPluginArgs, isPluginActionId, isPluginFingerprint, isPluginName } from '../shared/pluginDocument'
 import { ZOOM_DIRECTIONS, type ZoomDirection } from '../shared/settings'
 import { WORKTREE_LOCATIONS, branchNameProblem } from '../shared/worktrees'
 
@@ -444,6 +445,12 @@ export const WORKTREE_TIMEOUT_MS = 120_000
 export const FORGE_TIMEOUT_MS = 90_000
 
 /**
+ * Délai des méthodes d'un plugin (lot 22a) : `initialize` (10 s) puis
+ * `panel.render` ou `action.run` (30 s) côté démon, plus la marge.
+ */
+export const PLUGIN_TIMEOUT_MS = 45_000
+
+/**
  * Délai d'attente d'une méthode relayée : 120 s pour `worktrees.*` et pour
  * un lancement qui crée un worktree (extraction d'un gros dépôt) ; 90 s pour
  * `forge.*` (plusieurs appels de `gh`) ;
@@ -455,6 +462,7 @@ export function requestTimeoutMs(method: MethodName, clean: Obj): number | undef
   // `gh` a 15 s par appel côté démon, et `forge.issue` en enchaîne plusieurs (issue, sous-issues).
   // `forge.pull` lit aussi la CI et les fils de revue ; `forge.submitReview` publie (une écriture lente côté GitHub).
   if (method.startsWith('forge.')) return FORGE_TIMEOUT_MS
+  if (method === 'plugins.panel' || method === 'plugins.action') return PLUGIN_TIMEOUT_MS
   return undefined
 }
 
@@ -751,7 +759,67 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       out.id = uuid(o, 'id')
       out.process_id = processId(o, 'process_id')
       return out
+    case 'plugins.list':
+      return {}
+    // Réservées au processus principal (absentes de `RENDERER_METHODS`) : validées pour ses propres appels.
+    case 'plugins.accept':
+      out.name = pluginName(o, 'name')
+      out.expected_fingerprint = fingerprint(o, 'expected_fingerprint')
+      return out
+    case 'plugins.revoke':
+      out.name = pluginName(o, 'name')
+      return out
+    // `expected_fingerprint` n'est jamais pris de la page : posé par le garde du processus principal.
+    case 'plugins.panel':
+      out.name = pluginName(o, 'name')
+      out.session_id = uuid(o, 'session_id')
+      out.locale = oneOf(o, 'locale', PLUGIN_LOCALES)
+      return out
+    case 'plugins.action':
+      out.name = pluginName(o, 'name')
+      out.action = pluginAction(o, 'action')
+      out.session_id = uuid(o, 'session_id')
+      out.locale = oneOf(o, 'locale', PLUGIN_LOCALES)
+      optional(o, out, 'args', pluginArgs)
+      return out
   }
+}
+
+const PLUGIN_LOCALES = ['fr', 'en'] as const
+
+function pluginName(o: Obj, k: string): string {
+  const v = o[k]
+  if (!isPluginName(v)) throw new ValidationError(`« ${k} » doit être un nom de plugin (minuscules, chiffres, tirets ; 40 caractères au plus)`)
+  return v
+}
+
+function pluginAction(o: Obj, k: string): string {
+  const v = o[k]
+  if (!isPluginActionId(v)) throw new ValidationError(`« ${k} » doit être un identifiant d'action (minuscules, chiffres, tirets ; 32 caractères au plus)`)
+  return v
+}
+
+function fingerprint(o: Obj, k: string): string {
+  const v = o[k]
+  if (!isPluginFingerprint(v)) throw new ValidationError(`« ${k} » doit être une empreinte SHA-256`)
+  return v
+}
+
+function pluginArgs(o: Obj, k: string): Obj {
+  const r = checkPluginArgs(o[k], k)
+  if (typeof r === 'string') throw new ValidationError(r)
+  return r
+}
+
+/** « Accepter » dans le dialogue de confirmation : plugin et empreinte de ce qui a été montré. */
+export function validateAcceptPlugin(raw: unknown): { name: string; fingerprint: string } {
+  const o = obj(raw)
+  return { name: pluginName(o, 'name'), fingerprint: fingerprint(o, 'fingerprint') }
+}
+
+/** « Révoquer » : nom du plugin. */
+export function validateRevokePlugin(raw: unknown): { name: string } {
+  return { name: pluginName(obj(raw), 'name') }
 }
 
 /**

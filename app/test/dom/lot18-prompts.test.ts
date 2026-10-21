@@ -123,6 +123,7 @@ describe('Réglages → Consignes', () => {
       'Revue assistée : demande de fusion',
       'Revue assistée : commit',
       'Revue assistée : diff',
+      'Contenu proposé par un plugin',
     ])
     expect(area('Issue').value).toBe(defaultPrompt('issue'))
     expect(origin('Issue')).toBe('Origine : texte par défaut')

@@ -1,0 +1,11 @@
+{"api_version": 1, "name": "codegraph-impact", "version": "0.1.0",
+ "label": {"fr": "Impact du diff", "en": "Diff impact"},
+ "description": {"fr": "Symboles touchés par le diff de la session, ce qui en dépend et les tests affectés, calculés par CodeGraph (installé par toi) dans le worktree.", "en": "Symbols touched by the session diff, what depends on them and the affected tests, computed by CodeGraph (installed by you) in the worktree."},
+ "command": ["python3", "-I", "codegraph_impact.py"],
+ "files": ["codegraph_impact.py"],
+ "permissions": ["diff.read", "worktree.read", "worktree.write", "claude.propose"],
+ "contributes": {
+   "session_tab": {"label": {"fr": "Impact", "en": "Impact"}},
+   "actions": [{"id": "index", "label": {"fr": "Indexer", "en": "Index"}},
+               {"id": "send-impact", "label": {"fr": "Envoyer l'impact à Claude", "en": "Send the impact to Claude"}, "propose": true}]},
+ "config": {"codegraph": null, "depth": 2}}

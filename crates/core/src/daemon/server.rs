@@ -328,7 +328,7 @@ impl Connection {
                 "protocol": PROTOCOL_VERSION,
                 "pid": std::process::id(),
                 // Fonctions du démon détectables par le client (lot 13a).
-                "capabilities": {"initial_prompt": true, "runners": true, "send_prompt_paste": true, "ci": true, "slash_commands": true, "review_instruction": true},
+                "capabilities": {"initial_prompt": true, "runners": true, "send_prompt_paste": true, "ci": true, "slash_commands": true, "review_instruction": true, "plugins": true},
             }),
             "profiles.list" => d.profiles()?,
             "projects.resolve" => {
@@ -401,6 +401,21 @@ impl Connection {
                     } else {
                         d2.runners_start(&params)
                     }
+                })
+                .await
+                .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
+            }
+            "plugins.list" | "plugins.accept" | "plugins.revoke" | "plugins.panel"
+            | "plugins.action" => {
+                // Disque (manifestes, fichiers hachés), processus du plugin :
+                // hors du runtime.
+                let (d2, params, m) = (d.clone(), params.clone(), method.to_owned());
+                tokio::task::spawn_blocking(move || match m.as_str() {
+                    "plugins.list" => d2.plugins_list(&params),
+                    "plugins.accept" => d2.plugins_accept(&params),
+                    "plugins.revoke" => d2.plugins_revoke(&params),
+                    "plugins.panel" => d2.plugins_panel(&params),
+                    _ => d2.plugins_action(&params),
                 })
                 .await
                 .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
@@ -1012,6 +1027,11 @@ fn queue_event(daemon: &Daemon, queue: &mut VecDeque<Event>, ev: Event) {
     {
         return;
     }
+    if matches!(ev, Event::PluginsChanged)
+        && queue.iter().any(|e| matches!(e, Event::PluginsChanged))
+    {
+        return; // Regroupé : la notification est sans contenu.
+    }
     if let Event::Updated(id) = &ev
         && queue
             .iter()
@@ -1063,6 +1083,7 @@ fn resync_events(daemon: &Daemon, queue: &mut VecDeque<Event>) {
             .map(Event::RunnersChanged),
     );
     queue.push_back(Event::Quotas);
+    queue.push_back(Event::PluginsChanged);
 }
 
 fn event_frame(daemon: &Daemon, ev: Event) -> Option<Frame> {
@@ -1090,6 +1111,7 @@ fn event_frame(daemon: &Daemon, ev: Event) -> Option<Frame> {
         Event::CiChanged { id, state } => {
             notification("forge.ci_changed", json!({"id": id, "state": state}))
         }
+        Event::PluginsChanged => notification("plugins.changed", json!({})),
         // Calculée par connexion (voir `forward_events`).
         Event::ConversationChanged(_) => return None,
     };

@@ -45,6 +45,8 @@ const api: DevMaestroApi = {
     }),
   confirmRunner: (req) =>
     ipcRenderer.invoke(Ipc.confirmRunner, { session_id: req.session_id, runner_id: req.runner_id, fingerprint: req.fingerprint }),
+  acceptPlugin: (req) => ipcRenderer.invoke(Ipc.acceptPlugin, { name: req.name, fingerprint: req.fingerprint }),
+  revokePlugin: (req) => ipcRenderer.invoke(Ipc.revokePlugin, { name: req.name }),
   resizeRunner: (req) => ipcRenderer.send(Ipc.resizeRunner, { process_id: req.process_id, cols: req.cols, rows: req.rows }),
   requestRunnerPort: () => ipcRenderer.send(Ipc.requestRunnerPort),
   onPreviewPopup(cb) {

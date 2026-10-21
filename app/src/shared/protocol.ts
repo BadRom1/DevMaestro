@@ -1114,6 +1114,72 @@ export interface CommandsList {
   ignored?: number
 }
 
+
+/* ---------- Plugins (v0.3, lot 22a, ADR 0007) ---------- */
+
+/** Permissions qu'un manifeste peut demander (liste fermée). */
+export const PLUGIN_PERMISSIONS = ['diff.read', 'worktree.read', 'worktree.write', 'sessions.read', 'claude.propose', 'network'] as const
+export type PluginPermission = (typeof PLUGIN_PERMISSIONS)[number]
+
+/** Texte d'un manifeste dans les deux langues. */
+export interface LocalizedText {
+  fr: string
+  en: string
+}
+
+export type PluginAcceptance = 'none' | 'accepted' | 'changed'
+export type PluginProcessState = 'stopped' | 'running' | 'failed'
+/** Raisons de défaillance d'un processus de plugin (`-32033`). */
+export type PluginFailureReason = 'launch' | 'timeout' | 'closed' | 'line_too_long' | 'not_json' | 'protocol' | 'flood' | 'error'
+
+export interface PluginActionInfo {
+  id: string
+  label: LocalizedText
+  propose: boolean
+}
+
+/** Plugin tel que `plugins.list` le décrit (manifeste relu à chaque appel). */
+export interface PluginInfo {
+  name: string
+  valid: boolean
+  /** Erreurs du manifeste (en français, texte du démon). */
+  errors: string[]
+  version?: string
+  label?: LocalizedText
+  description?: LocalizedText
+  command?: string[]
+  files?: string[]
+  permissions: string[]
+  tab?: { label: LocalizedText }
+  actions: PluginActionInfo[]
+  /** `config` du manifeste (fait partie de l'empreinte) ; absent d'un démon qui ne le donne pas. */
+  config?: unknown
+  /** Empreinte sha256 (hex 64) ; `null` : manifeste invalide. */
+  fingerprint: string | null
+  acceptance: PluginAcceptance
+  accepted_fingerprint?: string
+  accepted_permissions?: string[]
+  process: { state: PluginProcessState; reason?: string; message?: string; stderr_tail?: string }
+}
+
+export interface PluginsList {
+  dir: string
+  plugins: PluginInfo[]
+}
+
+/** Valeur d'un argument d'action (document ou appel). */
+export type PluginArgValue = string | number | boolean
+export type PluginArgs = Record<string, PluginArgValue>
+
+/** Document déclaratif (forme reçue ; l'app le revalide avant tout rendu, voir `pluginDocument.ts`). */
+export type PluginDocumentRaw = unknown
+
+/** Résultat de `plugins.action` : au moins l'un des deux. */
+export interface PluginActionResult {
+  document?: PluginDocumentRaw
+  propose?: { content: string }
+}
+
 /** Paramètres et résultats des méthodes appelables depuis la page. */
 export interface Methods {
   'profiles.list': { params: Record<string, never>; result: { profiles: Profile[] } }
@@ -1288,6 +1354,28 @@ export interface Methods {
   'runners.start': { params: { id: string; runner_id: string; expected_fingerprint?: string }; result: RunnerProcess }
   /** Arrête une exécution (SIGTERM au groupe, SIGKILL après 3 s). */
   'runners.stop': { params: { id: string; process_id: string }; result: unknown }
+  /** Plugins installés (lot 22a) : manifestes relus, empreintes, accords, état des processus. */
+  'plugins.list': { params: Record<string, never>; result: PluginsList }
+  /**
+   * Accord (processus principal seulement, canal `acceptPlugin`) : jamais
+   * appelable depuis la page. Empreinte différente : `-32032`.
+   */
+  'plugins.accept': { params: { name: string; expected_fingerprint: string }; result: { plugin: PluginInfo } }
+  /** Révocation (processus principal seulement, canal `revokePlugin`). */
+  'plugins.revoke': { params: { name: string }; result: { plugin: PluginInfo | null } }
+  /**
+   * Panneau d'un plugin pour une session. `expected_fingerprint` : ajouté par
+   * le processus principal (empreinte acceptée), jamais pris de la page.
+   */
+  'plugins.panel': {
+    params: { name: string; session_id: string; locale: 'fr' | 'en'; expected_fingerprint?: string }
+    result: { document: PluginDocumentRaw }
+  }
+  /** Action d'un plugin ; même règle pour `expected_fingerprint`. */
+  'plugins.action': {
+    params: { name: string; action: string; session_id: string; locale: 'fr' | 'en'; args?: PluginArgs; expected_fingerprint?: string }
+    result: PluginActionResult
+  }
 }
 
 /** Méthodes de la forge : le processus principal y ajoute `enabled` (réglage global). */
@@ -1361,6 +1449,10 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'runners.list',
   'runners.start',
   'runners.stop',
+  // Plugins (lot 22a) : pas `plugins.accept` ni `plugins.revoke` (canaux dédiés du processus principal).
+  'plugins.list',
+  'plugins.panel',
+  'plugins.action',
 ]
 
 /** Codes d'erreur JSON-RPC du démon (protocole § 3). */
@@ -1390,6 +1482,16 @@ export const ErrorCode = {
   TooManyRunners: -32025,
   /** `runners.*` : exécution inconnue, ou d'une autre session. */
   RunnerProcessUnknown: -32026,
+  /** `plugins.*` : plugin inconnu ou manifeste invalide. */
+  PluginUnknown: -32030,
+  /** `plugins.panel` / `plugins.action` : pas accepté, ou modifié depuis l'accord ; `data: {acceptance, fingerprint}`. */
+  PluginNotAccepted: -32031,
+  /** Empreinte différente de `expected_fingerprint` ; `data: {fingerprint}`. */
+  PluginFingerprintMismatch: -32032,
+  /** Défaillance du processus du plugin ; `data: {reason, stderr_tail?}`. */
+  PluginFailed: -32033,
+  /** Document ou résultat invalide, ou permission refusée ; `data: {problem}`. */
+  PluginInvalidOutput: -32034,
   /**
    * Côté app (hors protocole) : `runners.start` refusé par le processus
    * principal tant que l'utilisateur n'a pas accepté cette commande dans ce
@@ -1427,3 +1529,5 @@ export type Notification =
   | { method: 'runners.changed'; params: { id: string; running: RunnerProcess[] } }
   /** L'état de la CI d'une session suivie a changé (lot 14b). */
   | { method: 'forge.ci_changed'; params: { id: string; state: ChecksState } }
+  /** Plugins changés (lot 22a) : accord, révocation, état d'un processus ; la liste est à relire. */
+  | { method: 'plugins.changed'; params: Record<string, never> }

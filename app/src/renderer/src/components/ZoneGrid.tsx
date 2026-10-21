@@ -26,6 +26,7 @@ import {
   canSplit,
   clampRatio,
   dropRegion,
+  isPluginTabId,
   isTabId,
   layoutRects,
   MAX_RATIO,
@@ -52,6 +53,14 @@ const DRAG_TYPE = 'application/x-devmaestro-tab'
 
 export interface ZoneTab {
   id: TabId
+  /** Libellé (onglet de plugin : libellé du manifeste dans la langue courante) ; absent : celui de l'app. */
+  label?: string
+  /**
+   * Onglet d'un plugin (lot 22a) : son nom. L'onglet porte une marque
+   * « plugin » visible et un nom accessible « Plugin <nom> : <libellé> »,
+   * pour qu'un plugin ne puisse pas se faire passer pour un onglet de l'app.
+   */
+  plugin?: string
   /** Pastilles après le libellé (compteurs, demandes en attente). */
   extra?: ReactNode
 }
@@ -119,6 +128,19 @@ export function ZoneGrid({
   const { zones, splits } = layoutRects(view)
   const multi = zones.length > 1
   const extras = new Map(tabs.map((t) => [t.id, t.extra]))
+  const labels = new Map(tabs.map((t) => [t.id, t.label]))
+  const owners = new Map(tabs.filter((x) => x.plugin).map((x) => [x.id, x.plugin!]))
+  /** Nom d'un onglet ; celui d'un plugin dit toujours qu'il vient d'un plugin (menus, lecteurs d'écran). */
+  const labelOf = (k: TabId) => {
+    const label = labels.get(k) ?? tabLabel(k)
+    const owner = owners.get(k)
+    return owner ? t('plugins.tab.aria', { name: owner, label }) : label
+  }
+  /**
+   * Volets : ceux de l'app dans leur ordre fixe, puis ceux des plugins par
+   * nom (un onglet de plugin ajouté ou retiré ne déplace aucun autre volet).
+   */
+  const panels: TabId[] = [...TAB_IDS, ...zones.flatMap((z) => z.zone.tabs.filter(isPluginTabId)).sort()]
   const [dragTab, setDragTab] = useState<TabId | null>(null)
   /** Glisser en cours (avant même que `dragTab` soit posé) : un `dragend` précoce l'annule. */
   const dragging = useRef<TabId | null>(null)
@@ -238,6 +260,7 @@ export function ZoneGrid({
                   id={`${idPrefix}-${k}`}
                   aria-selected={zone.active === k}
                   aria-controls={`${idPrefix}-${k}-panel`}
+                  aria-label={owners.has(k) ? labelOf(k) : undefined}
                   tabIndex={zone.active === k ? 0 : -1}
                   draggable
                   onClick={() => onActivate(k)}
@@ -256,7 +279,17 @@ export function ZoneGrid({
                   }}
                   onDragEnd={endDrag}
                 >
-                  <span className="tlabel">{tabLabel(k)}</span>
+                  {owners.has(k) ? (
+                    <>
+                      <span className="tplug" aria-hidden="true">
+                        <span className="tplug-icon">⧉</span>
+                        {t('plugins.tab.mark')}
+                      </span>
+                      <span className="tlabel iso">{labels.get(k) ?? tabLabel(k)}</span>
+                    </>
+                  ) : (
+                    <span className="tlabel">{labelOf(k)}</span>
+                  )}
                   {extras.get(k)}
                 </button>
               ))}
@@ -273,6 +306,7 @@ export function ZoneGrid({
               index={i}
               count={zones.length}
               zones={zones.map((z) => z.zone)}
+              labelOf={labelOf}
               open={menuFor?.zone === zone.id}
               onOpen={() => setMenuFor({ zone: zone.id, tab: zone.active })}
               onClose={(refocus) => {
@@ -287,7 +321,7 @@ export function ZoneGrid({
           </div>
         )
       })}
-      {TAB_IDS.map((tab) => {
+      {panels.map((tab) => {
         const r = zones.find((z) => z.zone.tabs.includes(tab))
         if (!r) return null
         const visible = r.zone.active === tab
@@ -448,8 +482,10 @@ function ZoneMenu({
   onSplit,
   onMove,
   onReset,
+  labelOf,
 }: {
   layout: Layout
+  labelOf: (tab: TabId) => string
   zone: Zone
   /** Onglet visé par le menu. */
   tab: TabId
@@ -516,14 +552,14 @@ function ZoneMenu({
         className="btn ghost sm zmenu-btn"
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={count > 1 ? t('shell.zone.menuLabelZone', { tab: tabLabel(tab), n: index + 1, total: count }) : t('shell.zone.menuLabel', { tab: tabLabel(tab) })}
+        aria-label={count > 1 ? t('shell.zone.menuLabelZone', { tab: labelOf(tab), n: index + 1, total: count }) : t('shell.zone.menuLabel', { tab: labelOf(tab) })}
         title={t('shell.zone.menuTitle')}
         onClick={() => (open ? onClose(false) : onOpen())}
       >
         ⋯
       </button>
       {open && (
-        <div className="zmenu-pop" role="menu" aria-label={t('shell.zone.menuLabel', { tab: tabLabel(tab) })} ref={menu} onKeyDown={onKey}>
+        <div className="zmenu-pop" role="menu" aria-label={t('shell.zone.menuLabel', { tab: labelOf(tab) })} ref={menu} onKeyDown={onKey}>
           {items.map((it) => (
             <button
               key={it.key}

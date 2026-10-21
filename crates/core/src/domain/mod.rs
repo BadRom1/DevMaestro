@@ -10,6 +10,7 @@ pub mod files;
 pub mod forge;
 pub mod hooks;
 pub mod metrics;
+pub mod plugins;
 pub mod profile;
 pub mod project;
 pub mod quota;

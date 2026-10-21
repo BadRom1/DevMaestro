@@ -580,11 +580,23 @@ impl Daemon {
     /// Retient l'accès aux forges ; coupé : le suivi de la CI est vidé (et
     /// chaque session concernée renvoyée, `delivery: null`).
     pub(in crate::daemon::supervisor) fn note_forge_enabled(&self, enabled: bool) {
-        self.forge_enabled
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
         if enabled {
+            self.forge_enabled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             return;
         }
+        // Une passe du sondage en cours finit d'abord (accès encore ouvert
+        // pour elle) : sinon ses `gh` partiraient, et son résultat
+        // remplirait le suivi, après la coupure.
+        let _pass = self.ci_poll_pass.lock().unwrap_or_else(|e| e.into_inner());
+        self.forge_enabled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.clear_ci_watch();
+    }
+
+    /// Vide le suivi de la CI (chaque session concernée renvoyée,
+    /// `delivery: null`).
+    fn clear_ci_watch(&self) {
         let ids: Vec<Uuid> = {
             let mut w = self.ci_watch.lock().unwrap_or_else(|e| e.into_inner());
             w.drain().map(|(id, _)| id).collect()
@@ -612,8 +624,9 @@ impl Daemon {
     /// une fois ; après [`CI_MAX_ERRORS`] échecs d'affilée, la session n'est
     /// plus sondée (sa dernière livraison connue reste).
     pub fn poll_ci_once(&self) {
+        let _pass = self.ci_poll_pass.lock().unwrap_or_else(|e| e.into_inner());
         if !self.forge_allowed() {
-            self.note_forge_enabled(false);
+            self.clear_ci_watch();
             return;
         }
         for (id, mode) in self.ci_poll_targets() {

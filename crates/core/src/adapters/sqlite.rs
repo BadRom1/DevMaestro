@@ -11,6 +11,7 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::domain::forge::SessionIssue;
+use crate::domain::plugins::Acceptance;
 use crate::domain::subagents::{MAX_SUBAGENTS, Subagent, SubagentStatus};
 use crate::ports::{SessionRecord, SessionStore, WorktreeRecord};
 
@@ -103,6 +104,17 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE sessions ADD COLUMN issue_number INTEGER;
     ALTER TABLE sessions ADD COLUMN issue_title TEXT;
     ALTER TABLE sessions ADD COLUMN issue_url TEXT;
+    ",
+    // v7 → v8 (v0.3, lot 22a, ADR 0007) : accords de l'utilisateur pour les
+    // plugins (empreinte et permissions acceptées). Jamais dans
+    // `config.toml`, que le démon n'écrit pas.
+    "
+    CREATE TABLE plugin_acceptances (
+        name              TEXT PRIMARY KEY,
+        fingerprint       TEXT NOT NULL,
+        permissions       TEXT NOT NULL,
+        accepted_at       TEXT NOT NULL
+    );
     ",
 ];
 
@@ -575,6 +587,67 @@ impl SessionStore for SqliteStore {
         Ok(rows.flatten().collect())
     }
 
+    fn plugin_acceptances(&self) -> io::Result<Vec<Acceptance>> {
+        let conn = self.conn.lock().map_err(other)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, fingerprint, permissions, accepted_at FROM plugin_acceptances
+                 ORDER BY name",
+            )
+            .map_err(other)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(other)?;
+        // Une ligne illisible (permissions qui ne sont pas une liste de
+        // textes) est ignorée : le plugin redevient « non accepté ».
+        Ok(rows
+            .flatten()
+            .filter_map(|(name, fingerprint, perms, accepted_at)| {
+                let permissions: Vec<String> = serde_json::from_str(&perms).ok()?;
+                Some(Acceptance {
+                    name,
+                    fingerprint,
+                    permissions,
+                    accepted_at,
+                })
+            })
+            .collect())
+    }
+
+    fn accept_plugin(&self, a: &Acceptance) -> io::Result<()> {
+        let conn = self.conn.lock().map_err(other)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO plugin_acceptances (name, fingerprint, permissions, accepted_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                a.name,
+                a.fingerprint,
+                serde_json::to_string(&a.permissions).map_err(other)?,
+                a.accepted_at
+            ],
+        )
+        .map_err(other)?;
+        Ok(())
+    }
+
+    fn revoke_plugin(&self, name: &str) -> io::Result<bool> {
+        let conn = self.conn.lock().map_err(other)?;
+        let n = conn
+            .execute(
+                "DELETE FROM plugin_acceptances WHERE name = ?1",
+                params![name],
+            )
+            .map_err(other)?;
+        Ok(n > 0)
+    }
+
     fn load_all(&self) -> io::Result<Vec<SessionRecord>> {
         let conn = self.conn.lock().map_err(other)?;
         let mut stmt = conn
@@ -921,6 +994,64 @@ mod tests {
         store.delete_worktree(Path::new("/autre")).unwrap();
         store.delete_worktree(&w.path).unwrap();
         assert!(store.load_worktrees().unwrap().is_empty());
+    }
+
+    #[test]
+    fn migrates_a_v7_database_keeping_its_rows_then_records_plugin_acceptances() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for m in &MIGRATIONS[..7] {
+                conn.execute_batch(m).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 7).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, claude_session_id, profile, cwd, project_root,
+                    status, created_at, updated_at)
+                 VALUES (?1, 'c', 'default', '/p', '/p', 'idle', ?2, ?2)",
+                params![
+                    Uuid::from_u128(9).to_string(),
+                    fmt_time(OffsetDateTime::UNIX_EPOCH)
+                ],
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.load_all().unwrap().len(), 1);
+        assert!(store.plugin_acceptances().unwrap().is_empty());
+        let a = Acceptance {
+            name: "codegraph-impact".into(),
+            fingerprint: "a".repeat(64),
+            permissions: vec!["diff.read".into(), "claude.propose".into()],
+            accepted_at: "2026-10-21T10:00:00Z".into(),
+        };
+        store.accept_plugin(&a).unwrap();
+        assert_eq!(
+            store.plugin_acceptances().unwrap(),
+            std::slice::from_ref(&a)
+        );
+        // Un nouvel accord remplace l'ancien.
+        let b = Acceptance {
+            fingerprint: "b".repeat(64),
+            permissions: vec![],
+            ..a.clone()
+        };
+        store.accept_plugin(&b).unwrap();
+        assert_eq!(
+            store.plugin_acceptances().unwrap(),
+            std::slice::from_ref(&b)
+        );
+        // Relu après réouverture.
+        drop(store);
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(
+            store.plugin_acceptances().unwrap(),
+            std::slice::from_ref(&b)
+        );
+        assert!(store.revoke_plugin("codegraph-impact").unwrap());
+        assert!(!store.revoke_plugin("codegraph-impact").unwrap());
+        assert!(store.plugin_acceptances().unwrap().is_empty());
     }
 
     #[test]

@@ -227,6 +227,8 @@ Le domaine ne dépend d'aucun adaptateur. Les tests du domaine rejouent des év�
 
 ## 19. Extensibilité par plugins (voir ADR 0007)
 
+> **Décision** : [ADR 0007](adr/0007-plugins.md) (accepté le 2026-10-21) — plugins en processus séparés, supervisés par `orchd`, à interface **déclarative** (pas d'iframe en v1), confiance par empreinte et permissions. Premier lot livré : 22a (hôte dans `orchd` : `crates/core/src/domain/plugins/`, port `PluginHost` et `PluginFiles`, adaptateurs `plugin_process` et `plugin_files`, `daemon/supervisor/plugins.rs` ; méthodes `plugins.*` dans [`protocole.md`](protocole.md)). Ce qui suit est la piste d'origine, gardée pour l'historique ; l'ADR prévaut.
+
 Besoin exprimé le 2026-10-19 : que chacun puisse ajouter ses outils. Premiers cas :
 
 - **Graphify** : graphe de connaissances du code (local, Apache-2.0 depuis juillet 2026, sorties `graph.json` / `graph.html`). Un onglet « Impact » montrerait les modules touchés par le diff d'une session, et une recherche dans le graphe.

@@ -1,0 +1,279 @@
+{
+  "symbol": "cut",
+  "depth": 2,
+  "targets": [
+    {
+      "name": "cut",
+      "kind": "function",
+      "filePath": "app/src/renderer/src/state/aiReview.ts",
+      "startLine": 75,
+      "id": "function:166f37743971fbe3a7a7ac1f8bb1eef2",
+      "qualifiedName": "cut",
+      "language": "typescript"
+    }
+  ],
+  "ambiguous": false,
+  "aggregation": "definition",
+  "file": "app/src/renderer/src/state/aiReview.ts",
+  "filteredOut": false,
+  "definitions": [
+    {
+      "definition": {
+        "name": "cut",
+        "kind": "function",
+        "filePath": "app/src/renderer/src/state/aiReview.ts",
+        "startLine": 75,
+        "id": "function:166f37743971fbe3a7a7ac1f8bb1eef2",
+        "qualifiedName": "cut",
+        "language": "typescript"
+      },
+      "roots": [
+        "function:166f37743971fbe3a7a7ac1f8bb1eef2"
+      ],
+      "nodeCount": 8,
+      "edgeCount": 10,
+      "affected": [
+        {
+          "id": "function:166f37743971fbe3a7a7ac1f8bb1eef2",
+          "name": "cut",
+          "kind": "function",
+          "filePath": "app/src/renderer/src/state/aiReview.ts",
+          "startLine": 75
+        },
+        {
+          "id": "function:3b51472fceb05b30965b93a98fcb895c",
+          "name": "reviewSubject",
+          "kind": "function",
+          "filePath": "app/src/renderer/src/state/aiReview.ts",
+          "startLine": 81
+        },
+        {
+          "id": "function:38817bd509cb1df26c5191310d240a29",
+          "name": "AiReviewProvider",
+          "kind": "function",
+          "filePath": "app/src/renderer/src/components/AiReview.tsx",
+          "startLine": 142
+        },
+        {
+          "id": "function:4bba7ccf73beeae5e50e68f35d8c65c2",
+          "name": "reviewSessionName",
+          "kind": "function",
+          "filePath": "app/src/renderer/src/state/aiReview.ts",
+          "startLine": 90
+        },
+        {
+          "id": "file:app/src/renderer/src/components/AiReview.tsx",
+          "name": "AiReview.tsx",
+          "kind": "file",
+          "filePath": "app/src/renderer/src/components/AiReview.tsx",
+          "startLine": 1
+        },
+        {
+          "id": "file:app/test/ai-review.test.ts",
+          "name": "ai-review.test.ts",
+          "kind": "file",
+          "filePath": "app/test/ai-review.test.ts",
+          "startLine": 1
+        },
+        {
+          "id": "function:76e7f33f3a66a38b779c4b5409e3a57e",
+          "name": "AiReviewConfirm",
+          "kind": "function",
+          "filePath": "app/src/renderer/src/components/AiReview.tsx",
+          "startLine": 242
+        },
+        {
+          "id": "function:804bfefabfbd1d33d7a2979fa4e66ada",
+          "name": "launch",
+          "kind": "function",
+          "filePath": "app/src/renderer/src/components/AiReview.tsx",
+          "startLine": 337
+        }
+      ],
+      "edges": [
+        {
+          "source": "function:3b51472fceb05b30965b93a98fcb895c",
+          "target": "function:166f37743971fbe3a7a7ac1f8bb1eef2",
+          "kind": "calls",
+          "metadata": {
+            "confidence": 0.9,
+            "resolvedBy": "exact-match",
+            "refName": "cut"
+          },
+          "line": 86,
+          "column": 9,
+          "provenance": null
+        },
+        {
+          "source": "function:38817bd509cb1df26c5191310d240a29",
+          "target": "function:3b51472fceb05b30965b93a98fcb895c",
+          "kind": "calls",
+          "metadata": {
+            "confidence": 0.9,
+            "resolvedBy": "import",
+            "refName": "reviewSubject"
+          },
+          "line": 156,
+          "column": 62,
+          "provenance": null
+        },
+        {
+          "source": "function:4bba7ccf73beeae5e50e68f35d8c65c2",
+          "target": "function:3b51472fceb05b30965b93a98fcb895c",
+          "kind": "calls",
+          "metadata": {
+            "confidence": 0.9,
+            "resolvedBy": "exact-match",
+            "refName": "reviewSubject"
+          },
+          "line": 91,
+          "column": 55,
+          "provenance": null
+        },
+        {
+          "source": "file:app/src/renderer/src/components/AiReview.tsx",
+          "target": "function:3b51472fceb05b30965b93a98fcb895c",
+          "kind": "imports",
+          "metadata": {
+            "confidence": 0.9,
+            "resolvedBy": "import",
+            "refName": "reviewSubject"
+          },
+          "line": 29,
+          "column": 2,
+          "provenance": null
+        },
+        {
+          "source": "function:4bba7ccf73beeae5e50e68f35d8c65c2",
+          "target": "function:166f37743971fbe3a7a7ac1f8bb1eef2",
+          "kind": "calls",
+          "metadata": {
+            "confidence": 0.9,
+            "resolvedBy": "exact-match",
+            "refName": "cut"
+          },
+          "line": 91,
+          "column": 9,
+          "provenance": null
+        },
+        {
+          "source": "file:app/test/ai-review.test.ts",
+          "target": "function:4bba7ccf73beeae5e50e68f35d8c65c2",
+          "kind": "calls",
+          "metadata": {
+            "confidence": 0.9,
+            "resolvedBy": "import",
+            "refName": "reviewSessionName"
+          },
+          "line": 116,
+          "column": 15,
+          "provenance": null
+        },
+        {
+          "source": "function:76e7f33f3a66a38b779c4b5409e3a57e",
+          "target": "function:4bba7ccf73beeae5e50e68f35d8c65c2",
+          "kind": "calls",
+          "metadata": {
+            "confidence": 0.9,
+            "resolvedBy": "import",
+            "refName": "reviewSessionName"
+          },
+          "line": 422,
+          "column": 15,
+          "provenance": null
+        },
+        {
+          "source": "function:804bfefabfbd1d33d7a2979fa4e66ada",
+          "target": "function:4bba7ccf73beeae5e50e68f35d8c65c2",
+          "kind": "calls",
+          "metadata": {
+            "confidence": 0.9,
+            "resolvedBy": "import",
+            "refName": "reviewSessionName"
+          },
+          "line": 370,
+          "column": 74,
+          "provenance": null
+        },
+        {
+          "source": "file:app/src/renderer/src/components/AiReview.tsx",
+          "target": "function:4bba7ccf73beeae5e50e68f35d8c65c2",
+          "kind": "imports",
+          "metadata": {
+            "confidence": 0.9,
+            "resolvedBy": "import",
+            "refName": "reviewSessionName"
+          },
+          "line": 28,
+          "column": 2,
+          "provenance": null
+        },
+        {
+          "source": "file:app/test/ai-review.test.ts",
+          "target": "function:4bba7ccf73beeae5e50e68f35d8c65c2",
+          "kind": "imports",
+          "metadata": {
+            "confidence": 0.9,
+            "resolvedBy": "import",
+            "refName": "reviewSessionName"
+          },
+          "line": 27,
+          "column": 2,
+          "provenance": null
+        }
+      ]
+    }
+  ],
+  "nodeCount": 8,
+  "edgeCount": 10,
+  "affected": [
+    {
+      "name": "cut",
+      "kind": "function",
+      "filePath": "app/src/renderer/src/state/aiReview.ts",
+      "startLine": 75
+    },
+    {
+      "name": "reviewSubject",
+      "kind": "function",
+      "filePath": "app/src/renderer/src/state/aiReview.ts",
+      "startLine": 81
+    },
+    {
+      "name": "AiReviewProvider",
+      "kind": "function",
+      "filePath": "app/src/renderer/src/components/AiReview.tsx",
+      "startLine": 142
+    },
+    {
+      "name": "reviewSessionName",
+      "kind": "function",
+      "filePath": "app/src/renderer/src/state/aiReview.ts",
+      "startLine": 90
+    },
+    {
+      "name": "AiReview.tsx",
+      "kind": "file",
+      "filePath": "app/src/renderer/src/components/AiReview.tsx",
+      "startLine": 1
+    },
+    {
+      "name": "ai-review.test.ts",
+      "kind": "file",
+      "filePath": "app/test/ai-review.test.ts",
+      "startLine": 1
+    },
+    {
+      "name": "AiReviewConfirm",
+      "kind": "function",
+      "filePath": "app/src/renderer/src/components/AiReview.tsx",
+      "startLine": 242
+    },
+    {
+      "name": "launch",
+      "kind": "function",
+      "filePath": "app/src/renderer/src/components/AiReview.tsx",
+      "startLine": 337
+    }
+  ]
+}

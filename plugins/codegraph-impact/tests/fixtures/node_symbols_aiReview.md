@@ -1,0 +1,79 @@
+**app/src/renderer/src/state/aiReview.ts** — 74 symbols, used by 5 files: app/src/renderer/src/components/AiReview.tsx, app/src/renderer/src/components/PullsPanel.tsx, app/src/renderer/src/components/Sidebar.tsx, app/test/ai-review.test.ts, app/test/dom/ai-review.test.ts
+
+**Symbols**
+- `MAX_REVIEW_PASTED_BYTES` (constant) = 64 * 1024 — :20
+- `MAX_REVIEW_FILES_READ` (constant) = 80 — :22
+- `MAX_REVIEW_FILE_LIST` (constant) = 500 — :24
+- `MAX_REVIEW_BODY_BYTES` (constant) = 16 * 1024 — :26
+- `MAX_REVIEW_MESSAGE_BYTES` (constant) = 4 * 1024 — :28
+- `MAX_REVIEW_NAME` (constant) = 80 — :30
+- `ReviewTarget` (type_alias) — :33
+- `listTruncated` (property) listTruncated?: boolean — :39
+- `skipped` (property) skipped?: number — :41
+- `ReviewKind` (type_alias) — :44
+- `fullSha` (function) (v: unknown): string | null — :47
+- `short` (function) (sha: string): string — :53
+- `targetSha` (function) (t: ReviewTarget): string | null — :58
+- `targetRoot` (function) (t: ReviewTarget): string — :65
+- `targetBranch` (function) (t: ReviewTarget): string | null — :70
+- `cut` (function) (s: string, max: number): string — :75
+- `reviewSubject` (function) (t: ReviewTarget): string — :81
+- `reviewSessionName` (function) (t: ReviewTarget): string — :90
+- `reviewButtonLabel` (function) (t: Pick<ReviewTarget, 'kind'> & { number?: number; sha?: string }): string — :95
+- `reviewBranch` (function) (t: ReviewTarget): string | null — :102
+- `ReviewLocation` (type_alias) — :111
+- `reviewLocation` (function) ( t: ReviewTarget, worktrees: readonly WorktreeInfo[] | undefined, noWorktree = false, ): ReviewLocation | null — :125
+- `isReviewWorktree` (function) (w: WorktreeInfo, branch: string, sha: string): boolean — :147
+- `markBranch` (function) (m: Pick<ReviewMark, 'kind' | 'pr' | 'sha'>): string | null — :153
+- `reviewPromptId` (function) (t: ReviewTarget): PromptId — :162
+- `reviewVars` (function) (t: ReviewTarget): PromptVars — :167
+- `noWorktreeNote` (function) (locale: Locale = getLocale()): string — :179
+- `reviewInstruction` (function) (t: ReviewTarget, template: string, noWorktree = false): string — :191
+- `encoder` (constant) = new TextEncoder() — :200
+- `utf8Bytes` (function) (s: string): number — :202
+- `cutBytes` (function) (s: string, max: number): { text: string; cut: boolean } — :207
+- `STATUS_WORDS` (constant) = { A: 'ajouté', M: 'modifié', D: 'supprimé', R: 'renommé', '?': 'non suivi' } — :221
+- `counts` (function) (f: Pick<DiffFile, 'additions' | 'deletions'>): string — :223
+- `n` (function) (v: number | null) — :224
+- `fileLine` (function) (f: DiffFile): string — :229
+- `unifiedFile` (function) (f: DiffFile, d: FileDiff): string — :235
+- `FileRead` (type_alias) — :252
+- `ReviewContext` (interface) — :254
+- `pasted` (property) string pasted — :256
+- `bytes` (property) number bytes — :257
+- `included` (property) number included — :259
+- `total` (property) number total — :261
+- `truncated` (property) boolean truncated — :263
+- `notes` (property) string[] notes — :265
+- `missing` (property) ReviewNote[] missing — :267
+- `ReviewNote` (type_alias) — :271
+- `sizeLabel` (function) (n: number): string — :282
+- `pastedSize` (function) (n: number): string — :292
+- `plural` (function) (n: number, one: string, many: string): string — :299
+- `notePasted` (function) (n: ReviewNote): string — :304
+- `reviewNoteLabel` (function) (n: ReviewNote): string — :328
+- `reviewHeader` (function) (t: ReviewTarget): string — :350
+- `buildReviewContext` (function) ( t: ReviewTarget, reads: ReadonlyMap<string, FileRead>, opts: { maxBytes?: number; noWorktree?: boolean } = {}, ): ReviewContext — :397
+- `REVIEW_READ_PARALLEL` (constant) = 4 — :485
+- `readReviewFiles` (function) ( files: readonly DiffFile[], fetch: (path: string) => Promise<FileDiff>, opts: { maxBytes?: number; alive?: () => boolean; parallel?: number; onRead?: (n: number) => void } = {}, ): Promise<Map<string, FileRead>> — :494
+- `worker` (function) () — :505
+- `isUnknownBase` (function) (code: number | null, message: string): boolean — :536
+- `fetchCommand` (function) (t: ReviewTarget): string | null — :541
+- `REVIEW_MARKS_KEY` (constant) = 'devmaestro.aiReview.sessions' — :547
+- `MAX_MARKS` (constant) = 200 — :548
+- `ReviewMark` (interface) — :550
+- `kind` (property) ReviewKind kind — :551
+- `pr` (property) number pr — :553
+- `sha` (property) string sha — :555
+- `root` (property) string root — :557
+- `worktree` (property) string | null worktree — :559
+- `ReviewMarks` (type_alias) — :562
+- `validMark` (function) (v: unknown): ReviewMark | null — :564
+- `loadReviewMarks` (function) (storage: KeyValueStorage | null | undefined): ReviewMarks — :575
+- `saveReviewMarks` (function) (storage: KeyValueStorage | null | undefined, marks: ReviewMarks): void — :592
+- `withMark` (function) (marks: ReviewMarks, id: string, mark: ReviewMark): ReviewMarks — :602
+- `withoutMark` (function) (marks: ReviewMarks, id: string): ReviewMarks — :608
+- `markOf` (function) (t: ReviewTarget, worktree: string | null): ReviewMark — :615
+- `reviewCleanupWorktree` (function) ( s: Pick<Session, 'alive'>, mark: ReviewMark | undefined, worktrees: readonly WorktreeInfo[] | undefined, ): WorktreeInfo | null — :632
+
+> Drop `symbolsOnly` (or pass `offset`/`limit`) to read the source, like Read.

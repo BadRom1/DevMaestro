@@ -94,6 +94,14 @@ export interface DevMaestroApi {
    * changé depuis.
    */
   confirmRunner(req: { session_id: string; runner_id: string; fingerprint: string }): Promise<{ ok: true } | { ok: false; error: RpcFailure }>
+  /**
+   * « Accepter » un plugin (lot 22a) : le processus principal relit
+   * `plugins.list`, refuse si l'empreinte n'est plus celle montrée, retient
+   * l'accord puis le demande au démon. Absent d'un preload plus ancien.
+   */
+  acceptPlugin?(req: { name: string; fingerprint: string }): Promise<{ ok: true } | { ok: false; error: RpcFailure }>
+  /** « Révoquer » un plugin : oublié par le processus principal puis par le démon. */
+  revokePlugin?(req: { name: string }): Promise<{ ok: true } | { ok: false; error: RpcFailure }>
   /** Taille du terminal des runners (exécution affichée seulement). */
   resizeRunner(req: { process_id: string; cols: number; rows: number }): void
   /** Demande un nouveau canal pour le terminal des runners (message `RUNNER_PORT_MESSAGE`). */
@@ -187,6 +195,8 @@ export const Ipc = {
   viewRunner: 'devmaestro:view-runner',
   resizeRunner: 'devmaestro:resize-runner',
   confirmRunner: 'devmaestro:confirm-runner',
+  acceptPlugin: 'devmaestro:accept-plugin',
+  revokePlugin: 'devmaestro:revoke-plugin',
   requestRunnerPort: 'devmaestro:request-runner-port',
   runnerPort: 'devmaestro:runner-port',
   previewPopup: 'devmaestro:preview-popup',

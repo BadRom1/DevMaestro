@@ -12,7 +12,9 @@
 //! 1. n'a pas le même uid, ou ne peut pas être identifié ;
 //! 2. appartient à un *scope* systemd `devmaestro-session-…` (sessions
 //!    lancées par `systemd-run --user --scope`, voir
-//!    [`crate::daemon::launch`]). L'appartenance à un cgroup survit à
+//!    [`crate::daemon::launch`]), `devmaestro-runner-…` (runners, lot 14a)
+//!    ou `devmaestro-plugin-…` (plugins, lot 22a, ADR 0007 : un plugin n'a
+//!    que son stdio). L'appartenance à un cgroup survit à
 //!    `setsid`, aux doubles forks et au rattachement à `init` : en sortir
 //!    demande un appel délibéré à `systemd-run` (ou l'écriture dans un autre
 //!    cgroup de l'utilisateur) ;
@@ -55,6 +57,11 @@ pub const SCOPE_PREFIX: &str = "devmaestro-session-";
 /// v0.3, lot 14a) : du code du dépôt, aussi peu sûr qu'une commande Bash
 /// d'une session ; refusé au socket de contrôle de la même façon.
 pub const RUNNER_SCOPE_PREFIX: &str = "devmaestro-runner-";
+
+/// Préfixe des scopes systemd des plugins (`devmaestro-plugin-<nom>-<n>.scope`,
+/// v0.3, lot 22a, ADR 0007) : du code tiers, qui n'a que son stdio ; refusé
+/// au socket de contrôle de la même façon.
+pub const PLUGIN_SCOPE_PREFIX: &str = "devmaestro-plugin-";
 
 /// Profondeur maximale de la chaîne des parents remontée.
 const MAX_DEPTH: usize = 4096;
@@ -119,10 +126,12 @@ pub fn cgroup(pid: u32) -> Option<String> {
     std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()
 }
 
-/// Ce cgroup est-il celui d'un scope de session (ou de runner) ?
+/// Ce cgroup est-il celui d'un scope de session, de runner ou de plugin ?
 pub fn in_session_scope(cgroup: &str) -> bool {
     cgroup.lines().any(|l| {
-        (l.contains(&format!("/{SCOPE_PREFIX}")) || l.contains(&format!("/{RUNNER_SCOPE_PREFIX}")))
+        [SCOPE_PREFIX, RUNNER_SCOPE_PREFIX, PLUGIN_SCOPE_PREFIX]
+            .iter()
+            .any(|p| l.contains(&format!("/{p}")))
             && l.trim_end().ends_with(".scope")
     })
 }
@@ -277,7 +286,7 @@ pub fn check_control(peer: &Peer, own_uid: u32, supervised: &Supervised) -> Resu
     let pid = peer.pid;
     if cgroup(pid).is_some_and(|c| in_session_scope(&c)) {
         return Err(format!(
-            "le processus {pid} appartient au scope systemd d'une session"
+            "le processus {pid} appartient au scope systemd d'une session, d'un runner ou d'un plugin"
         ));
     }
     if std::fs::read(format!("/proc/{pid}/environ")).is_ok_and(|e| environ_has_session_vars(&e)) {
@@ -378,6 +387,12 @@ mod tests {
         assert!(!in_scope(c, "devmaestro-session-autre.scope"));
         assert!(in_session_scope(
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/devmaestro-runner-1a2b3c4d-5e6f7a8b.scope\n"
+        ));
+        assert!(in_session_scope(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/devmaestro-plugin-codegraph-impact-3.scope\n"
+        ));
+        assert!(!in_session_scope(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/devmaestro-plugin-x.service\n"
         ));
         assert!(!in_session_scope(
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome-x.scope\n"

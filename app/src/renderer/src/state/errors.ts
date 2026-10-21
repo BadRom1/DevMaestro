@@ -29,6 +29,11 @@ const FRIENDLY: Record<number, PlainKey> = {
   [ErrorCode.TooManyRunners]: 'errors.tooManyRunners',
   [ErrorCode.RunnerProcessUnknown]: 'errors.runnerProcessUnknown',
   [ErrorCode.RunnerConfirmationRequired]: 'errors.runnerConfirmationRequired',
+  [ErrorCode.PluginUnknown]: 'errors.pluginUnknown',
+  [ErrorCode.PluginNotAccepted]: 'errors.pluginNotAccepted',
+  [ErrorCode.PluginFingerprintMismatch]: 'errors.pluginFingerprint',
+  [ErrorCode.PluginFailed]: 'errors.pluginFailed',
+  [ErrorCode.PluginInvalidOutput]: 'errors.pluginInvalid',
   [ErrorCode.Timeout]: 'errors.timeout',
   [ErrorCode.Disconnected]: 'errors.disconnected',
 }

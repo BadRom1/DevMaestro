@@ -9,13 +9,24 @@
  * jamais vide (elle est fermée, sa sœur prend sa place).
  */
 import { t, type PlainKey } from '../../../shared/i18n'
+import { isPluginName } from '../../../shared/pluginDocument'
 import type { KeyValueStorage } from './collapse'
 
-/** Onglets d'une session, dans l'ordre de la disposition par défaut. */
+/** Onglets propres à l'app, dans l'ordre de la disposition par défaut. */
 export const TAB_IDS = ['conversation', 'terminal', 'diff', 'commits', 'files', 'agents', 'runners'] as const
-export type TabId = (typeof TAB_IDS)[number]
+export type CoreTabId = (typeof TAB_IDS)[number]
+/**
+ * Onglet d'un plugin (lot 22a) : `plugin:<nom>`, dynamique. Absent de la
+ * disposition par défaut ; ajouté à la première zone quand le plugin
+ * devient actif, puis gardé (masqué tant que le plugin n'est pas actif).
+ */
+export type PluginTabId = `plugin:${string}`
+export type TabId = CoreTabId | PluginTabId
 
-const TAB_LABEL_KEYS: Record<TabId, PlainKey> = {
+/** Onglets de plugin dans une disposition, au plus (le démon charge 32 plugins). */
+export const MAX_PLUGIN_TABS = 32
+
+const TAB_LABEL_KEYS: Record<CoreTabId, PlainKey> = {
   conversation: 'shell.tab.conversation',
   terminal: 'shell.tab.terminal',
   diff: 'shell.tab.diff',
@@ -25,9 +36,27 @@ const TAB_LABEL_KEYS: Record<TabId, PlainKey> = {
   runners: 'shell.tab.runners',
 }
 
-/** Nom d'un onglet, dans la langue courante. */
+/** Nom d'un onglet de l'app, dans la langue courante ; pour un plugin, son nom (le libellé du manifeste est fourni à la grille). */
 export function tabLabel(id: TabId): string {
-  return t(TAB_LABEL_KEYS[id])
+  return isCoreTabId(id) ? t(TAB_LABEL_KEYS[id]) : (pluginOfTab(id) ?? id)
+}
+
+export function isCoreTabId(v: unknown): v is CoreTabId {
+  return typeof v === 'string' && (TAB_IDS as readonly string[]).includes(v)
+}
+
+export function isPluginTabId(v: unknown): v is PluginTabId {
+  return typeof v === 'string' && v.startsWith('plugin:') && isPluginName(v.slice(7))
+}
+
+/** Onglet d'un plugin. */
+export function pluginTabId(name: string): PluginTabId {
+  return `plugin:${name}`
+}
+
+/** Nom du plugin d'un onglet `plugin:<nom>`, ou `null`. */
+export function pluginOfTab(id: unknown): string | null {
+  return isPluginTabId(id) ? id.slice(7) : null
 }
 
 /** Nombre maximal de zones. */
@@ -69,7 +98,37 @@ export type SplitSide = 'right' | 'bottom'
 export type DropRegion = SplitSide | 'center'
 
 export function isTabId(v: unknown): v is TabId {
-  return typeof v === 'string' && (TAB_IDS as readonly string[]).includes(v)
+  return isCoreTabId(v) || isPluginTabId(v)
+}
+
+/** Onglets de plugin d'une disposition, dans l'ordre des zones. */
+export function pluginTabsOf(l: Layout): PluginTabId[] {
+  return zonesOf(l).flatMap((z) => z.tabs.filter(isPluginTabId))
+}
+
+/**
+ * Ajoute à la première zone les onglets absents de la disposition (onglet
+ * d'un plugin devenu actif) ; disposition inchangée s'il ne manque rien.
+ * Au-delà de `MAX_PLUGIN_TABS` onglets de plugin, les suivants ne sont pas ajoutés.
+ */
+export function ensureTabs(l: Layout, tabs: readonly TabId[]): Layout {
+  let room = MAX_PLUGIN_TABS - pluginTabsOf(l).length
+  const missing: TabId[] = []
+  for (const tab of tabs) {
+    if (zoneOfTab(l, tab) || missing.includes(tab)) continue
+    if (isPluginTabId(tab)) {
+      if (room <= 0) continue
+      room--
+    }
+    missing.push(tab)
+  }
+  if (missing.length === 0) return l
+  let added = false
+  return mapZones(l, (z) => {
+    if (added) return z
+    added = true
+    return { ...z, tabs: [...z.tabs, ...missing] }
+  })
 }
 
 export function defaultLayout(): Layout {
@@ -291,6 +350,7 @@ export function parseLayout(raw: unknown): Layout | null {
   const seen = new Set<TabId>()
   let zones = 0
   let splits = 0
+  let plugins = 0
   let ok = true
   const walk = (n: unknown, depth: number): LayoutNode | null => {
     if (!ok || depth > MAX_ZONES || !isObj(n)) return (ok = false), null
@@ -299,6 +359,7 @@ export function parseLayout(raw: unknown): Layout | null {
       const tabs: TabId[] = []
       for (const t of n.tabs) {
         if (!isTabId(t) || seen.has(t)) return (ok = false), null
+        if (isPluginTabId(t) && ++plugins > MAX_PLUGIN_TABS) return (ok = false), null
         seen.add(t)
         tabs.push(t)
       }

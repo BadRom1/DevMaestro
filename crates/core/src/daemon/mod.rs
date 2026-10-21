@@ -33,8 +33,9 @@ use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::adapters::{
-    FsCommandFiles, FsFiles, FsProfileSource, FsTranscriptFollower, FsTranscriptSource, GitCli,
-    GitDiff, GitWorktrees, GithubCli, NativePty, SqliteStore, SystemClock, UsageApi,
+    FsCommandFiles, FsFiles, FsPluginFiles, FsProfileSource, FsTranscriptFollower,
+    FsTranscriptSource, GitCli, GitDiff, GitWorktrees, GithubCli, NativePty, ProcessPluginHost,
+    SqliteStore, SystemClock, UsageApi,
 };
 use crate::paths::{Paths, create_private_dir};
 use log::{error, info};
@@ -65,8 +66,39 @@ pub fn default_config(paths: Paths) -> Result<Config, String> {
         systemd_runtime_dir: std::env::var_os("DEVMAESTRO_SYSTEMD_RUNTIME_DIR"),
         initial_prompt_timeout: initial_prompt_timeout(),
         ci_poll_interval: ci_poll_interval(),
+        plugins_dir: plugins_dir(&paths, std::env::var_os("DEVMAESTRO_PLUGINS_DIR")),
+        plugin_idle_timeout: test_duration_ms("DEVMAESTRO_PLUGIN_IDLE_MS")
+            .unwrap_or(supervisor::plugins::IDLE_TIMEOUT),
+        plugin_init_timeout: test_duration_ms("DEVMAESTRO_PLUGIN_INIT_TIMEOUT_MS")
+            .unwrap_or(supervisor::plugins::INIT_TIMEOUT),
+        plugin_request_timeout: test_duration_ms("DEVMAESTRO_PLUGIN_TIMEOUT_MS")
+            .unwrap_or(supervisor::plugins::REQUEST_TIMEOUT),
         paths,
     })
+}
+
+/// Dossier des plugins (v0.3, lot 22a) : `DEVMAESTRO_PLUGINS_DIR` (chemin
+/// absolu, lu au démarrage, comme `DEVMAESTRO_CLAUDE_BIN` : tests et
+/// essais), sinon `$XDG_CONFIG_HOME/devmaestro/plugins`. Jamais créé.
+pub fn plugins_dir(paths: &Paths, env: Option<std::ffi::OsString>) -> PathBuf {
+    env.map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| paths.config_dir.join("plugins"))
+}
+
+/// Durée en millisecondes lue dans `var` (> 0), par un binaire de test
+/// (`test-support`) seulement.
+fn test_duration_ms(var: &str) -> Option<Duration> {
+    #[cfg(feature = "test-support")]
+    if let Some(ms) = std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+    {
+        return Some(Duration::from_millis(ms));
+    }
+    let _ = var;
+    None
 }
 
 /// Intervalle minimal entre deux appels à l'API d'usage par profil. Seul un
@@ -265,7 +297,10 @@ async fn run(paths: Paths, scrubbed: Vec<String>) -> Result<(), String> {
         follower: Box::new(FsTranscriptFollower::default()),
         forge: Box::new(GithubCli::from_env()),
         commands: Box::new(FsCommandFiles),
+        plugin_host: Box::new(ProcessPluginHost),
+        plugin_files: Box::new(FsPluginFiles),
     };
+    info!("dossier des plugins : {}", config.plugins_dir.display());
     if !config.usage_api {
         info!("[quotas] usage_api = false : quotas lus dans les statuslines seulement");
     }

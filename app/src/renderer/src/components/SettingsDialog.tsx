@@ -48,10 +48,11 @@ import { tildify } from '../state/format'
 import { Meter, ProfileBadge, StatusGlyph } from './common'
 import { ConfirmBar } from './ForgetConfirm'
 import { Modal } from './Modal'
+import { PluginSettings } from './PluginSettings'
 import { PromptSettings } from './PromptSettings'
 import { THEMES, autoTitle } from './TopBar'
 
-type Tab = 'apparence' | 'general' | 'consignes'
+type Tab = 'apparence' | 'general' | 'consignes' | 'plugins'
 
 const PREVIEW_GLYPHS = [
   { kind: 'waiting', key: 'common.status.waiting' },
@@ -897,12 +898,15 @@ export function SettingsDialog({
   projects,
   home,
   scheme,
+  plugins = false,
   onClose,
 }: {
   profiles: Profile[]
   projects: ProjectChoice[]
   home: string | null
   scheme: Scheme
+  /** Le démon annonce la capacité `plugins` (lot 22a) : onglet « Plugins ». */
+  plugins?: boolean
   onClose: () => void
 }) {
   const [tab, setTab] = useState<Tab>('apparence')
@@ -913,7 +917,10 @@ export function SettingsDialog({
     ['apparence', t('settings.tab.appearance')],
     ['general', t('settings.tab.general')],
     ['consignes', t('settings.tab.prompts')],
+    ...(plugins ? ([['plugins', t('plugins.settings.tab')]] as [Tab, string][]) : []),
   ]
+  // Capacité perdue (démon remplacé) pendant que l'onglet est ouvert : retour aux consignes.
+  const shown: Tab = tab === 'plugins' && !plugins ? 'consignes' : tab
   return (
     <Modal title={t('settings.title')} onClose={onClose} width={780}>
       <div className="stabs" role="tablist" aria-label={t('settings.tabsLabel')}>
@@ -923,14 +930,14 @@ export function SettingsDialog({
             type="button"
             role="tab"
             id={`${id}-${k}`}
-            aria-selected={tab === k}
+            aria-selected={shown === k}
             aria-controls={`${id}-panel`}
-            tabIndex={tab === k ? 0 : -1}
+            tabIndex={shown === k ? 0 : -1}
             onClick={() => setTab(k)}
             onKeyDown={(e) => {
               if (['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) {
                 e.preventDefault()
-                const i = tabs.findIndex(([k]) => k === tab)
+                const i = tabs.findIndex(([k]) => k === shown)
                 const j =
                   e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length
                 const next: Tab = tabs[j]![0]
@@ -943,16 +950,18 @@ export function SettingsDialog({
           </button>
         ))}
       </div>
-      <div role="tabpanel" id={`${id}-panel`} aria-labelledby={`${id}-${tab}`}>
+      <div role="tabpanel" id={`${id}-panel`} aria-labelledby={`${id}-${shown}`}>
         {saveError && (
           <p className="inline-err" role="alert" style={{ padding: '8px 16px 0' }}>
             {saveError}
           </p>
         )}
-        {tab === 'apparence' ? (
+        {shown === 'apparence' ? (
           <Appearance scheme={scheme} />
-        ) : tab === 'general' ? (
+        ) : shown === 'general' ? (
           <General profiles={profiles} projects={projects} home={home} />
+        ) : shown === 'plugins' ? (
+          <PluginSettings />
         ) : (
           <PromptSettings projects={projects} home={home} />
         )}

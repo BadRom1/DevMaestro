@@ -13,12 +13,16 @@ import {
   PROMPTS,
   defaultPrompt,
   ownOverride,
+  pluginPromptKey,
   previewPrompt,
+  promptDef,
   promptProblem,
   resolvePrompt,
   type PromptDef,
+  type PromptKey,
 } from '../../../shared/prompts'
 import { useI18n } from '../i18n'
+import { activePlugins, localized, usePlugins } from '../pluginsStore'
 import { useSettings } from '../settings'
 import { tildify } from '../state/format'
 import type { ProjectChoice } from '../state/newSession'
@@ -26,15 +30,36 @@ import type { ProjectChoice } from '../state/newSession'
 /** Valeur du sélecteur de portée pour le réglage global. */
 const GLOBAL = ''
 
-function PromptEditor({ def, projectKey }: { def: PromptDef; projectKey: string | null }) {
+function PromptEditor({
+  def,
+  projectKey,
+  promptKey = def.id,
+  title,
+}: {
+  def: PromptDef
+  projectKey: string | null
+  /** Clé de la surcharge : la consigne, ou une action de plugin (`pluginPropose:<nom>:<action>`, lot 22a). */
+  promptKey?: PromptKey
+  /** Titre affiché (action de plugin) ; absent : libellé de la consigne. */
+  title?: string
+}) {
   const { settings, update } = useSettings()
   const { locale, t } = useI18n()
   const id = useId()
-  const resolved = resolvePrompt(settings.prompts, def.id, projectKey)
-  /** Ce dont hérite la portée affichée : le global pour un projet, le défaut (de la langue de l'interface) pour le global. */
-  const inherited = projectKey ? resolvePrompt(settings.prompts, def.id, null).template : defaultPrompt(def.id, locale)
+  const pluginAction = promptKey !== def.id
+  const resolved = resolvePrompt(settings.prompts, promptKey, projectKey)
+  /**
+   * Ce dont hérite la portée affichée : le global pour un projet, le défaut
+   * (de la langue de l'interface) pour le global ; pour une action de
+   * plugin en global, la consigne générique.
+   */
+  const inherited = projectKey
+    ? resolvePrompt(settings.prompts, promptKey, null).template
+    : pluginAction
+      ? resolvePrompt(settings.prompts, def.id, null).template
+      : defaultPrompt(def.id, locale)
   /** Surcharge de cette portée telle qu'enregistrée : invalide (relue du disque), elle est montrée mais pas utilisée. */
-  const stored = ownOverride(settings.prompts, def.id, projectKey)
+  const stored = ownOverride(settings.prompts, promptKey, projectKey)
   const storedProblem = stored === undefined ? null : promptProblem(def.id, stored)
   const shown = storedProblem && stored !== undefined ? stored : resolved.template
   const storedError = storedProblem
@@ -60,8 +85,8 @@ function PromptEditor({ def, projectKey }: { def: PromptDef; projectKey: string 
     if (v === null) setErrorKind(null)
     // Égal à ce dont la portée hérite : pas de surcharge (l'origine reste celle du niveau au-dessus).
     const value = v === null || v === inherited ? null : v
-    if (projectKey) void update({ prompts: { projects: { [projectKey]: { [def.id]: value } } } })
-    else void update({ prompts: { global: { [def.id]: value } } })
+    if (projectKey) void update({ prompts: { projects: { [projectKey]: { [promptKey]: value } } } })
+    else void update({ prompts: { global: { [promptKey]: value } } })
   }
 
   const preview = previewPrompt(def.id, text)
@@ -69,7 +94,9 @@ function PromptEditor({ def, projectKey }: { def: PromptDef; projectKey: string 
   return (
     <section className="prompt-ed" aria-labelledby={`${id}-h`}>
       <div className="prompt-ed-h">
-        <h3 id={`${id}-h`}>{def.label}</h3>
+        <h3 id={`${id}-h`} className={pluginAction ? 'iso' : undefined}>
+          {title ?? def.label}
+        </h3>
         <span className="hint prompt-origin">
           {t('prompts.ui.origin', { origin: ORIGIN_LABELS[resolved.origin] })}
         </span>
@@ -80,7 +107,7 @@ function PromptEditor({ def, projectKey }: { def: PromptDef; projectKey: string 
         value={text}
         rows={3}
         spellCheck={false}
-        aria-label={t('prompts.ui.editorLabel', { label: def.label })}
+        aria-label={t('prompts.ui.editorLabel', { label: title ?? def.label })}
         aria-invalid={error ? true : undefined}
         aria-describedby={`${id}-e`}
         onKeyDown={(e) => {
@@ -125,7 +152,7 @@ function PromptEditor({ def, projectKey }: { def: PromptDef; projectKey: string 
             setText(inherited)
             save(null)
           }}>
-          {projectKey ? t('prompts.ui.inheritGlobal') : t('prompts.ui.restoreDefault')}
+          {projectKey ? t('prompts.ui.inheritGlobal') : pluginAction ? t('plugins.prompts.inheritGeneric') : t('prompts.ui.restoreDefault')}
         </button>
       )}
     </section>
@@ -138,6 +165,19 @@ export function PromptSettings({ projects, home }: { projects: ProjectChoice[]; 
   // Une entrée par clé de projet (plusieurs dossiers peuvent partager les réglages d'un dépôt).
   const choices = projects.filter((c, i) => projects.findIndex((d) => d.profileKey === c.profileKey) === i)
   const projectKey = scope === GLOBAL ? null : scope
+  const { locale } = useI18n()
+  /** Actions `propose` des plugins actifs (lot 22a) : une surcharge possible chacune. */
+  const plugins = usePlugins()
+  const actions = activePlugins(plugins).flatMap((p) =>
+    p.actions
+      .filter((a) => a.propose)
+      .flatMap((a) => {
+        const key = pluginPromptKey(p.name, a.id)
+        return key
+          ? [{ key, title: t('plugins.prompts.actionLabel', { plugin: localized(p.label, locale) ?? p.name, action: localized(a.label, locale) ?? a.id }) }]
+          : []
+      }),
+  )
   return (
     <>
       <div className="mb">
@@ -163,6 +203,15 @@ export function PromptSettings({ projects, home }: { projects: ProjectChoice[]; 
         </div>
         {PROMPTS.map((def) => (
           <PromptEditor key={`${projectKey ?? GLOBAL}:${def.id}`} def={def} projectKey={projectKey} />
+        ))}
+        {actions.length > 0 && (
+          <div className="field">
+            <span className="lbl">{t('plugins.prompts.section')}</span>
+            <span className="hint">{t('plugins.prompts.sectionHint')}</span>
+          </div>
+        )}
+        {actions.map((a) => (
+          <PromptEditor key={`${projectKey ?? GLOBAL}:${a.key}`} def={promptDef('pluginPropose')} projectKey={projectKey} promptKey={a.key} title={a.title} />
         ))}
       </div>
       <div className="mf">

@@ -56,6 +56,8 @@ import {
   validateExternalUrl,
   validateParams,
   validateRendererError,
+  validateAcceptPlugin,
+  validateRevokePlugin,
   validateRunnerConfirm,
   validateRunnerResize,
   validateRunnerView,
@@ -66,6 +68,7 @@ import { zoomKey } from './zoom'
 import { RendererErrorLog } from './errorLog'
 import { frameNavigationAllowed, mainFrameUrlAllowed } from './frameGuard'
 import { checkStart, confirmRunner, type GuardDeps } from './runnerGuard'
+import { PluginListCache, acceptPlugin, checkPlugin, revokePlugin, type PluginGuardDeps } from './pluginGuard'
 
 const log = (msg: string): void => console.log(`[devmaestro] ${msg}`)
 
@@ -127,6 +130,21 @@ const runnerGuard: GuardDeps = {
   isConfirmed: (worktree, fingerprint) => runnerConfirmed(settings.settings, worktree, fingerprint),
   remember: async (worktree, fingerprint) => {
     await settings.confirmRunner(worktree, fingerprint)
+  },
+}
+
+/** Accord des plugins (lot 22a) : liste relue au démon, accords des réglages du processus principal. */
+const pluginList = new PluginListCache(() => client.request('plugins.list', {}))
+const pluginGuard: PluginGuardDeps = {
+  request: (method, params) => client.request(method, params),
+  cache: pluginList,
+  acceptedFingerprint: (name) =>
+    Object.prototype.hasOwnProperty.call(settings.settings.plugins.accepted, name) ? settings.settings.plugins.accepted[name] : undefined,
+  remember: async (name, fingerprint) => {
+    await settings.acceptPlugin(name, fingerprint)
+  },
+  forget: async (name) => {
+    await settings.forgetPlugin(name)
   },
 }
 
@@ -352,6 +370,7 @@ client.on('pty', (id, data) => {
   runnerRelay.onPty(id, data)
 })
 client.on('notification', (n) => {
+  if (n.method === 'plugins.changed') pluginList.invalidate()
   if (n.method === 'session.resync') {
     relay.onNotification(n)
     return
@@ -395,12 +414,14 @@ client.on('notification', (n) => {
     n.method === 'project.worktrees_changed' ||
     n.method === 'conversation.changed' ||
     n.method === 'runners.changed' ||
-    n.method === 'forge.ci_changed'
+    n.method === 'forge.ci_changed' ||
+    n.method === 'plugins.changed'
   ) {
     toPage(Ipc.notification, { method: n.method, params: n.params })
   }
 })
 client.on('connected', () => {
+  pluginList.invalidate()
   forgeEnabledSent = null
   void settingsLoaded.then(() => syncForgeEnabled())
   relay.onConnected()
@@ -689,6 +710,19 @@ function registerIpc(): void {
         // Le démon refuse (-32024) si sa détection au lancement n'a plus cette empreinte.
         clean.expected_fingerprint = await checkStart(runnerGuard, clean.id as string, clean.runner_id as string)
       }
+      // Plugin : seulement s'il est accepté chez l'app et au démon, avec cette empreinte (lot 22a).
+      if (method === 'plugins.panel' || method === 'plugins.action') {
+        await settingsLoaded
+        clean.expected_fingerprint = await checkPlugin(pluginGuard, clean.name as string)
+        try {
+          const result = await client.request(method, clean, requestTimeoutMs(method as MethodName, clean))
+          return { ok: true, result } as CallResult<MethodName>
+        } catch (err) {
+          // Refus d'accord ou d'empreinte par le démon : la liste en cache n'est plus à jour.
+          if (err instanceof RpcError && err.code >= ErrorCode.PluginFingerprintMismatch && err.code <= ErrorCode.PluginUnknown) pluginList.invalidate()
+          throw err
+        }
+      }
       const result = await client.request(method, clean, requestTimeoutMs(method as MethodName, clean))
       if (method === 'sessions.resize') relay.noteSize(clean.id as string, clean.cols as number, clean.rows as number)
       return { ok: true, result } as CallResult<MethodName>
@@ -723,6 +757,28 @@ function registerIpc(): void {
       const r = validateRunnerConfirm(req)
       await settingsLoaded
       await confirmRunner(runnerGuard, r.session_id, r.runner_id, r.fingerprint)
+      return { ok: true }
+    } catch (err) {
+      return failure(err)
+    }
+  })
+  ipcMain.handle(Ipc.acceptPlugin, async (e, req: unknown) => {
+    if (!trusted(e)) return untrusted()
+    try {
+      const r = validateAcceptPlugin(req)
+      await settingsLoaded
+      await acceptPlugin(pluginGuard, r.name, r.fingerprint)
+      return { ok: true }
+    } catch (err) {
+      return failure(err)
+    }
+  })
+  ipcMain.handle(Ipc.revokePlugin, async (e, req: unknown) => {
+    if (!trusted(e)) return untrusted()
+    try {
+      const r = validateRevokePlugin(req)
+      await settingsLoaded
+      await revokePlugin(pluginGuard, r.name)
       return { ok: true }
     } catch (err) {
       return failure(err)

@@ -1111,3 +1111,65 @@ button.review-chip:hover, button.review-chip:focus-visible { border-color: var(-
 .btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed }
 .aireview .ar-status p { margin: 0 }
 .aireview .ar-notes { margin: 0; padding-left: 18px }
+
+/* ---------- Plugins (lot 22a) : réglages, onglet de session, documents déclaratifs ---------- */
+.iso { unicode-bidi: isolate }
+.pl-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px }
+.pl-card { border: 1px solid var(--line-2); border-radius: var(--r); padding: 10px 12px; display: grid; gap: 8px; min-width: 0; background: var(--panel) }
+.pl-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline }
+.pl-head h3 { margin: 0; font-size: 14px }
+.pl-desc { margin: 0; overflow-wrap: anywhere }
+.pl-cmd, .pl-fp-full { overflow-wrap: anywhere; white-space: pre-wrap; unicode-bidi: isolate }
+.pl-config { overflow-wrap: anywhere; white-space: pre-wrap; unicode-bidi: isolate; max-height: 30vh; overflow: auto }
+.pl-files, .pl-errors { margin: 0; padding-left: 18px }
+.pl-perms { margin: 0; padding-left: 18px; display: grid; gap: 4px }
+.pl-perms li.flag { color: var(--wait-ink); font-weight: 600 }
+.pl-perms li.flag span:not(.chip) { color: var(--fg) }
+.pl-fp { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center }
+.pl-actions { display: flex; flex-wrap: wrap; gap: 8px }
+.pl-warn { margin: 0; padding: 8px 10px; border: 1px solid var(--wait); border-radius: var(--r); color: var(--fg); background: color-mix(in srgb, var(--wait) 10%, var(--panel)) }
+.pl-warn.strong { border: 2px solid var(--err); color: var(--err-ink); font-weight: 600; background: color-mix(in srgb, var(--err) 10%, var(--panel)) }
+.pl-confirm h3 { margin: 0; font-size: 15px }
+.pplug { display: grid; grid-template-rows: auto 1fr; height: 100%; min-height: 0 }
+.pplug-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--line) }
+.pplug-third { flex: 1 1 auto; min-width: 0 }
+.pplug-body { overflow: auto; padding: 12px 16px; min-height: 0; display: grid; gap: 10px; align-content: start }
+.pplug-err { display: grid; gap: 6px }
+.pplug-err .inline-err { padding: 0 }
+.pd-stderr, .pd-pasted { max-height: 40vh; overflow: auto; margin: 0 }
+.pdoc { display: grid; gap: 14px; min-width: 0 }
+.pdoc :is(h3, h4, p, li, dt, dd, td, th, caption, .pd-text, .pd-detail) { unicode-bidi: isolate }
+.pd-title { margin: 0; font-size: 15px }
+.pd-btitle { margin: 0 0 6px; font-size: 13px; color: var(--muted) }
+.pd-block { min-width: 0 }
+.pd-notice { display: flex; gap: 8px; align-items: baseline; padding: 8px 10px; border: 1px solid var(--line-2); border-left-width: 4px; border-radius: var(--r); background: var(--panel-2); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere }
+.pd-notice.info { border-left-color: var(--accent) }
+.pd-notice.warning { border-left-color: var(--wait) }
+.pd-notice.warning .pd-level, .pd-notice.warning .pd-icon { color: var(--wait-ink) }
+.pd-notice.error { border-left-color: var(--err) }
+.pd-notice.error .pd-level, .pd-notice.error .pd-icon { color: var(--err-ink) }
+.pd-md.md { padding: 0; max-width: none }
+.pd-kv { display: grid; gap: 4px; margin: 0 }
+.pd-kv-row { display: grid; grid-template-columns: minmax(120px, max-content) 1fr; gap: 12px }
+.pd-kv dt { color: var(--muted) }
+.pd-kv dd { margin: 0; overflow-wrap: anywhere }
+.pd-list { margin: 0; padding-left: 20px; display: grid; gap: 4px }
+.pd-detail { display: block; color: var(--muted); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere }
+.pd-table-wrap { overflow: auto; max-width: 100% }
+.pd-table { border-collapse: collapse; font-size: 12.5px; min-width: 50% }
+.pd-table caption { text-align: start; color: var(--muted); padding-bottom: 4px }
+.pd-table th, .pd-table td { border-bottom: 1px solid var(--line); padding: 3px 8px; text-align: start; vertical-align: top; overflow-wrap: anywhere }
+.pd-table .end { text-align: end; font-variant-numeric: tabular-nums }
+.pd-sort { border: 0; background: transparent; color: var(--fg); font-weight: 600; padding: 2px 0; display: inline-flex; gap: 4px; align-items: center }
+.pd-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px }
+.pd-sort-mark { color: var(--muted); font-size: 10px }
+.pd-tree { list-style: none; margin: 0; padding-left: 0 }
+.pd-tree ul { list-style: none; margin: 0; padding-left: 16px }
+.pd-tree [role="treeitem"] { cursor: default }
+.pd-tree [role="treeitem"]:focus-visible > .pd-node { outline: 2px solid var(--accent); outline-offset: 1px }
+.pd-tree [role="treeitem"][aria-selected="true"] > .pd-node { background: var(--sel) }
+.pd-node { display: inline-flex; gap: 6px; align-items: baseline; padding: 1px 4px; border-radius: 4px }
+.pd-twisty { color: var(--muted); width: 1em; display: inline-block }
+.pd-actions { display: flex; flex-wrap: wrap; gap: 8px }
+.tplug { display: inline-flex; gap: 3px; align-items: center; font-family: var(--f-label); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); border: 1px dashed var(--line-2); border-radius: 4px; padding: 0 4px }
+.tplug-icon { font-size: 11px }

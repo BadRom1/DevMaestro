@@ -57,6 +57,7 @@ import { forgetComposerMemory } from './components/ConversationView'
 import { applyTheme, systemPrefersLight, terminalTheme, type ThemeMode } from './theme'
 import { resolvePrompt } from '../../shared/prompts'
 import { AiReviewProvider, reviewMarks } from './components/AiReview'
+import { activePlugins, reloadPlugins, setPluginsEnabled, usePlugins } from './pluginsStore'
 
 /** État gardé des onglets Diff, Fichiers, Commits et Conversation d'une session oubliée : libéré. */
 function forgetViewMemory(id: string): void {
@@ -199,6 +200,7 @@ export function App() {
       else if (n.method === 'session.subagents_changed') {
         if (typeof n.params?.id === 'string') dispatch({ type: 'subagents.changed', id: n.params.id, agents: n.params.agents })
       } else if (n.method === 'quotas.updated') dispatch({ type: 'quotas', report: n.params, notified: true })
+      else if (n.method === 'plugins.changed') void reloadPlugins()
     })
     return () => {
       alive = false
@@ -267,6 +269,18 @@ export function App() {
   }, [state.connection, loadPast, loadQuotas, setAgentsLoad])
 
   const sessions = useMemo(() => Object.values(state.sessions), [state.sessions])
+
+  /**
+   * Plugins (lot 22a) : demandés seulement si le démon annonce la capacité
+   * `plugins` ; relus à chaque connexion et à chaque `plugins.changed`.
+   */
+  const pluginsOn = state.connection.state === 'connected' && state.connection.capabilities?.plugins === true
+  useEffect(() => {
+    setPluginsEnabled(pluginsOn)
+    if (pluginsOn) void reloadPlugins()
+  }, [state.connection, pluginsOn])
+  const pluginsState = usePlugins()
+  const sessionPlugins = useMemo(() => activePlugins(pluginsState).filter((p) => p.tab), [pluginsState])
 
   /** Runners en cours par session (lot 14a) : indicateur et onglet « Lancer ». */
   const runners = useRunnersIndex(state.connection, sessions)
@@ -876,6 +890,7 @@ export function App() {
       onOpenPull={forgeOn ? openSessionPull : undefined}
       integrated={selectedIntegrated}
       accountSwitch={selectedSwitch}
+      plugins={sessionPlugins}
     />
   )
 
@@ -1009,6 +1024,7 @@ export function App() {
           projects={projectChoices}
           home={home}
           scheme={scheme}
+          plugins={pluginsOn}
           onClose={closeSettings}
         />
       )}
