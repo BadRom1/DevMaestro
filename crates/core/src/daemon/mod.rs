@@ -33,8 +33,8 @@ use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::adapters::{
-    FsFiles, FsProfileSource, FsTranscriptFollower, FsTranscriptSource, GitCli, GitDiff,
-    GitWorktrees, GithubCli, NativePty, SqliteStore, SystemClock, UsageApi,
+    FsCommandFiles, FsFiles, FsProfileSource, FsTranscriptFollower, FsTranscriptSource, GitCli,
+    GitDiff, GitWorktrees, GithubCli, NativePty, SqliteStore, SystemClock, UsageApi,
 };
 use crate::paths::{Paths, create_private_dir};
 use log::{error, info};
@@ -264,6 +264,7 @@ async fn run(paths: Paths, scrubbed: Vec<String>) -> Result<(), String> {
         worktrees: Box::new(GitWorktrees::default()),
         follower: Box::new(FsTranscriptFollower::default()),
         forge: Box::new(GithubCli::from_env()),
+        commands: Box::new(FsCommandFiles),
     };
     if !config.usage_api {
         info!("[quotas] usage_api = false : quotas lus dans les statuslines seulement");

@@ -1,6 +1,7 @@
 //! Adaptateurs : implémentations concrètes des ports.
 
 pub mod clock;
+pub mod fs_commands;
 pub mod fs_files;
 pub mod gh_cli;
 pub mod git_cli;
@@ -15,6 +16,7 @@ pub mod transcripts;
 pub mod usage_api;
 
 pub use clock::SystemClock;
+pub use fs_commands::FsCommandFiles;
 pub use fs_files::FsFiles;
 pub use gh_cli::GithubCli;
 pub use git_cli::GitCli;

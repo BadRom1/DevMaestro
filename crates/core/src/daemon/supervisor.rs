@@ -19,6 +19,7 @@ use time::OffsetDateTime;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
+mod commands;
 mod commits;
 mod conversation;
 pub mod forge;
@@ -247,6 +248,8 @@ pub struct Deps {
     pub follower: Box<dyn crate::ports::TranscriptFollower>,
     /// Forge des dépôts (lot 13a, ADR 0006).
     pub forge: Box<dyn crate::ports::Forge>,
+    /// Fichiers des slash commands, en lecture seule (v0.3, lot 17).
+    pub commands: Box<dyn crate::ports::CommandFiles>,
 }
 
 /// Événement diffusé aux connexions. Léger : une connexion lente regroupe

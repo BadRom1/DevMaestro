@@ -436,6 +436,51 @@ pub trait FileAccess: Send + Sync {
     ) -> Result<crate::domain::files::FileVersion, FileError>;
 }
 
+/// Disposition d'une racine de slash commands (v0.3, lot 17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandLayout {
+    /// `**/*.md` (sous-dossiers jusqu'à [`crate::domain::commands::MAX_DEPTH`]).
+    Commands,
+    /// `<dossier>/SKILL.md`, un niveau.
+    Skills,
+}
+
+/// Un fichier trouvé sous une racine de slash commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundCommandFile {
+    /// [`CommandLayout::Commands`] : chemin relatif à la racine (`a/b.md`,
+    /// `/` comme séparateur) ; [`CommandLayout::Skills`] : nom du dossier.
+    pub rel: String,
+    /// Tête du fichier ([`crate::domain::commands::MAX_HEAD_BYTES`] au plus).
+    pub head: Vec<u8>,
+}
+
+/// Résultat du parcours d'une racine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandScan {
+    /// Dans l'ordre du parcours (noms triés, profondeur d'abord).
+    pub files: Vec<FoundCommandFile>,
+    /// Parcours coupé : un fichier qui pouvait donner une commande (ou un
+    /// dossier qui pouvait en contenir) a été écarté faute de place.
+    pub truncated: bool,
+    /// Entrées candidates écartées parce que leur nom n'est pas de l'UTF-8.
+    pub ignored: usize,
+}
+
+/// Lecture seule des fichiers de slash commands et de la configuration des
+/// plugins (`~/.claude*`, `.claude/` du projet). Bornée, jamais d'écriture ;
+/// la racine est résolue, puis aucun lien n'est suivi hors d'elle.
+/// Bloquant. Une racine absente ou illisible donne un parcours vide.
+pub trait CommandFiles: Send + Sync {
+    fn scan(&self, root: &Path, layout: CommandLayout) -> CommandScan;
+    /// Fichier JSON ordinaire de
+    /// [`crate::domain::commands::MAX_JSON_BYTES`] au plus ; `None` s'il est
+    /// absent, trop gros ou illisible.
+    fn read_json(&self, path: &Path) -> Option<serde_json::Value>;
+    /// `path` résolu, si c'est un dossier sous `base` résolu (ou `base`).
+    fn dir_within(&self, path: &Path, base: &Path) -> Option<PathBuf>;
+}
+
 /// Une session telle qu'enregistrée en base.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRecord {

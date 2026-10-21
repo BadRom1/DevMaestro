@@ -328,7 +328,7 @@ impl Connection {
                 "protocol": PROTOCOL_VERSION,
                 "pid": std::process::id(),
                 // Fonctions du démon détectables par le client (lot 13a).
-                "capabilities": {"initial_prompt": true, "runners": true, "send_prompt_paste": true, "ci": true},
+                "capabilities": {"initial_prompt": true, "runners": true, "send_prompt_paste": true, "ci": true, "slash_commands": true},
             }),
             "profiles.list" => d.profiles()?,
             "projects.resolve" => {
@@ -519,6 +519,13 @@ impl Connection {
                 })
                 .await
                 .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
+            }
+            "commands.list" => {
+                // Lecture de fichiers : hors du runtime.
+                let (d2, params) = (d.clone(), params.clone());
+                tokio::task::spawn_blocking(move || d2.commands_list(&params))
+                    .await
+                    .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
             }
             "files.list" | "files.read" | "files.write" => {
                 // Système de fichiers et `git` : hors du runtime.

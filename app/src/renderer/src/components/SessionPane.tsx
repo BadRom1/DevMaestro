@@ -435,6 +435,7 @@ export function SessionPane({
   onSelectAgent,
   openAgents,
   runnersSupported,
+  slashCommands = null,
   runnersRunning,
   onRunnersRunning,
   onRunnersUnsupported,
@@ -447,6 +448,8 @@ export function SessionPane({
   integrated?: boolean
   /** Le démon connaît les runners (lot 14a) ; `false` : onglet « Lancer » masqué. */
   runnersSupported: boolean | null
+  /** Le démon connaît `commands.list` (lot 17, capacité `slash_commands`) ; sinon liste intégrée seule. */
+  slashCommands?: boolean | null
   /** Exécutions en cours de la session affichée (badge de l'onglet). */
   runnersRunning: number
   onRunnersRunning: (sessionId: string, running: RunnerProc[]) => void
@@ -679,7 +682,7 @@ export function SessionPane({
         if (!shown && convOpened !== session.id) return null
         return (
           <ViewBoundary key={session.id} label="Conversation">
-            <ConversationView key={session.id} session={session} onLink={onLink} hidden={!shown} />
+            <ConversationView key={session.id} session={session} onLink={onLink} hidden={!shown} slashCommands={slashCommands} />
           </ViewBoundary>
         )
       case 'diff':

@@ -11,7 +11,8 @@
  *   par markdown-it sans HTML, le reste en nœuds texte), liens ouverts par
  *   la confirmation de l'app.
  * - Indicateur d'activité tiré des hooks (`session.activity`), annoncé
- *   poliment ; champ de saisie (`sessions.sendPrompt`).
+ *   poliment ; champ de saisie (`sessions.sendPrompt`), avec la liste des
+ *   slash commands à `/` (lot 17, `SlashCommandPopup`).
  */
 import {
   memo,
@@ -74,7 +75,9 @@ import {
 import { diffRows } from '../state/diff'
 import { classifyLink, renderMarkdown } from '../state/markdown'
 import { emptyDraft } from '../state/review'
+import { completeCommand, isExactCommand, popupKey, rankCommands, slashQuery } from '../state/slashCommands'
 import { DiffTable } from './DiffReader'
+import { SlashCommandPopup, SlashStatus, optionId, useSlashCommands } from './SlashCommandPopup'
 
 /** Entrées demandées par page. */
 const PAGE = 200
@@ -776,10 +779,16 @@ function focusFree(own: HTMLElement | null): boolean {
 export function Composer({
   session,
   onSend,
+  slashCommands = null,
 }: {
   session: Session
   /** Envoie le prompt ; rejette avec un message en français. */
   onSend: (text: string) => Promise<void>
+  /**
+   * Le démon annonce `commands.list` (`hello.capabilities.slash_commands`) ;
+   * `false` ou inconnu : liste intégrée seulement.
+   */
+  slashCommands?: boolean | null
 }) {
   const id = session.id
   const [value, setValue] = useState(() => drafts.get(id) ?? '')
@@ -789,9 +798,17 @@ export function Composer({
   /** Texte d'un envoi refusé pendant que l'utilisateur écrivait déjà autre chose. */
   const [unsent, setUnsent] = useState<string | null>(null)
   const ref = useRef<HTMLTextAreaElement>(null)
+  const formRef = useRef<HTMLFormElement>(null)
   const hintId = useId()
+  const listId = useId()
   const valueRef = useRef(value)
   valueRef.current = value
+  /* Slash commands (lot 17) : curseur suivi, mot écarté par Échap, proposition choisie. */
+  const [caret, setCaret] = useState<number | null>(null)
+  const [focused, setFocused] = useState(false)
+  const [dismissed, setDismissed] = useState<string | null>(null)
+  const [active, setActive] = useState(0)
+  const pendingCaret = useRef<number | null>(null)
 
   const waiting = session.pending.length > 0 || session.status.state === 'waiting'
   const blocked = !session.alive
@@ -825,6 +842,40 @@ export function Composer({
     else drafts.delete(id)
   }
 
+  const query = blocked ? null : slashQuery(value, caret)
+  const token = query ? value.slice(0, query.end) : null
+  const wanted = focused && query !== null && token !== dismissed
+  const slash = useSlashCommands(id, slashCommands, wanted)
+  const suggestions = useMemo(() => (wanted && query ? rankCommands(slash.commands, query.query) : []), [wanted, query?.query, slash.commands])
+  const popupOpen = wanted && suggestions.length > 0
+  const activeIndex = Math.min(active, Math.max(0, suggestions.length - 1))
+  // Nouvelle requête : la première proposition est choisie ; un autre mot lève l'Échap.
+  useEffect(() => {
+    setActive(0)
+  }, [query?.query])
+  useEffect(() => {
+    if (dismissed !== null && token !== dismissed) setDismissed(null)
+  }, [token, dismissed])
+  useLayoutEffect(() => {
+    const at = pendingCaret.current
+    if (at === null || !ref.current) return
+    pendingCaret.current = null
+    ref.current.setSelectionRange(at, at)
+    // Après coup : un `select` de la touche pressée a pu relever l'ancienne position.
+    setCaret(at)
+  }, [value])
+
+  function complete(index: number) {
+    const c = suggestions[index]
+    if (!query || !c) return
+    const next = completeCommand(value, query, c)
+    set(next.value)
+    setIndex(null)
+    setError(null)
+    setCaret(next.caret)
+    pendingCaret.current = next.caret
+  }
+
   async function submit() {
     if (blocked || busy) return
     const text = value
@@ -854,6 +905,21 @@ export function Composer({
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (popupOpen && query && !(e.nativeEvent.isComposing || e.keyCode === 229)) {
+      const cur = suggestions[activeIndex]
+      const act = popupKey(e, suggestions.length, activeIndex, !!cur && isExactCommand(query, cur))
+      if (act && act.type !== 'send') {
+        e.preventDefault()
+        if (act.type === 'move') setActive(act.index)
+        else if (act.type === 'complete') complete(activeIndex)
+        else {
+          // Échap ferme la liste, et seulement elle.
+          e.stopPropagation()
+          setDismissed(token)
+        }
+        return
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       // Composition en cours (IME) : Entrée valide la composition, n'envoie rien.
       if (e.nativeEvent.isComposing || e.keyCode === 229) return
@@ -868,11 +934,16 @@ export function Composer({
       e.preventDefault()
       setIndex(step.index)
       set(step.value)
+      // Un prompt `/…` rappelé de l'historique n'ouvre pas la liste (↑ / ↓ continuent l'historique).
+      const q = slashQuery(step.value, null)
+      setDismissed(q ? step.value.slice(0, q.end) : null)
+      setCaret(null)
     }
   }
 
   return (
     <form
+      ref={formRef}
       className="cv-composer"
       onSubmit={(e) => {
         e.preventDefault()
@@ -880,10 +951,28 @@ export function Composer({
       }}
     >
       <div className="cv-input">
+        {popupOpen && (
+          <SlashCommandPopup
+            listId={listId}
+            items={suggestions}
+            active={activeIndex}
+            note={slash.note}
+            anchor={formRef.current}
+            onPick={(i) => {
+              complete(i)
+              ref.current?.focus()
+            }}
+          />
+        )}
+        <SlashStatus count={suggestions.length} open={popupOpen} />
         <textarea
           ref={ref}
           aria-label="Prompt pour Claude"
           aria-describedby={hintId}
+          aria-autocomplete="list"
+          aria-haspopup="listbox"
+          aria-controls={popupOpen ? listId : undefined}
+          aria-activedescendant={popupOpen ? optionId(listId, activeIndex) : undefined}
           aria-disabled={blocked ? true : undefined}
           readOnly={!!blocked}
           // Bloqué : la phrase entière est dans l'aide sous le champ ; ici, un rappel court.
@@ -893,9 +982,13 @@ export function Composer({
           onChange={(e) => {
             if (blocked) return
             set(e.target.value)
+            setCaret(e.target.selectionStart)
             setIndex(null)
             setError(null)
           }}
+          onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
           onKeyDown={onKeyDown}
         />
         <button type="submit" className="btn pri" disabled={!!blocked || busy || !value.trim()}>
@@ -928,7 +1021,8 @@ export function Composer({
       <p className="hint" id={hintId}>
         {blocked ? `${blocked} ` : ''}
         <kbd>Entrée</kbd> envoie, <kbd>Maj</kbd> + <kbd>Entrée</kbd> va à la ligne, <kbd>↑</kbd> / <kbd>↓</kbd> dans un champ vide : prompts
-        précédents. Si la TUI affiche un sondage ou une suggestion, réponds dans le terminal.
+        précédents, <kbd>/</kbd> en tête : slash commands (<kbd>Tab</kbd> complète, <kbd>Échap</kbd> ferme). Si la TUI affiche un
+        sondage ou une suggestion, réponds dans le terminal. Une commande qui ouvre une interface s’utilise aussi dans le terminal.
       </p>
     </form>
   )
@@ -971,9 +1065,12 @@ export function ConversationView({
   onLink,
   hidden = false,
   viewportHeight,
+  slashCommands = null,
 }: {
   session: Session
   onLink: (url: string) => void
+  /** Le démon connaît `commands.list` (capacité `slash_commands` du `hello`). */
+  slashCommands?: boolean | null
   /** Onglet masqué : la vue reste montée (état gardé) mais ne défile pas. */
   hidden?: boolean
   /** Hauteur de la fenêtre imposée (tests sans mise en page). */
@@ -1355,7 +1452,7 @@ export function ConversationView({
         )}
       </div>
       <ActivityBar session={session} />
-      <Composer session={session} onSend={send} />
+      <Composer session={session} onSend={send} slashCommands={slashCommands} />
     </div>
   )
 }

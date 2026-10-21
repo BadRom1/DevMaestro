@@ -535,6 +535,7 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       return out
     case 'sessions.diff':
     case 'sessions.subagents':
+    case 'commands.list':
       out.id = uuid(o, 'id')
       return out
     case 'sessions.subagent':

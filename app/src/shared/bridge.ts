@@ -15,7 +15,17 @@ import type { AppSettings, SettingsPatch, ZoomDirection } from './settings'
 export type ConnectionState =
   | { state: 'connecting'; attempt: number; detail?: string }
   | { state: 'starting-daemon'; bin: string }
-  | { state: 'connected'; server: string; version: string; pid: number }
+  | {
+      state: 'connected'
+      server: string
+      version: string
+      pid: number
+      /**
+       * Fonctions annoncées par le `hello` du démon (`capabilities`), booléens
+       * seulement ; absent d'un démon plus ancien.
+       */
+      capabilities?: Readonly<Record<string, boolean>>
+    }
   | { state: 'disconnected'; error: string; retryInMs: number }
   | { state: 'incompatible'; error: string }
   /** Le démon ferme la connexion sans répondre : contrôle du pair (app lancée depuis une session). */

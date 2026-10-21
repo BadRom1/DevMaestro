@@ -824,6 +824,7 @@ export function App() {
       onSelectAgent={selectAgent}
       openAgents={openAgents}
       runnersSupported={runners.supported}
+      slashCommands={state.connection.state === 'connected' ? state.connection.capabilities?.slash_commands === true : null}
       runnersRunning={selected ? (runners.counts[selected.id] ?? 0) : 0}
       onRunnersRunning={runners.noteRunning}
       onRunnersUnsupported={runners.markUnsupported}

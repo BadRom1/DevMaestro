@@ -50,6 +50,18 @@ export interface HelloResult {
   version: string
   protocol: number
   pid: number
+  /** Fonctions détectables (absent d'un démon ancien). */
+  capabilities?: unknown
+}
+
+/** Garde les seules capacités booléennes du `hello`, sous des noms sûrs. */
+export function helloCapabilities(raw: unknown): Record<string, boolean> | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const out: Record<string, boolean> = {}
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === 'boolean' && /^[a-z0-9_]{1,64}$/.test(k)) out[k] = v
+  }
+  return out
 }
 
 export interface DaemonClientEvents {
@@ -248,7 +260,14 @@ export class DaemonClient extends EventEmitter<DaemonClientEvents> {
           this.ready = true
           this.attempt = 0
           this.o.log(`connecté à ${hello.server} ${hello.version} (pid ${hello.pid})`)
-          this.setState({ state: 'connected', server: hello.server, version: hello.version, pid: hello.pid })
+          const capabilities = helloCapabilities(hello.capabilities)
+          this.setState({
+            state: 'connected',
+            server: hello.server,
+            version: hello.version,
+            pid: hello.pid,
+            ...(capabilities ? { capabilities } : {}),
+          })
           this.emit('connected', hello)
         })
         .catch((e: Error) => {

@@ -1079,6 +1079,41 @@ export interface RunnersList {
   running: RunnerProcess[]
 }
 
+/** Origine d'une slash command (lot 17). */
+export const COMMAND_SOURCES = ['builtin', 'project', 'user', 'plugin'] as const
+export type CommandSource = (typeof COMMAND_SOURCES)[number]
+
+/** Une slash command proposée (`commands.list`, ou liste intégrée de l'app). */
+export interface SlashCommand {
+  /** Nom sans le `/` (`compact`, `front:test`, `forge:forge-grill`). */
+  name: string
+  description?: string
+  argument_hint?: string
+  /** Autres noms reconnus (intégrées). */
+  aliases?: string[]
+  source: CommandSource
+  kind: 'command' | 'skill'
+  /** Ouvre une interface dans la TUI : à utiliser dans le terminal. */
+  interactive?: boolean
+  /** Plugin d'origine. */
+  plugin?: string
+  /**
+   * Reprend le nom (ou un alias) d'une intégrée, ou le nom d'une commande de
+   * plugin : gardée à côté de l'originale, jamais à sa place.
+   */
+  conflict?: 'builtin' | 'plugin'
+}
+
+export interface CommandsList {
+  commands: SlashCommand[]
+  /** Version de Claude Code de référence de la liste intégrée. */
+  claude_code_version: string
+  /** Un fichier qui pouvait donner une commande a été écarté (bornes). */
+  truncated: boolean
+  /** Fichiers ignorés pour leur nom (non ASCII, espaces, trop profond…). */
+  ignored?: number
+}
+
 /** Paramètres et résultats des méthodes appelables depuis la page. */
 export interface Methods {
   'profiles.list': { params: Record<string, never>; result: { profiles: Profile[] } }
@@ -1232,6 +1267,12 @@ export interface Methods {
    * depuis le bouton « Publier » du dialogue de confirmation (ADR 0006, point 5).
    */
   'forge.submitReview': { params: { root: string } & ForgeReviewPayload; result: { url: string | null } }
+  /**
+   * Slash commands proposées dans le champ de saisie (lot 17) : intégrées,
+   * utilisateur, projet, plugins activés. Démon sans la capacité
+   * `slash_commands` : `-32601`.
+   */
+  'commands.list': { params: { id: string }; result: CommandsList }
   /** Runners détectés dans le worktree de la session, et ceux qui tournent (lot 14a). */
   'runners.list': { params: { id: string }; result: RunnersList }
   /** Lance un runner détecté (jamais une commande libre). */
@@ -1300,6 +1341,7 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'conversation.subagent',
   'conversation.full',
   'sessions.sendPrompt',
+  'commands.list',
   'forge.status',
   'forge.issues',
   'forge.labels',
