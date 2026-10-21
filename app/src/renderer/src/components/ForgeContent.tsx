@@ -1,8 +1,9 @@
 /**
  * Contenu venu de la forge, commun aux issues et aux demandes de fusion.
  *
- * Étiquettes : couleur de la forge validée, texte noir ou blanc lisible,
- * nom toujours écrit (jamais la couleur seule).
+ * Étiquettes (lot 15) : pastilles neutres, distinctes des boutons ; couleur
+ * de la forge validée, en point seulement ; nom toujours écrit dans la
+ * couleur du texte du thème (jamais la couleur seule).
  *
  * Texte Markdown venu de la forge (corps d'issue, description d'une demande
  * de fusion, commentaire de revue) : contenu **non fiable**. Contrôles et
@@ -74,14 +75,10 @@ export function IssueLabels({ labels }: { labels: readonly IssueLabel[] | null |
       {labels.map((l, i) => {
         const c = labelColors(l.color)
         const name = oneLine(l.name)
+        // Pastille neutre (jamais l'aspect d'un bouton) : la couleur de la forge n'est qu'un point, le nom est écrit.
         return (
-          <span
-            key={`${name}-${i}`}
-            className={`ilabel${c ? ' colored' : ''}`}
-            style={c ? { background: c.background, color: c.color, borderColor: c.background } : undefined}
-            title={`Étiquette : ${name}`}
-          >
-            <span className="ldot" aria-hidden="true" />
+          <span key={`${name}-${i}`} className="ilabel" title={`Étiquette : ${name}`}>
+            <span className="ldot" aria-hidden="true" style={c ? { background: c.background } : undefined} />
             {name}
           </span>
         )

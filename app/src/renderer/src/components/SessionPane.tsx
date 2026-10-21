@@ -758,6 +758,10 @@ export function SessionPane({
                   onLink={onLink}
                   onRunning={onRunnersRunning}
                   onUnsupported={onRunnersUnsupported}
+                  onOpenFile={(path) => {
+                    setFilesFocus((f) => ({ sessionId: session.id, path, line: 1, n: (f?.n ?? 0) + 1 }))
+                    setTab('files')
+                  }}
                 />
               </ViewBoundary>
             ) : (

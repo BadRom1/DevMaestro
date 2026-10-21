@@ -435,9 +435,27 @@ struct Run {
     /// Posé quand un hook change le mode : le lecteur du PTY oublie le
     /// dernier pied vu et le signale de nouveau à la prochaine sortie.
     footer_reset: Arc<AtomicBool>,
+    /// Conversation reprise (`--resume`), pour expliquer un échec immédiat.
+    resume_of: Option<String>,
+    /// Posé par le lecteur du PTY quand il a tout lu (fin du processus).
+    reader_done: Arc<(Mutex<bool>, std::sync::Condvar)>,
 }
 
+/// Attente maximale de la fin du lecteur du PTY avant de lire l'écran d'une
+/// reprise ratée (sous le verrou du registre : courte).
+const READER_DONE_WAIT: Duration = Duration::from_millis(200);
+
 impl Run {
+    /// Attend, au plus `max`, que le lecteur du PTY ait tout lu ; vrai s'il a fini.
+    fn wait_reader(&self, max: Duration) -> bool {
+        let (done, cv) = &*self.reader_done;
+        let guard = done.lock().unwrap_or_else(|e| e.into_inner());
+        let (guard, _) = cv
+            .wait_timeout_while(guard, max, |d| !*d)
+            .unwrap_or_else(|e| e.into_inner());
+        *guard
+    }
+
     fn exit_status(&self) -> Option<ExitStatus> {
         self.exited
             .lock()
@@ -483,7 +501,20 @@ struct Entry {
     /// Empreinte de chaque sous-agent tel qu'écrit en base pour la dernière
     /// fois ([`crate::domain::Subagent::fingerprint`]).
     subagents_persisted: HashMap<String, u64>,
+    /// Échec expliqué du dernier processus (raison stable, message en
+    /// français), ajouté au statut `error` ; effacé au lancement suivant.
+    exit_error: Option<(&'static str, String)>,
 }
+
+/// Texte affiché par Claude Code quand `--resume` ne trouve pas la
+/// conversation dans le dossier de projet du `cwd` (2.1.306 : « No
+/// conversation found with session ID: <id> », puis code 1).
+const NO_CONVERSATION_FOUND: &str = "No conversation found";
+
+/// Raison (`status.reason` d'une session en erreur, effet `resume_failed`)
+/// d'une reprise que Claude Code n'a pas pu faire faute de trouver la
+/// conversation.
+pub const REASON_CONVERSATION_NOT_FOUND: &str = "conversation_not_found";
 
 /// Délai au bout duquel un `sessions.setMode` non confirmé n'empêche plus
 /// le suivant.
@@ -710,6 +741,7 @@ impl Entry {
             cwd_exists: true,
             pty_lock: Arc::new(tokio::sync::Mutex::new(())),
             subagents_persisted: HashMap::new(),
+            exit_error: None,
         }
     }
 
@@ -719,6 +751,19 @@ impl Entry {
             Some(r) => r.pid.map(|p| (p, r.proc.clone())),
             None => self.orphan.clone(),
         }
+    }
+
+    /// Statut de la session, avec la raison et le message d'un échec
+    /// expliqué ([`Entry::exit_error`]) quand elle est en erreur.
+    fn status_value(&self) -> Value {
+        let mut status = status_json(&self.session.state.status());
+        if let Some((reason, message)) = &self.exit_error
+            && status["state"] == "error"
+        {
+            status["reason"] = json!(reason);
+            status["message"] = json!(message);
+        }
+        status
     }
 
     /// Un relais attend-il la décision de cette demande ?
@@ -816,7 +861,7 @@ impl Entry {
             "branch": s.branch,
             "model": self.model,
             "mode": s.state.permission_mode.as_ref().map(|m| m.as_str()),
-            "status": status_json(&s.state.status()),
+            "status": self.status_value(),
             "activity": activity_json(&s.state.activity()),
             "pending": s.state.pending().iter()
                 .map(|r| pending_request_json(r, self.answerable(r.id)))
@@ -2910,9 +2955,13 @@ impl Daemon {
             ),
             _ => None,
         };
-        // Transcripts des profils en jeu, listés hors du verrou du registre.
-        // Dossiers des sessions en jeu, vérifiés aussi hors du verrou.
-        let (candidate_profiles, candidate_cwds): (Vec<String>, Vec<PathBuf>) = {
+        // Profils, dossiers et conversations en jeu, relevés sous le verrou du
+        // registre ; transcripts et dossiers vérifiés ensuite hors du verrou.
+        let (candidate_profiles, candidate_cwds, candidate_cids): (
+            Vec<String>,
+            Vec<PathBuf>,
+            Vec<String>,
+        ) = {
             let reg = self.lock();
             let cwds: Vec<PathBuf> = reg
                 .sessions
@@ -2923,6 +2972,15 @@ impl Daemon {
                 })
                 .map(|e| e.session.cwd.clone())
                 .collect();
+            let mut cids: Vec<String> = reg
+                .sessions
+                .values()
+                .filter(|e| by_id == Some(e.session.id))
+                .map(|e| e.session.claude_session_id.clone())
+                .chain(claude_id.clone())
+                .collect();
+            cids.sort();
+            cids.dedup();
             let mut names = vec![
                 profile_param
                     .clone()
@@ -2942,17 +3000,73 @@ impl Daemon {
             }
             names.sort();
             names.dedup();
-            (names, cwds)
+            (names, cwds, cids)
         };
-        let transcript_sets = self.transcript_sets(candidate_profiles);
+        let transcript_sets = self.transcript_sets(candidate_profiles.clone());
+        // Dossier de reprise : celui depuis lequel Claude Code retrouvera la
+        // conversation (encodage du dossier qui contient le transcript), lu
+        // dans le transcript quand le `cwd` connu ne convient pas.
+        let resolved: HashMap<String, Profile> = candidate_profiles
+            .iter()
+            .filter_map(|n| self.profile(n).ok().map(|p| (n.clone(), p)))
+            .collect();
+        let profile_of = |name: &str| resolved.get(name);
+        let found_from = |name: &str, cid: &str, cwd: &Path| {
+            profile_of(name).is_some_and(|p| self.deps.transcripts.found_from(p, cid, cwd))
+        };
+        let mut found: HashMap<(String, String, PathBuf), bool> = HashMap::new();
+        let mut inferred: HashMap<(String, String), PathBuf> = HashMap::new();
+        for name in &candidate_profiles {
+            for cid in &candidate_cids {
+                let mut cwds: Vec<PathBuf> = candidate_cwds.clone();
+                cwds.extend(cwd_param.clone());
+                if let Some(c) = past.as_ref().and_then(|p| p.cwd.clone()) {
+                    cwds.push(c);
+                }
+                let mut compatible = false;
+                for c in &cwds {
+                    let ok = found_from(name, cid, c);
+                    compatible |= ok && candidate_cwds.contains(c);
+                    found.insert((name.clone(), cid.clone(), c.clone()), ok);
+                }
+                // Dossier imposé par l'appelant : rien à déduire du transcript.
+                if compatible || candidate_cwds.is_empty() || cwd_param.is_some() {
+                    continue;
+                }
+                // Session connue du démon dont le dossier ne convient pas.
+                if let Some(c) = profile_of(name)
+                    .and_then(|p| self.deps.transcripts.past_session(p, cid))
+                    .filter(|p| p.resume_cwd_inferred)
+                    .and_then(|p| p.cwd)
+                {
+                    found.insert((name.clone(), cid.clone(), c.clone()), true);
+                    inferred.insert((name.clone(), cid.clone()), c);
+                }
+            }
+        }
         let cwd_known: HashMap<PathBuf, bool> = candidate_cwds
             .into_iter()
             .chain(cwd_param.clone())
+            .chain(inferred.values().cloned())
+            .chain(past.as_ref().and_then(|p| p.cwd.clone()))
             .map(|c| {
                 let ok = c.is_dir();
                 (c, ok)
             })
             .collect();
+        // Avertissement si Claude Code ne trouvera pas la conversation depuis
+        // le dossier retenu (calculé hors du verrou ci-dessus).
+        let warn_not_found = |profile: &str, cid: &str, cwd: &Path, warnings: &mut Vec<String>| {
+            let key = (profile.to_owned(), cid.to_owned(), cwd.to_path_buf());
+            if found.get(&key) == Some(&false) {
+                let w = format!(
+                    "Claude Code ne trouvera pas la conversation depuis ce dossier ({}) : elle a été enregistrée depuis un autre dossier",
+                    cwd.display()
+                );
+                warning!("reprise de {cid} : {w}");
+                warnings.push(w);
+            }
+        };
         let cwd_exists = |p: &Path| cwd_known.get(p).copied().unwrap_or_else(|| p.is_dir());
         // Dépôts des dossiers en jeu, lus par `git` (avec délai) avant de
         // prendre le verrou du registre.
@@ -3001,13 +3115,22 @@ impl Daemon {
             let profile =
                 self.profile(profile_param.as_deref().unwrap_or(&entry.session.profile))?;
             let mode_inherited = mode_param.is_none();
+            // Dossier connu, sauf si Claude Code n'y retrouverait pas la
+            // conversation et que le transcript en désigne un autre.
+            let default_cwd = inferred
+                .get(&(
+                    profile.name.clone(),
+                    entry.session.claude_session_id.clone(),
+                ))
+                .cloned()
+                .unwrap_or_else(|| entry.session.cwd.clone());
             let mut plan = Plan {
                 claude,
                 kind: LaunchKind::Resume {
                     claude_session_id: entry.session.claude_session_id.clone(),
                 },
                 profile,
-                cwd: cwd_param.unwrap_or_else(|| entry.session.cwd.clone()),
+                cwd: cwd_param.unwrap_or(default_cwd),
                 mode: mode_param.or_else(|| entry.session.state.permission_mode.clone()),
                 model: model_param.or_else(|| entry.model.clone()),
                 prompt,
@@ -3035,6 +3158,12 @@ impl Daemon {
                     "ce worktree est en cours de suppression",
                 ));
             }
+            warn_not_found(
+                &plan.profile.name,
+                &entry.session.claude_session_id,
+                &plan.cwd,
+                &mut warnings,
+            );
             let terminal = entry.terminal.clone();
             let (run, token) = self.spawn_run(id, &terminal, &plan, true)?;
             let now = self.now();
@@ -3062,7 +3191,13 @@ impl Daemon {
 
         // Ancienne session connue seulement par son transcript.
         let cid = claude_id.expect("vérifié plus haut");
+        // Par défaut, le dossier de reprise lu dans le transcript.
         let cwd = cwd_param
+            .or_else(|| {
+                past.as_ref()
+                    .and_then(|p| p.cwd.clone())
+                    .filter(|c| c.is_absolute())
+            })
             .ok_or_else(|| RpcError::params("« cwd » manquant pour une ancienne session"))?;
         let profile = self.profile(
             profile_param
@@ -3096,6 +3231,7 @@ impl Daemon {
                 "ce worktree est en cours de suppression",
             ));
         }
+        warn_not_found(&plan.profile.name, &cid, &plan.cwd, &mut warnings);
         let repo = repos.get(&cwd).cloned();
         let id = Uuid::new_v4();
         let mut session = Session::new(
@@ -3243,6 +3379,8 @@ impl Daemon {
         let reader_daemon = Arc::clone(self);
         let footer_reset = Arc::new(AtomicBool::new(false));
         let reset_seen = footer_reset.clone();
+        let reader_done = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let reader_done_slot = reader_done.clone();
         spawn_thread(&format!("pty-lecture-{run_id}"), move || {
             let mut buf = vec![0u8; 64 * 1024];
             let mut footer: Option<PermissionMode> = None;
@@ -3265,6 +3403,9 @@ impl Daemon {
                     Err(_) => break,
                 }
             }
+            let (done, cv) = &*reader_done_slot;
+            *done.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            cv.notify_all();
         });
 
         // Écrivain : les entrées des clients, dans l'ordre. File bornée : un
@@ -3310,6 +3451,11 @@ impl Daemon {
                 stop_requested: false,
                 proc,
                 exited,
+                reader_done,
+                resume_of: match &plan.kind {
+                    LaunchKind::Resume { claude_session_id } => Some(claude_session_id.clone()),
+                    _ => None,
+                },
             },
             token,
         ))
@@ -3919,6 +4065,31 @@ impl Daemon {
                 ExitStatus::Signal(s) => ProcessExit::Signal(s.clone()),
             }
         };
+        // Reprise refusée par Claude Code (conversation introuvable depuis ce
+        // dossier) : sortie en erreur avant tout `SessionStart`, message à l'écran.
+        let resume_failure = run
+            .resume_of
+            .clone()
+            .filter(|_| matches!(exit, ProcessExit::Code(c) if c != 0))
+            .filter(|_| entry.session.state.status() == SessionStatus::Starting)
+            .filter(|_| {
+                // Fin constatée tout de suite (reprise dans le délai de grâce) :
+                // laisser le lecteur finir de remplir l'écran. Il peut ne pas
+                // finir (PTY gardé ouvert par un descendant, lecteur qui attend
+                // le registre) : l'écran est lu tel quel au bout du délai.
+                run.wait_reader(READER_DONE_WAIT);
+                entry
+                    .terminal
+                    .snapshot()
+                    .text
+                    .contains(NO_CONVERSATION_FOUND)
+            })
+            .map(|cid| {
+                format!(
+                    "Claude Code n'a pas trouvé la conversation {cid} depuis le dossier {} (« No conversation found ») : il ne la cherche que parmi celles enregistrées depuis ce dossier",
+                    entry.session.cwd.display()
+                )
+            });
         let now = self.now();
         let running_before = entry.session.state.subagents().running_count();
         let effects = entry.session.state.process_exited(&exit, now);
@@ -3938,6 +4109,18 @@ impl Daemon {
         };
         info!("session {id} : processus terminé ({how})");
         self.emit_effects(id, &effects);
+        if let Some(message) = resume_failure {
+            warning!("session {id} : {message}");
+            let _ = self.events.send(Event::Effect {
+                id,
+                effect: Arc::new(json!({
+                    "type": "resume_failed",
+                    "reason": REASON_CONVERSATION_NOT_FOUND,
+                    "message": message,
+                })),
+            });
+            entry.exit_error = Some((REASON_CONVERSATION_NOT_FOUND, message));
+        }
         self.commit(entry);
         if subagents_changed {
             self.signal_subagents(id, SubagentChange::Structural);
@@ -4075,6 +4258,7 @@ fn install_run(reg: &mut Registry, entry: &mut Entry, run: Run, token: String, p
     entry.mode_change = None;
     entry.screen_mode = None;
     entry.last_exit = None;
+    entry.exit_error = None;
     entry.session.cwd = plan.cwd;
     entry.session.profile = plan.profile.name;
     let previous = std::mem::take(&mut entry.session.state);

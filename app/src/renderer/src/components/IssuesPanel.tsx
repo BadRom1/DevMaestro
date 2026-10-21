@@ -2,10 +2,14 @@
  * Panneau « Forge » d'un projet (v0.3, ADR 0006), à deux onglets :
  * « Issues » (lot 13a) et « Demandes de fusion » (lot 13b, `PullsPanel`).
  *
- * Issues : liste filtrable (état, recherche, assignées à moi, étiquette),
- * détail avec le corps en Markdown (rendu sûr), « Lancer une session »
- * (préremplit « Nouvelle session ») et, pour un epic, « Lancer une session
- * par sous-issue ».
+ * Issues : liste filtrable (barre alignée : état, étiquettes choisies dans
+ * la liste du dépôt, assignées à moi, recherche), détail avec le corps en
+ * Markdown (rendu sûr) et, fixée en bas du détail, la barre d'actions :
+ * « Lancer une session » (préremplit « Nouvelle session » avec un nom et une
+ * branche courts) et, pour un epic, « Lancer une session par sous-issue ».
+ *
+ * Panneau ancré à droite sur toute la largeur disponible, redimensionnable et
+ * agrandissable (lot 15) ; la liste et le détail défilent chacun de leur côté.
  *
  * Contenu venu de la forge = non fiable : Markdown sans HTML brut ni image,
  * liens ouverts seulement après la confirmation des liens externes, couleurs
@@ -15,7 +19,7 @@
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
-import { ISSUE_STATE_FILTERS, type ForgeStatus, type Issue, type IssueStateFilter, type Session } from '../../../shared/protocol'
+import { ISSUE_STATE_FILTERS, type ForgeStatus, type Issue, type IssueStateFilter, type RepoLabel, type Session } from '../../../shared/protocol'
 import { api, call, errorCode, errorText, CallError } from '../api'
 import { outcomeUncertain } from '../state/errors'
 import {
@@ -32,7 +36,11 @@ import {
   availabilityFromStatus,
   epicPlan,
   isEpic,
+  issueBranch,
   issuePrefill,
+  issueSessionName,
+  MAX_FILTER_LABELS,
+  repoLabelsFrom,
   issueStateLabel,
   issuesParams,
   oneLine,
@@ -48,6 +56,7 @@ import {
 import { relativeTime, shortAgo } from '../state/format'
 import { useSettings } from '../settings'
 import { ForgeMarkdown, IssueLabels } from './ForgeContent'
+import { LabelPicker } from './LabelPicker'
 import { Modal } from './Modal'
 import { PullsTab } from './PullsPanel'
 
@@ -57,6 +66,15 @@ export type ForgeTab = 'issues' | 'pulls'
 const NO_LAUNCHED: ReadonlyMap<number, 'done' | 'uncertain'> = new Map()
 
 const STATE_LABELS: Record<IssueStateFilter, string> = { open: 'Ouvertes', closed: 'Fermées', all: 'Toutes' }
+
+/** Clé de la taille retenue du panneau Forge. */
+export const FORGE_PANEL_SIZE_KEY = 'devmaestro.forge.panel'
+
+/** Étiquettes du dépôt : liste (sélecteur), ou saisie libre si le démon ne la donne pas (avant le lot 15). */
+type RepoLabelsState = { phase: 'loading' } | { phase: 'ready'; labels: RepoLabel[] } | { phase: 'fallback' }
+
+/** Recherche avec un qualificatif de GitHub (`repo:`, `is:pr`…) : l'avertissement s'affiche. */
+const QUALIFIER = /(^|\s)-?[a-z-]+:/i
 
 /** Délai avant de relancer la recherche pendant la saisie. */
 const SEARCH_DEBOUNCE_MS = 350
@@ -198,6 +216,8 @@ export function ForgePanel({
   const busy = epicBusy || pullBusy
   /** Sous-issues lancées depuis ce panneau, par epic (marquées et décochées au retour). */
   const [launchedSubs, setLaunchedSubs] = useState<Record<number, Map<number, 'done' | 'uncertain'>>>({})
+  const [repoLabels, setRepoLabels] = useState<RepoLabelsState>({ phase: 'loading' })
+  const [labelsSeq, setLabelsSeq] = useState(0)
   const onSupportedRef = useRef(onSupported)
   onSupportedRef.current = onSupported
   const uid = useId()
@@ -291,9 +311,28 @@ export function ForgePanel({
     }
   }, [available, root, selected, detailSeq])
 
+  // Étiquettes du dépôt, pour le sélecteur. Échec (démon d'avant le lot 15, `gh` qui refuse…) : saisie libre,
+  // sans passer par `handle` (une méthode inconnue y vaut « démon sans forge » et masquerait toute la forge).
+  useEffect(() => {
+    if (!available) return
+    let alive = true
+    void (async () => {
+      try {
+        const r = await call('forge.labels', { root, ...(labelsSeq > 0 ? { refresh: true } : {}) })
+        if (alive) setRepoLabels({ phase: 'ready', labels: repoLabelsFrom(r) })
+      } catch {
+        if (alive) setRepoLabels((l) => (l.phase === 'ready' ? l : { phase: 'fallback' }))
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [available, root, labelsSeq])
+
   function refresh() {
     refreshNext.current = true
     setListSeq((n) => n + 1)
+    setLabelsSeq((n) => n + 1)
     if (selected !== null) setDetailSeq((n) => n + 1)
   }
 
@@ -305,7 +344,7 @@ export function ForgePanel({
   )
 
   return (
-    <Modal title={`Forge du projet · ${name}`} onClose={onClose} width={tab === 'pulls' ? 1320 : 1040} busy={busy}>
+    <Modal title={`Forge du projet · ${name}`} onClose={onClose} busy={busy} panel={{ sizeKey: FORGE_PANEL_SIZE_KEY }}>
       <div className="mb issues-mb">
         {available && (
           <div className="ftabs" role="tablist" aria-label="Forge">
@@ -344,9 +383,9 @@ export function ForgePanel({
         )}
         {available && tab === 'issues' && !epicOpen && (
           <div className="issues">
-            <section className="ilist" aria-label="Liste des issues">
-              <div className="ifilters" role="group" aria-label="Filtres">
-                <label className="field">
+            <div className="ifilters-wrap">
+              <div className="ifilters" role="group" aria-label="Filtres des issues">
+                <label className="field ifield-state">
                   <span className="lbl">État</span>
                   <select value={filters.state} onChange={(e) => setFilters((f) => ({ ...f, state: e.target.value as IssueStateFilter }))}>
                     {ISSUE_STATE_FILTERS.map((s) => (
@@ -355,6 +394,30 @@ export function ForgePanel({
                       </option>
                     ))}
                   </select>
+                </label>
+                {repoLabels.phase === 'fallback' ? (
+                  <label className="field ifield-labels">
+                    <span className="lbl">Étiquette</span>
+                    <input
+                      value={filters.label}
+                      maxLength={128}
+                      placeholder="bug…"
+                      title="Le démon ne donne pas la liste des étiquettes du dépôt : saisie libre d’une étiquette."
+                      onChange={(e) => setFilters((f) => ({ ...f, label: e.target.value }))}
+                    />
+                  </label>
+                ) : (
+                  <LabelPicker
+                    labels={repoLabels.phase === 'ready' ? repoLabels.labels : []}
+                    loading={repoLabels.phase === 'loading'}
+                    selected={filters.labels}
+                    max={MAX_FILTER_LABELS}
+                    onChange={(labels) => setFilters((f) => ({ ...f, labels }))}
+                  />
+                )}
+                <label className="optrow imine">
+                  <input type="checkbox" checked={filters.mine} onChange={(e) => setFilters((f) => ({ ...f, mine: e.target.checked }))} />
+                  <span>Assignées à moi</span>
                 </label>
                 <label className="field grow">
                   <span className="lbl">Recherche</span>
@@ -365,27 +428,18 @@ export function ForgePanel({
                     placeholder="Titre, texte…"
                     onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
                   />
-                  <span className="hint">
-                    Recherche de GitHub : un qualificatif (repo:, is:pr…) peut ramener des éléments d’autres dépôts ; ils sont écartés.
-                  </span>
                 </label>
-                <label className="field">
-                  <span className="lbl">Étiquette</span>
-                  <input
-                    value={filters.label}
-                    maxLength={128}
-                    placeholder="bug…"
-                    onChange={(e) => setFilters((f) => ({ ...f, label: e.target.value }))}
-                  />
-                </label>
-                <label className="optrow imine">
-                  <input type="checkbox" checked={filters.mine} onChange={(e) => setFilters((f) => ({ ...f, mine: e.target.checked }))} />
-                  <span>Assignées à moi</span>
-                </label>
-                <button type="button" className="btn sm ghost" onClick={refresh} title="Redemander à la forge (sans le cache de 60 s)">
+                <button type="button" className="btn ghost ictl" onClick={refresh} title="Redemander à la forge (sans le cache)">
                   Actualiser
                 </button>
               </div>
+              {QUALIFIER.test(filters.search) && (
+                <p className="hint">
+                  Recherche de GitHub : un qualificatif (repo:, is:pr…) peut ramener des éléments d’autres dépôts ; ils sont écartés.
+                </p>
+              )}
+            </div>
+            <section className="ilist" aria-label="Liste des issues">
               {list.phase === 'loading' && <p className="hint">Chargement des issues…</p>}
               {list.phase === 'error' && (
                 <p className="inline-err" role="alert">
@@ -442,6 +496,7 @@ export function ForgePanel({
               {current && (
                 <IssueDetail
                   issue={current}
+                  names={{ name: issueSessionName(current.number, current.title), branch: issueBranch(current.number, current.title, prefix) }}
                   onLink={onLink}
                   onLaunch={() => onLaunchIssue(issuePrefill(current, prefix))}
                   onEpic={() => setEpicOpen(true)}
@@ -466,12 +521,15 @@ export function ForgePanel({
 
 function IssueDetail({
   issue,
+  names,
   onLink,
   onLaunch,
   onEpic,
   onOpen,
 }: {
   issue: Issue
+  /** Nom de session et branche proposés (modifiables dans « Nouvelle session »). */
+  names: { name: string; branch: string }
   onLink: (url: string) => void
   onLaunch: () => void
   onEpic: () => void
@@ -480,55 +538,61 @@ function IssueDetail({
   const subs = issue.sub_issues ?? []
   const openCount = openSubIssues(issue).length
   return (
-    <article className="iissue">
-      <h3 className="ih">
-        <span className="inum mono">#{issue.number}</span> {oneLine(issue.title)}
-      </h3>
-      <div className="imeta">
-        <IssueState state={issue.state} />
-        <Progress issue={issue} />
-        <IssueLabels labels={issue.labels} />
-        {issue.author && <span className="hint">par {oneLine(issue.author)}</span>}
-        {issue.assignees?.length > 0 && <span className="hint">assignée à {issue.assignees.map(oneLine).join(', ')}</span>}
-        {issue.updated_at && <span className="hint">mise à jour {relativeTime(issue.updated_at)}</span>}
-        {typeof issue.parent === 'number' && (
-          <button type="button" className="linkish" onClick={() => onOpen(issue.parent!)}>
-            epic #{issue.parent}
-          </button>
+    <article className="iissue iissue-fixed">
+      <div className="iissue-body">
+        <h3 className="ih">
+          <span className="inum mono">#{issue.number}</span> {oneLine(issue.title)}
+        </h3>
+        <div className="imeta">
+          <IssueState state={issue.state} />
+          <Progress issue={issue} />
+          <IssueLabels labels={issue.labels} />
+          {issue.author && <span className="hint">par {oneLine(issue.author)}</span>}
+          {issue.assignees?.length > 0 && <span className="hint">assignée à {issue.assignees.map(oneLine).join(', ')}</span>}
+          {issue.updated_at && <span className="hint">mise à jour {relativeTime(issue.updated_at)}</span>}
+          {typeof issue.parent === 'number' && (
+            <button type="button" className="linkish" onClick={() => onOpen(issue.parent!)}>
+              epic #{issue.parent}
+            </button>
+          )}
+        </div>
+        {subs.length > 0 && (
+          <div className="isubs">
+            <span className="lbl">Sous-issues</span>
+            <ul role="list">
+              {subs.map((s) => (
+                <li key={s.number}>
+                  <IssueState state={s.state} />{' '}
+                  <button type="button" className="linkish" onClick={() => onOpen(s.number)}>
+                    #{s.number}
+                  </button>{' '}
+                  {oneLine(s.title)}
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
+        <IssueBody issue={issue} onLink={onLink} />
       </div>
-      <div className="iacts">
-        <button type="button" className="btn sm pri" onClick={onLaunch}>
+      {/* Barre d'actions fixée en bas du détail : toujours visible, quel que soit le défilement. */}
+      <div className="iissue-bar" role="group" aria-label={`Actions de l’issue #${issue.number}`}>
+        <button type="button" className="btn pri" onClick={onLaunch}>
           Lancer une session
         </button>
         {isEpic(issue) && (
-          <button type="button" className="btn sm" onClick={onEpic} disabled={openCount === 0} title={openCount === 0 ? 'Aucune sous-issue ouverte' : undefined}>
+          <button type="button" className="btn" onClick={onEpic} disabled={openCount === 0} title={openCount === 0 ? 'Aucune sous-issue ouverte' : undefined}>
             Lancer une session par sous-issue ({openCount})…
           </button>
         )}
+        <span className="hint iissue-names">
+          session « {names.name} » · branche <span className="mono">{names.branch}</span> (modifiables avant de lancer)
+        </span>
         {issue.url && (
-          <button type="button" className="btn sm ghost" onClick={() => onLink(issue.url)} title={issue.url}>
+          <button type="button" className="btn sm ghost iissue-link" onClick={() => onLink(issue.url)} title={issue.url}>
             Voir sur la forge ↗
           </button>
         )}
       </div>
-      {subs.length > 0 && (
-        <div className="isubs">
-          <span className="lbl">Sous-issues</span>
-          <ul role="list">
-            {subs.map((s) => (
-              <li key={s.number}>
-                <IssueState state={s.state} />{' '}
-                <button type="button" className="linkish" onClick={() => onOpen(s.number)}>
-                  #{s.number}
-                </button>{' '}
-                {oneLine(s.title)}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      <IssueBody issue={issue} onLink={onLink} />
     </article>
   )
 }
@@ -661,7 +725,7 @@ function EpicLaunch({
           <span className="hint">Jamais de mode qui approuve seul depuis un epic : le contenu collé n’est pas fiable.</span>
         </label>
         <p className="hint">
-          Profil : <b>{ctx.profileLabel}</b> · worktrees : <b>{ctx.locationLabel}</b> · nom = titre de la sous-issue ; la consigne est
+          Profil : <b>{ctx.profileLabel}</b> · worktrees : <b>{ctx.locationLabel}</b> · nom court « #n titre » et branche courte (mots vides retirés) ; la consigne est
           tapée, puis la description de la sous-issue est collée. Les sessions partent l’une après l’autre.
         </p>
       </div>

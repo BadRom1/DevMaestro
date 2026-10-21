@@ -4,9 +4,8 @@
  * liens) est **non fiable** : nettoyé avant d'être collé dans un prompt,
  * validé avant d'être utilisé comme couleur ou comme lien.
  */
-import { ErrorCode, type ForgeStatus, type Issue, type IssueRef, type IssueStateFilter, type Session, type SubIssue } from '../../../shared/protocol'
-import { branchFromName, branchNameProblem } from '../../../shared/worktrees'
-import { clampTitle } from './title'
+import { ErrorCode, type ForgeStatus, type Issue, type IssueRef, type IssueStateFilter, type RepoLabel, type Session, type SubIssue } from '../../../shared/protocol'
+import { branchNameProblem } from '../../../shared/worktrees'
 
 /* ---------- Texte venu de la forge ---------- */
 
@@ -92,14 +91,157 @@ export function issuePasted(issue: Pick<Issue, 'body' | 'truncated' | 'url'>): {
   return { text: body, invisible: c.invisible }
 }
 
-/** Nom de la session : le titre de l'issue (80 caractères au plus), sinon « Issue #n ». */
-export function issueSessionName(number: number, title: string): string {
-  return clampTitle(oneLine(title)) || `Issue #${number}`
+/* ---------- Noms courts (lot 15) ---------- */
+
+/** Longueur maximale du nom de session proposé (« #42 Export CSV vide »), en points de code. */
+export const MAX_SHORT_NAME = 40
+/** Longueur maximale de la branche proposée, préfixe compris (sauf préfixe plus long à lui seul). */
+export const MAX_SHORT_BRANCH = 40
+/** Mots significatifs gardés dans la branche proposée. */
+export const BRANCH_WORDS = 3
+
+/**
+ * Mots vides français et anglais retirés de la branche proposée (comparés
+ * sans accents ni majuscules ; « l’export » donne « l » et « export »).
+ */
+export const STOP_WORDS: ReadonlySet<string> = new Set([
+  // Français.
+  'a', 'au', 'aux', 'avec', 'c', 'ca', 'ce', 'ceci', 'cela', 'ces', 'cet', 'cette', 'd', 'dans', 'de', 'des', 'du', 'en', 'est', 'et', 'il', 'j',
+  'l', 'la', 'le', 'les', 'leur', 'leurs', 'lui', 'm', 'mais', 'me', 'mes', 'n', 'ne', 'ni', 'nos', 'notre', 'ou', 'par', 'pas',
+  'plus', 'pour', 'qu', 'que', 'qui', 's', 'sa', 'se', 'ses', 'si', 'son', 'sont', 'sur', 't', 'ta', 'te', 'tes', 'ton',
+  'un', 'une', 'vos', 'votre', 'y',
+  // Anglais.
+  'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'in', 'into', 'is', 'it', 'its', 'of', 'on', 'or', 'so',
+  'that', 'the', 'this', 'to', 'was', 'when', 'with',
+])
+
+/** Ponctuation et blancs retirés en fin de nom court (hors parenthèses, crochets et guillemets, traités à part). */
+const TRAILING_PUNCT = /[\s.,;:!?…\-–—/]+$/u
+/** Fermants gardés s'ils ferment quelque chose, avec leur ouvrant. */
+const CLOSERS: Record<string, string> = { ')': '(', ']': '[', '}': '{', '»': '«', '’': '‘', '”': '“' }
+const OPENERS = new Set(Object.values(CLOSERS))
+
+function count(s: string, c: string): number {
+  let n = 0
+  for (const x of s) if (x === c) n++
+  return n
 }
 
-/** Branche proposée : `<préfixe><n>-<titre en slug>`. */
+/**
+ * Fin d'un nom court nettoyée : ponctuation, ouvrants orphelins et fermants
+ * qui ne ferment rien retirés ; un fermant qui ferme quelque chose est gardé
+ * (« Corriger le login (SSO) » reste intact). Guillemets droits : gardés
+ * s'ils sont appariés (nombre pair).
+ */
+export function trimEnd(text: string): string {
+  let t = text
+  for (;;) {
+    t = t.replace(TRAILING_PUNCT, '')
+    const last = t.at(-1)
+    if (last === undefined) return t
+    if (OPENERS.has(last)) {
+      t = t.slice(0, -1)
+      continue
+    }
+    const open = CLOSERS[last]
+    if (open !== undefined) {
+      if (count(t, open) >= count(t, last)) return t
+      t = t.slice(0, -1)
+      continue
+    }
+    if (last === '"' || last === "'") {
+      if (count(t, last) % 2 === 0) return t
+      t = t.slice(0, -1)
+      continue
+    }
+    return t
+  }
+}
+
+/** Graphèmes (emoji composés, lettres accentuées décomposées gardés entiers) ; repli : points de code. */
+function graphemes(s: string): string[] {
+  const Seg = (Intl as { Segmenter?: typeof Intl.Segmenter }).Segmenter
+  if (!Seg) return [...s]
+  return [...new Seg('fr', { granularity: 'grapheme' }).segment(s)].map((x) => x.segment)
+}
+
+/** Début de `text` en graphèmes entiers, `max` points de code au plus. */
+function headByCodePoints(text: string, max: number): string {
+  let out = ''
+  let n = 0
+  for (const g of graphemes(text)) {
+    const len = [...g].length
+    if (n + len > max) break
+    out += g
+    n += len
+  }
+  return out
+}
+
+/**
+ * Coupe un texte d'une ligne au dernier mot entier qui tient dans `max`
+ * points de code (un premier mot trop long est coupé net, jamais au milieu
+ * d'un graphème : séquence emoji, lettre et accent), sans ponctuation finale ;
+ * coupé, il ne finit pas non plus par un mot vide.
+ */
+export function cutAtWord(text: string, max: number): string {
+  const t = oneLine(text)
+  if (max <= 0) return ''
+  if ([...t].length <= max) return trimEnd(t)
+  // Un caractère de plus : savoir si la coupe tombe juste avant une espace.
+  const head = headByCodePoints(t, max + 1)
+  const space = head.lastIndexOf(' ')
+  if (space <= 0) return trimEnd(headByCodePoints(t, max))
+  // Coupé au mot : sans mot vide ni ponctuation en fin (« Corriger l’export de » → « Corriger l’export »).
+  const words = head.slice(0, space).split(' ')
+  while (words.length > 1 && STOP_WORDS.has(slugWords(words.at(-1)!).at(-1) ?? '')) words.pop()
+  return trimEnd(words.join(' '))
+}
+
+/** Nom de la session : « #<n> <titre court> » (40 caractères au plus, coupé au mot), sinon « Issue #n ». */
+export function issueSessionName(number: number, title: string): string {
+  const head = `#${number}`
+  const short = cutAtWord(title, MAX_SHORT_NAME - [...head].length - 1)
+  return short ? `${head} ${short}` : `Issue #${number}`
+}
+
+/** Mots d'un titre pour une branche : sans accents, minuscules, `[a-z0-9]` seulement. */
+function slugWords(title: string): string[] {
+  return oneLine(title)
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+}
+
+/**
+ * Branche proposée : `<préfixe><n>-<3 mots significatifs au plus>` (mots
+ * vides, lettres isolées et doublons retirés), 40 caractères au plus ; mots retirés par la
+ * fin s'il le faut. Titre sans mot significatif : ses trois premiers mots.
+ */
 export function issueBranch(number: number, title: string, prefix: string): string {
-  return branchFromName(`${number} ${oneLine(title)}`, prefix) || `${prefix}${number}`
+  const base = `${prefix}${number}`
+  const all = slugWords(title)
+  // Mots vides et lettres isolées retirés (« l’export » → « export » ; un chiffre seul reste).
+  let words = [...new Set(all.filter((w) => !STOP_WORDS.has(w) && !/^[a-z]$/.test(w)))]
+  if (words.length === 0) words = [...new Set(all)]
+  words = words.slice(0, BRANCH_WORDS)
+  const room = Math.max(0, MAX_SHORT_BRANCH - base.length)
+  const kept: string[] = []
+  let used = 0
+  for (const w of words) {
+    const need = w.length + 1
+    if (used + need <= room) {
+      kept.push(w)
+      used += need
+    } else {
+      // Premier mot trop long : coupé net (au moins 3 lettres), sinon on s'arrête.
+      if (kept.length === 0 && room - 1 >= 3) kept.push(w.slice(0, room - 1))
+      break
+    }
+  }
+  return kept.length ? `${base}-${kept.join('-')}` : base
 }
 
 /** Longueur maximale d'un titre d'issue transmis au démon (`sessions.launch`). */
@@ -298,26 +440,60 @@ export interface IssueFilters {
   search: string
   /** « Assignées à moi ». */
   mine: boolean
+  /** Étiquettes choisies dans la liste du dépôt (toutes requises). */
+  labels: readonly string[]
+  /** Saisie libre d'une étiquette, quand le démon ne donne pas la liste du dépôt. */
   label: string
 }
 
-export const DEFAULT_FILTERS: IssueFilters = { state: 'open', search: '', mine: false, label: '' }
+export const DEFAULT_FILTERS: IssueFilters = { state: 'open', search: '', mine: false, labels: [], label: '' }
 export const ISSUES_LIMIT = 50
+/** Étiquettes d'un filtre (le processus principal en accepte 20). */
+export const MAX_FILTER_LABELS = 20
+
+/**
+ * Étiquettes du dépôt (`forge.labels`) lues avec tolérance : noms nettoyés,
+ * non vides, sans doublon, 128 caractères au plus ; couleur gardée telle
+ * quelle (validée à l'affichage) ; triées par nom.
+ */
+export function repoLabelsFrom(result: unknown): RepoLabel[] {
+  const list = typeof result === 'object' && result !== null ? (result as { labels?: unknown }).labels : null
+  if (!Array.isArray(list)) return []
+  const seen = new Set<string>()
+  const out: RepoLabel[] = []
+  for (const x of list) {
+    if (typeof x !== 'object' || x === null) continue
+    const { name, color, description } = x as Record<string, unknown>
+    if (typeof name !== 'string') continue
+    const n = oneLine(name)
+    if (!n || [...n].length > 128 || seen.has(n)) continue
+    seen.add(n)
+    out.push({
+      name: n,
+      color: typeof color === 'string' ? color : null,
+      description: typeof description === 'string' ? oneLine(description).slice(0, 300) || null : null,
+    })
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name, 'fr', { sensitivity: 'base' }))
+}
 
 /** Paramètres de `forge.issues` (champs vides omis). */
 export function issuesParams(
   root: string,
   f: IssueFilters,
   refresh = false,
-): { root: string; state: IssueStateFilter; search?: string; assignee?: '@me'; label?: string; limit: number; refresh?: boolean } {
+): { root: string; state: IssueStateFilter; search?: string; assignee?: '@me'; label?: string; labels?: string[]; limit: number; refresh?: boolean } {
   const search = [...f.search.trim()].slice(0, 256).join('')
-  const label = [...f.label.trim()].slice(0, 128).join('')
+  const clip = (l: string) => [...l.trim()].slice(0, 128).join('')
+  // Étiquettes choisies, sinon la saisie libre ; une seule part en `label` (compris par tous les démons).
+  const picked = [...new Set(f.labels.map(clip).filter(Boolean))].slice(0, MAX_FILTER_LABELS)
+  const all = picked.length ? picked : [clip(f.label)].filter(Boolean)
   return {
     root,
     state: f.state,
     ...(search ? { search } : {}),
     ...(f.mine ? { assignee: '@me' as const } : {}),
-    ...(label ? { label } : {}),
+    ...(all.length === 1 ? { label: all[0]! } : all.length > 1 ? { labels: all } : {}),
     limit: ISSUES_LIMIT,
     ...(refresh ? { refresh: true } : {}),
   }

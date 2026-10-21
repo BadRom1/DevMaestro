@@ -12,7 +12,7 @@
 //! viennent du début, dernière date, branche et titre de la fin. Le nombre de
 //! messages n'est alors pas connu.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -49,9 +49,18 @@ pub struct PastSession {
     pub session_id: String,
     /// Fichier du transcript.
     pub transcript_path: PathBuf,
-    /// `cwd` de la première ligne qui en porte un. Le nom du dossier parent
-    /// (cwd encodé, parfois tronqué) n'est jamais décodé.
+    /// Dossier de reprise : posé par l'adaptateur, le premier des [`Self::cwds`]
+    /// dont l'encodage de Claude Code ([`project_dir_name`]) est le nom du
+    /// dossier qui contient le transcript (voir [`choose_resume_cwd`]) ; à
+    /// défaut, `cwd` de la première ligne qui en porte un. Le nom du dossier
+    /// n'est jamais décodé (l'encodage perd de l'information).
     pub cwd: Option<PathBuf>,
+    /// `cwd` distincts lus, dans l'ordre de leur première apparition (au plus
+    /// [`MAX_DISTINCT_CWDS`]).
+    pub cwds: Vec<PathBuf>,
+    /// `cwd` est le dossier de reprise retrouvé par l'encodage (`false` :
+    /// règle de repli, premier `cwd` lu).
+    pub resume_cwd_inferred: bool,
     /// Branche git de la dernière ligne lue qui en porte une.
     pub git_branch: Option<String>,
     /// Premier prompt tapé par l'utilisateur, tronqué à [`PROMPT_PREVIEW_CHARS`].
@@ -114,8 +123,11 @@ impl Accumulator {
         if self.inner_session_id.is_none() {
             self.inner_session_id = v["sessionId"].as_str().map(str::to_owned);
         }
-        if s.cwd.is_none() {
-            s.cwd = v["cwd"].as_str().map(PathBuf::from);
+        if let Some(c) = v["cwd"].as_str() {
+            if s.cwd.is_none() {
+                s.cwd = Some(PathBuf::from(c));
+            }
+            note_cwd(&mut s.cwds, c);
         }
         if let Some(b) = v["gitBranch"].as_str().filter(|b| !b.is_empty()) {
             s.git_branch = Some(b.to_owned());
@@ -164,6 +176,84 @@ impl Accumulator {
             ..self.s
         }
     }
+}
+
+/// Nombre maximal de `cwd` distincts gardés pour un transcript.
+pub const MAX_DISTINCT_CWDS: usize = 64;
+
+/// Ajoute `cwd` à la liste des dossiers distincts s'il n'y est pas encore.
+pub fn note_cwd(cwds: &mut Vec<PathBuf>, cwd: &str) {
+    if cwds.len() < MAX_DISTINCT_CWDS && !cwds.iter().any(|c| c.as_os_str() == cwd) {
+        cwds.push(PathBuf::from(cwd));
+    }
+}
+
+/// Longueur au-delà de laquelle Claude Code coupe le nom encodé et lui
+/// ajoute une empreinte.
+pub const PROJECT_DIR_MAX_LEN: usize = 200;
+
+/// Nom du dossier de projet de Claude Code pour un dossier de travail
+/// (`<config>/projects/<nom>/`), règle de Claude Code 2.1.306 : chaque unité
+/// UTF-16 du chemin qui n'est pas une lettre ou un chiffre ASCII devient `-`
+/// (`/`, `.`, `_`, espace, `é`… ; un caractère hors du plan de base, comme
+/// un émoji, en donne deux) ; au-delà de 200 unités, les 200 premières
+/// suivies de `-` et de la valeur absolue, en base 36, de l'empreinte
+/// `h = h * 31 + unité` (entier signé de 32 bits) du chemin d'origine.
+pub fn project_dir_name(cwd: &Path) -> String {
+    let path = cwd.to_string_lossy();
+    let units: Vec<u16> = path.encode_utf16().collect();
+    let encoded: String = units
+        .iter()
+        .map(|&u| match u8::try_from(u) {
+            Ok(b) if b.is_ascii_alphanumeric() => char::from(b),
+            _ => '-',
+        })
+        .collect();
+    if encoded.len() <= PROJECT_DIR_MAX_LEN {
+        return encoded;
+    }
+    let hash = units.iter().fold(0i32, |h, &u| {
+        h.wrapping_shl(5).wrapping_sub(h).wrapping_add(i32::from(u))
+    });
+    format!(
+        "{}-{}",
+        &encoded[..PROJECT_DIR_MAX_LEN],
+        base36(i64::from(hash).unsigned_abs())
+    )
+}
+
+fn base36(mut n: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    loop {
+        out.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+        if n == 0 {
+            break;
+        }
+    }
+    out.reverse();
+    String::from_utf8(out).expect("chiffres ASCII")
+}
+
+/// Claude Code retrouve-t-il, depuis `cwd`, une conversation rangée dans le
+/// dossier de projet `dir_name` ? (`cwd` absolu dont l'encodage est ce nom.)
+pub fn cwd_matches_project_dir(cwd: &Path, dir_name: &str) -> bool {
+    cwd.is_absolute() && project_dir_name(cwd) == dir_name
+}
+
+/// Dossier de reprise d'un transcript rangé dans `dir_name` : le premier des
+/// `cwds` (ordre du fichier) qui est absolu, dont l'encodage est `dir_name`
+/// et qui existe (`exists`). `None` si aucun ne convient (encodage ambigu
+/// sans candidat, dossier disparu).
+pub fn choose_resume_cwd<'a>(
+    dir_name: &str,
+    cwds: &'a [PathBuf],
+    exists: impl Fn(&Path) -> bool,
+) -> Option<&'a Path> {
+    cwds.iter()
+        .map(PathBuf::as_path)
+        .find(|c| cwd_matches_project_dir(c, dir_name) && exists(c))
 }
 
 /// Texte tapé par l'utilisateur, ou `None` pour un résultat d'outil ou un
@@ -341,6 +431,104 @@ mod tests {
         assert!(s.display_name().starts_with("Lis "));
         s.title = Some("Lecture de l'architecture".into());
         assert_eq!(s.display_name(), "Lecture de l'architecture");
+    }
+
+    #[test]
+    fn project_dir_name_follows_claude_code() {
+        // Valeurs calculées avec la fonction de Claude Code 2.1.306 (Node).
+        let cases = [
+            (
+                "/home/u/workplace/next-level.run",
+                "-home-u-workplace-next-level-run",
+            ),
+            (
+                "/home/u/Mes documents/été 2026/my_app",
+                "-home-u-Mes-documents--t--2026-my-app",
+            ),
+            (
+                "/home/u/a-b--c/.claude/worktrees/x",
+                "-home-u-a-b--c--claude-worktrees-x",
+            ),
+            // Émoji : deux unités UTF-16, deux tirets.
+            ("/tmp/🚀/x", "-tmp----x"),
+        ];
+        for (cwd, name) in cases {
+            assert_eq!(project_dir_name(Path::new(cwd)), name, "{cwd}");
+        }
+        // Au-delà de 200 unités : coupé, suivi de l'empreinte en base 36.
+        let long = format!("/{}fin", "répertoire/".repeat(25));
+        let name = project_dir_name(Path::new(&long));
+        assert_eq!(name.len(), 200 + 1 + "k8vxye".len());
+        assert!(name.starts_with("-r-pertoire-r-pertoire-"), "{name}");
+        assert!(name.ends_with("-r-k8vxye"), "{name}");
+        assert_eq!(base36(0), "0");
+        assert_eq!(base36(2_147_483_648), "zik0zk");
+    }
+
+    #[test]
+    fn resume_cwd_is_the_first_cwd_matching_the_project_dir() {
+        // Cas réel (anonymisé) : conversation rangée sous le dossier de
+        // départ, dont les lignes portent surtout le dossier personnel.
+        let cwds: Vec<PathBuf> = [
+            "/home/u",
+            "/home/u/workplace",
+            "/home/u/workplace/next-level.run",
+            "/home/u/workplace/next-level.run/optimus-mcp",
+        ]
+        .map(PathBuf::from)
+        .to_vec();
+        let all = |_: &Path| true;
+        assert_eq!(
+            choose_resume_cwd("-home-u-workplace-next-level-run", &cwds, all),
+            Some(Path::new("/home/u/workplace/next-level.run"))
+        );
+        assert_eq!(
+            choose_resume_cwd("-home-u-workplace-next-level-run-optimus-mcp", &cwds, all),
+            Some(Path::new("/home/u/workplace/next-level.run/optimus-mcp"))
+        );
+        // Encodage ambigu : le premier qui correspond et existe.
+        let twins: Vec<PathBuf> = ["relatif/a.b", "/p/a-b", "/p/a.b", "/p/a_b"]
+            .map(PathBuf::from)
+            .to_vec();
+        assert_eq!(
+            choose_resume_cwd("-p-a-b", &twins, all),
+            Some(Path::new("/p/a-b"))
+        );
+        assert_eq!(
+            choose_resume_cwd("-p-a-b", &twins, |p| p != Path::new("/p/a-b")),
+            Some(Path::new("/p/a.b"))
+        );
+        // Dossier disparu, ou aucun candidat : rien.
+        assert_eq!(choose_resume_cwd("-p-a-b", &twins, |_| false), None);
+        assert_eq!(choose_resume_cwd("-ailleurs", &cwds, all), None);
+        // Espaces et accents.
+        let accents = vec![PathBuf::from("/home/u/Mes documents/été")];
+        assert_eq!(
+            choose_resume_cwd("-home-u-Mes-documents--t-", &accents, all),
+            Some(accents[0].as_path())
+        );
+    }
+
+    #[test]
+    fn distinct_cwds_are_kept_in_file_order() {
+        let lines = [
+            r#"{"type":"user","cwd":"/home/u"}"#,
+            r#"{"type":"user","cwd":"/home/u/p"}"#,
+            r#"{"type":"user","cwd":"/home/u"}"#,
+            r#"{"type":"user","cwd":"/home/u/p/sous"}"#,
+        ];
+        let s = PastSession::from_lines("/t/x.jsonl".into(), "x", lines);
+        assert_eq!(s.cwd.as_deref(), Some(Path::new("/home/u")));
+        assert_eq!(
+            s.cwds,
+            ["/home/u", "/home/u/p", "/home/u/p/sous"].map(PathBuf::from)
+        );
+        assert!(!s.resume_cwd_inferred);
+        let mut many = Vec::new();
+        for i in 0..(MAX_DISTINCT_CWDS + 5) {
+            note_cwd(&mut many, &format!("/d{i}"));
+        }
+        assert_eq!(many.len(), MAX_DISTINCT_CWDS);
     }
 
     #[test]

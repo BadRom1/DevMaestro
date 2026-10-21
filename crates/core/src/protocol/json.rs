@@ -175,8 +175,10 @@ pub fn past_session_json(s: &PastSession) -> Value {
     json!({
         "claude_session_id": s.session_id,
         "transcript_path": s.transcript_path,
-        // Absolu ou `null` (le nom du dossier du transcript n'est jamais décodé).
+        // Dossier de reprise, absolu ou `null` (le nom du dossier du
+        // transcript n'est jamais décodé, seulement comparé à l'encodage).
         "cwd": s.cwd.as_ref().filter(|c| c.is_absolute()),
+        "resume_cwd_inferred": s.resume_cwd_inferred,
         "git_branch": s.git_branch,
         "first_prompt": s.first_prompt,
         "title": s.title,

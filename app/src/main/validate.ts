@@ -280,6 +280,8 @@ function worktreeRequest(o: Obj, k: string): Obj {
 /** Limites des paramètres de la forge (lot 13a). */
 export const MAX_ISSUE_SEARCH = 256
 export const MAX_ISSUE_LABEL = 128
+/** Nombre maximal d'étiquettes d'un filtre `forge.issues` (lot 15). */
+export const MAX_ISSUE_LABELS = 20
 export const MAX_ISSUE_TITLE = 512
 export const MAX_ISSUE_LIMIT = 200
 
@@ -290,6 +292,21 @@ function filterText(max: number) {
     if (/\p{Cc}/u.test(v)) throw new ValidationError(`« ${k} » contient un caractère de contrôle`)
     return v
   }
+}
+
+/** Étiquettes d'un filtre : tableau de noms non vides (≤ 128 caractères, sans contrôle), 20 au plus. */
+function filterLabels(o: Obj, k: string): string[] {
+  const v = o[k]
+  if (!Array.isArray(v) || v.length > MAX_ISSUE_LABELS) throw new ValidationError(`« ${k} » doit être un tableau de ${MAX_ISSUE_LABELS} étiquettes au plus`)
+  return v.map((x, i) => {
+    try {
+      const name = filterText(MAX_ISSUE_LABEL)({ name: x }, 'name')
+      if (name.trim() === '') throw new ValidationError('étiquette vide')
+      return name
+    } catch (e) {
+      throw new ValidationError(`${k}[${i}] : ${(e as Error).message}`)
+    }
+  })
 }
 
 /** Numéro d'issue : entier strictement positif. */
@@ -629,6 +646,7 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       out.force = bool(o, 'force')
       return out
     case 'forge.status':
+    case 'forge.labels':
       out.root = absPath(o, 'root')
       optional(o, out, 'refresh', bool)
       return out
@@ -638,6 +656,7 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       optional(o, out, 'search', filterText(MAX_ISSUE_SEARCH))
       nullable(o, out, 'assignee', (x, k) => oneOf(x, k, ['@me'] as const))
       optional(o, out, 'label', filterText(MAX_ISSUE_LABEL))
+      optional(o, out, 'labels', filterLabels)
       optional(o, out, 'limit', (x, k) => int(x, k, 1, MAX_ISSUE_LIMIT))
       optional(o, out, 'refresh', bool)
       return out

@@ -23,6 +23,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use crate::domain::transcript::{
+    MAX_DISTINCT_CWDS, choose_resume_cwd, cwd_matches_project_dir, note_cwd,
+};
 use crate::domain::{PastSession, Profile};
 use crate::ports::TranscriptSource;
 
@@ -134,10 +137,7 @@ pub fn scan_transcript_ids(config_dir: &Path) -> HashSet<String> {
 /// projet), sans rien lire. Un identifiant qui n'est pas un simple nom de
 /// fichier (`/`, `..`) ne correspond à rien.
 pub fn find_transcript(config_dir: &Path, session_id: &str) -> Option<PathBuf> {
-    if session_id.is_empty()
-        || session_id.contains(['/', '\\', '\0'])
-        || session_id.starts_with('.')
-    {
+    if !valid_session_file_name(session_id) {
         return None;
     }
     let name = format!("{session_id}.jsonl");
@@ -149,14 +149,180 @@ pub fn find_transcript(config_dir: &Path, session_id: &str) -> Option<PathBuf> {
 }
 
 /// Résume un transcript. Les octets non UTF-8 sont remplacés plutôt que de
-/// faire échouer la lecture.
+/// faire échouer la lecture. `cwd` est le dossier de reprise (voir
+/// [`resolve_resume_cwd`]).
 pub fn read_transcript(path: &Path) -> io::Result<PastSession> {
     let mut s = read_transcript_lines(path)?;
     s.modified = fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
         .map(time::OffsetDateTime::from);
+    resolve_resume_cwd(path, &mut s);
     Ok(s)
+}
+
+/// Dossier de reprise : le premier `cwd` lu dont l'encodage de Claude Code
+/// est le nom du dossier qui contient le transcript, et qui existe
+/// (`resume_cwd_inferred: true`). Un gros fichier lu par le début et la fin
+/// (ou dont la liste des `cwd` est pleine) est parcouru en entier (voir
+/// [`matching_cwds`]) si aucun `cwd` lu n'a le bon encodage. À défaut, `cwd` reste le premier lu
+/// (`resume_cwd_inferred: false`).
+pub fn resolve_resume_cwd(path: &Path, s: &mut PastSession) {
+    let Some(dir_name) = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+    else {
+        return;
+    };
+    let exists = |p: &Path| p.is_dir();
+    let mut found = choose_resume_cwd(dir_name, &s.cwds, exists).map(Path::to_path_buf);
+    // Parcours seulement si aucun `cwd` lu n'a le bon encodage : un `cwd`
+    // qui l'a mais n'existe plus (worktree supprimé) n'y gagnerait rien.
+    // Aussi pour un fichier lu en entier dont la liste des `cwd` a atteint
+    // son plafond (le bon a pu être écarté).
+    let partial = s.message_count.is_none() || s.cwds.len() >= MAX_DISTINCT_CWDS;
+    if found.is_none() && partial && !s.cwds.iter().any(|c| cwd_matches_project_dir(c, dir_name)) {
+        let candidates = matching_cwds(path, dir_name);
+        found = choose_resume_cwd(dir_name, &candidates, exists).map(Path::to_path_buf);
+        for c in candidates.iter().filter_map(|c| c.to_str()) {
+            note_cwd(&mut s.cwds, c);
+        }
+    }
+    if let Some(c) = found {
+        s.cwd = Some(c);
+        s.resume_cwd_inferred = true;
+    }
+}
+
+/// Octets lus au plus par le parcours d'un transcript à la recherche de ses `cwd`.
+pub const SCAN_MAX_BYTES: u64 = 256 * 1024 * 1024;
+/// Taille du bloc lu par le parcours.
+const SCAN_CHUNK: usize = 256 * 1024;
+/// Longueur maximale d'une valeur `"cwd"` (chaîne JSON, guillemets compris).
+const CWD_MAX_LEN: usize = 8 * 1024;
+/// Résultats de parcours gardés au plus (au-delà, le cache est vidé).
+const SCAN_CACHE_MAX: usize = 256;
+
+type ScanKey = (PathBuf, Option<SystemTime>, u64);
+
+fn scan_cache() -> &'static Mutex<HashMap<ScanKey, Arc<Vec<PathBuf>>>> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<ScanKey, Arc<Vec<PathBuf>>>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Mutex::default)
+}
+
+/// `cwd` distincts d'un transcript dont l'encodage est `dir_name`, dans
+/// l'ordre du fichier, existants ou non (l'existence est vérifiée à chaque
+/// appel). Résultat gardé par (chemin, date de modification, taille).
+fn matching_cwds(path: &Path, dir_name: &str) -> Arc<Vec<PathBuf>> {
+    let Ok(meta) = fs::metadata(path) else {
+        return Arc::default();
+    };
+    let key = (path.to_path_buf(), meta.modified().ok(), meta.len());
+    if let Some(hit) = scan_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+    {
+        return hit.clone();
+    }
+    let found = Arc::new(
+        fs::File::open(path)
+            .map(|f| scan_cwds(f.take(SCAN_MAX_BYTES), dir_name))
+            .unwrap_or_default(),
+    );
+    let mut cache = scan_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= SCAN_CACHE_MAX {
+        cache.clear();
+    }
+    cache.insert(key, found.clone());
+    found
+}
+
+/// Parcourt `input` par blocs à la recherche des `"cwd":"…"` (sans analyser
+/// le JSON ni découper en lignes : une ligne géante, image en base64 par
+/// exemple, n'est jamais gardée en entier) et retient, sans doublon, les
+/// valeurs dont l'encodage est `dir_name`. Une valeur de plus de
+/// [`CWD_MAX_LEN`] octets est ignorée ; une erreur de lecture arrête le
+/// parcours (ce qui est trouvé est gardé).
+fn scan_cwds(mut input: impl Read, dir_name: &str) -> Vec<PathBuf> {
+    const KEY: &[u8] = b"\"cwd\":";
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut window: Vec<u8> = Vec::with_capacity(SCAN_CHUNK + CWD_MAX_LEN);
+    let mut chunk = vec![0u8; SCAN_CHUNK];
+    loop {
+        let n = match input.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        window.extend_from_slice(&chunk[..n]);
+        // Début de ce qu'il faut garder pour le bloc suivant : la fin de la
+        // fenêtre (motif à cheval), ou une valeur commencée mais pas finie.
+        let mut keep = window.len().saturating_sub(KEY.len() - 1);
+        let mut from = 0;
+        while let Some(at) = find(&window[from..], KEY) {
+            let key_at = from + at;
+            let value = &window[key_at + KEY.len()..];
+            from = key_at + KEY.len();
+            match json_string_at(value) {
+                Some(text) => {
+                    if cwd_matches_project_dir(Path::new(&text), dir_name)
+                        && !found.iter().any(|c| c.as_os_str() == text.as_str())
+                    {
+                        found.push(PathBuf::from(text));
+                    }
+                }
+                // Pas finie dans la fenêtre : reprise au bloc suivant, sauf
+                // si elle est déjà trop longue pour être un dossier.
+                None if value.len() < CWD_MAX_LEN && !string_is_closed(value) => {
+                    keep = keep.min(key_at);
+                    break;
+                }
+                None => {}
+            }
+        }
+        window.drain(..keep);
+    }
+    found
+}
+
+/// La chaîne JSON qui commence `bytes` (blancs sautés) est-elle fermée, ou
+/// `bytes` ne commence-t-il pas par une chaîne ? (Sinon il faut la suite.)
+fn string_is_closed(bytes: &[u8]) -> bool {
+    match bytes.iter().position(|b| !b.is_ascii_whitespace()) {
+        None => false,
+        Some(start) if bytes[start] != b'"' => true,
+        Some(start) => {
+            let mut escaped = false;
+            bytes[start + 1..].iter().any(|&b| {
+                let stop = b == b'"' && !escaped;
+                escaped = b == b'\\' && !escaped;
+                stop
+            })
+        }
+    }
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Chaîne JSON qui commence au début de `bytes` (blancs sautés), décodée.
+fn json_string_at(bytes: &[u8]) -> Option<String> {
+    let start = bytes.iter().position(|b| !b.is_ascii_whitespace())?;
+    if bytes[start] != b'"' {
+        return None;
+    }
+    let mut escaped = false;
+    let end = bytes[start + 1..].iter().position(|&b| {
+        let stop = b == b'"' && !escaped;
+        escaped = b == b'\\' && !escaped;
+        stop
+    })?;
+    serde_json::from_slice(&bytes[start..start + 1 + end + 1]).ok()
 }
 
 fn read_transcript_lines(path: &Path) -> io::Result<PastSession> {
@@ -257,6 +423,32 @@ impl TranscriptSource for FsTranscriptSource {
     fn transcript_path(&self, profile: &Profile, session_id: &str) -> Option<PathBuf> {
         find_transcript(&profile.config_dir, session_id)
     }
+
+    fn found_from(&self, profile: &Profile, session_id: &str, cwd: &Path) -> bool {
+        transcript_found_from(&profile.config_dir, session_id, cwd)
+    }
+}
+
+/// `<config_dir>/projects/<cwd encodé>/<session_id>.jsonl` existe : là où
+/// Claude Code, lancé dans `cwd`, cherche la conversation à reprendre.
+pub fn transcript_found_from(config_dir: &Path, session_id: &str, cwd: &Path) -> bool {
+    if !valid_session_file_name(session_id) || !cwd.is_absolute() {
+        return false;
+    }
+    let dir = crate::domain::transcript::project_dir_name(cwd);
+    fs::metadata(
+        config_dir
+            .join("projects")
+            .join(dir)
+            .join(format!("{session_id}.jsonl")),
+    )
+    .is_ok_and(|m| m.is_file())
+}
+
+fn valid_session_file_name(session_id: &str) -> bool {
+    !(session_id.is_empty()
+        || session_id.contains(['/', '\\', '\0'])
+        || session_id.starts_with('.'))
 }
 
 #[cfg(test)]
@@ -419,6 +611,177 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.last_timestamp, Some(expected));
+    }
+
+    #[test]
+    fn resume_cwd_is_found_even_in_the_middle_of_a_big_transcript() {
+        // Cas réel (anonymisé) : 11,6 Mo, `cwd` du dossier personnel au début
+        // et à la fin, le dossier de départ seulement au milieu.
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home/u");
+        let start = home.join("workplace/next-level.run");
+        let sub = start.join("optimus-mcp");
+        fs::create_dir_all(&sub).unwrap();
+        let cfg = root.path().join("cfg");
+        let dir = cfg
+            .join("projects")
+            .join(crate::domain::transcript::project_dir_name(&start));
+        fs::create_dir_all(&dir).unwrap();
+        let filler = "x".repeat(500);
+        let mut content = String::new();
+        for (cwd, n) in [
+            (&home, 972),
+            (&home.join("workplace"), 3),
+            (&start, 316),
+            (&home, 57),
+            (&sub, 840),
+            (&home, 817),
+        ] {
+            for _ in 0..n {
+                content.push_str(
+                    &serde_json::json!({"type": "assistant", "cwd": cwd, "message": {"content": filler}})
+                        .to_string(),
+                );
+                content.push('\n');
+            }
+        }
+        assert!(content.len() as u64 > HEAD_MAX_BYTES + TAIL_BYTES);
+        let path = dir.join("36b9efbf-1dfc-49d3-9414-723d97625117.jsonl");
+        fs::write(&path, content).unwrap();
+        let s = read_transcript(&path).unwrap();
+        assert_eq!(s.message_count, None, "lu par le début et la fin");
+        assert_eq!(s.cwd.as_deref(), Some(start.as_path()));
+        assert!(s.resume_cwd_inferred);
+        // Début et fin, plus ceux du parcours qui ont le bon encodage.
+        assert_eq!(s.cwds, [home.clone(), start.clone()]);
+
+        // Dossier de départ disparu : règle de repli (premier `cwd` lu).
+        fs::remove_dir_all(&start).unwrap();
+        let s = read_transcript(&path).unwrap();
+        assert_eq!(s.cwd.as_deref(), Some(home.as_path()));
+        assert!(!s.resume_cwd_inferred);
+    }
+
+    #[test]
+    fn resume_cwd_of_a_small_transcript() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("Mes documents");
+        let proj = home.join("été_2026/a-b.c");
+        fs::create_dir_all(&proj).unwrap();
+        let cfg = root.path().join("cfg");
+        let dir = cfg
+            .join("projects")
+            .join(crate::domain::transcript::project_dir_name(&proj));
+        fs::create_dir_all(&dir).unwrap();
+        let line = |cwd: &Path| {
+            serde_json::json!({"type": "user", "cwd": cwd, "message": {"content": "p"}}).to_string()
+        };
+        let path = dir.join("abc.jsonl");
+        fs::write(&path, format!("{}\n{}\n", line(&home), line(&proj))).unwrap();
+        let s = read_transcript(&path).unwrap();
+        assert_eq!(s.cwd.as_deref(), Some(proj.as_path()));
+        assert!(s.resume_cwd_inferred);
+        // Rangé ailleurs (aucun `cwd` ne correspond) : premier `cwd` lu.
+        let other = cfg.join("projects/-ailleurs");
+        fs::create_dir_all(&other).unwrap();
+        fs::copy(&path, other.join("def.jsonl")).unwrap();
+        let s = read_transcript(&other.join("def.jsonl")).unwrap();
+        assert_eq!(s.cwd.as_deref(), Some(home.as_path()));
+        assert!(!s.resume_cwd_inferred);
+    }
+
+    /// Lecteur qui rend les octets par petits morceaux (motifs et valeurs à
+    /// cheval sur deux lectures).
+    struct Trickle<'a>(&'a [u8], usize);
+    impl Read for Trickle<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.1.min(buf.len()).min(self.0.len());
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn scan_streams_past_giant_lines_and_chunk_boundaries() {
+        // Ligne géante sans `cwd` (image en base64), puis une ligne dont le
+        // `cwd` vient après un long champ (cas réel : jusqu'à 1,4 Mo).
+        let mut data = format!(
+            r#"{{"type":"user","message":{{"image":"{}"}}}}"#,
+            "A".repeat(3 << 20)
+        )
+        .into_bytes();
+        data.push(b'\n');
+        data.extend(
+            format!(
+                r#"{{"type":"user","toolUseResult":"{}","cwd":"/p/a.b"}}"#,
+                "B".repeat(100_000)
+            )
+            .bytes(),
+        );
+        data.extend(b"\n{\"cwd\":\"/ailleurs\"}\n{\"cwd\": \"/p/a-b\"}\n{\"cwd\":\"/p/a.b\"}\n");
+        let expected = [PathBuf::from("/p/a.b"), PathBuf::from("/p/a-b")];
+        assert_eq!(scan_cwds(&data[..], "-p-a-b"), expected);
+        for step in [1, 7, 4096] {
+            assert_eq!(
+                scan_cwds(Trickle(&data, step), "-p-a-b"),
+                expected,
+                "{step}"
+            );
+        }
+        // Valeur non fermée, trop longue pour être un dossier : ignorée.
+        let mut bad = b"{\"cwd\":\"/p/".to_vec();
+        bad.extend(std::iter::repeat_n(b'x', CWD_MAX_LEN * 2));
+        bad.extend(b"\n{\"cwd\":\"/p/a.b\"}\n");
+        assert_eq!(scan_cwds(&bad[..], "-p-a-b"), [PathBuf::from("/p/a.b")]);
+        // Plafond d'octets lus.
+        assert!(scan_cwds((&data[..]).take(1000), "-p-a-b").is_empty());
+    }
+
+    #[test]
+    fn resume_cwd_found_after_more_than_64_other_cwds() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = root.path().join("projet");
+        fs::create_dir_all(&proj).unwrap();
+        let dir = root
+            .path()
+            .join("cfg/projects")
+            .join(crate::domain::transcript::project_dir_name(&proj));
+        fs::create_dir_all(&dir).unwrap();
+        let line = |cwd: &Path| serde_json::json!({"type": "user", "cwd": cwd}).to_string() + "\n";
+        let mut small = String::new();
+        for i in 0..(MAX_DISTINCT_CWDS + 10) {
+            small.push_str(&line(&root.path().join(format!("autre-{i}"))));
+        }
+        small.push_str(&line(&proj));
+        // Petit fichier lu en entier, et gros fichier lu par le début et la fin.
+        let mut big = small.clone();
+        while (big.len() as u64) < HEAD_MAX_BYTES + 2 * TAIL_BYTES {
+            big.push_str(&line(&root.path().join("autre-0")));
+        }
+        for (name, content) in [("petit", &small), ("gros", &big)] {
+            let path = dir.join(format!("{name}.jsonl"));
+            fs::write(&path, content).unwrap();
+            let s = read_transcript(&path).unwrap();
+            assert_eq!(s.cwd.as_deref(), Some(proj.as_path()), "{name}");
+            assert!(s.resume_cwd_inferred, "{name}");
+            // Mémoïsé : même résultat, le fichier n'ayant pas changé.
+            assert_eq!(read_transcript(&path).unwrap().cwd, s.cwd);
+        }
+    }
+
+    #[test]
+    fn json_strings_are_decoded_when_scanning() {
+        assert_eq!(
+            json_string_at(br#" "/a \"b\"\\" , "x""#).as_deref(),
+            Some(r#"/a "b"\"#)
+        );
+        assert_eq!(
+            json_string_at(br#""\u00e9t\u00e9""#).as_deref(),
+            Some("été")
+        );
+        assert_eq!(json_string_at(b"null"), None);
+        assert_eq!(json_string_at("\"non fermée".as_bytes()), None);
     }
 
     #[test]

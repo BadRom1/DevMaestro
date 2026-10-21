@@ -21,6 +21,7 @@
  * Sans Electron : testable avec un faux client.
  */
 import type { RunnerConfirmation } from '../shared/bridge'
+import { readRunnerFiles } from '../shared/runnerFiles'
 import { ErrorCode } from '../shared/protocol'
 import { RpcError } from './daemon/rpc'
 
@@ -64,6 +65,8 @@ export async function describeRunner(deps: GuardDeps, sessionId: string, runnerI
     cwd: typeof r.cwd === 'string' ? r.cwd : '',
     source: typeof r.source === 'string' ? r.source : '',
     body: typeof r.body === 'string' ? r.body : null,
+    body_truncated: r.body_truncated === true,
+    files: readRunnerFiles(r.files),
     fingerprint,
   }
 }

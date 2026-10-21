@@ -350,6 +350,31 @@ fn create_temp(dir: &OwnedFd, mode: Option<u32>) -> Result<(TempFile<'_>, File),
 }
 
 impl FileAccess for FsFiles {
+    fn hash_beneath(
+        &self,
+        root: &Path,
+        rel: &str,
+        max: u64,
+    ) -> Result<(u64, Option<String>), FileError> {
+        let fd = open_beneath(root, rel, OFlag::O_PATH, ResolveFlag::empty())?;
+        let st = fstat(&fd).map_err(from_errno)?;
+        if kind_of(st.st_mode) != Some(EntryKind::File) {
+            return Err(FileError::NotRegular);
+        }
+        // Chemin réel (liens suivis) : jamais dans un dossier `.git`.
+        resolved_beneath(&fd, root)?;
+        let size = st.st_size.max(0) as u64;
+        if size > max {
+            return Ok((size, None));
+        }
+        let file = File::open(proc_fd(&fd)).map_err(io)?;
+        let meta = file.metadata().map_err(io)?;
+        if meta.ino() != st.st_ino || meta.dev() != st.st_dev || !meta.is_file() {
+            return Err(FileError::NotRegular);
+        }
+        crate::domain::files::sha256_stream(file, max).map_err(io)
+    }
+
     fn read_beneath(&self, root: &Path, rel: &str, max: u64) -> Result<ReadFile, FileError> {
         // O_PATH : aucun effet de bord, même sur un périphérique ou une FIFO.
         let fd = open_beneath(root, rel, OFlag::O_PATH, ResolveFlag::empty())?;

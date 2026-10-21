@@ -334,18 +334,30 @@ pub const RUNNER_REMOVED_VARS: &[&str] = &[
     "GITHUB_ENTERPRISE_TOKEN",
 ];
 
+/// Variables de make retirées de l'environnement d'un runner : elles
+/// changeraient en silence ce que `make <cible>` exécute (options,
+/// `MAKEFILES` : Makefiles lus en plus) par rapport au corps montré.
+pub const RUNNER_REMOVED_MAKE_VARS: &[&str] = &[
+    "MAKEFLAGS",
+    "MFLAGS",
+    "GNUMAKEFLAGS",
+    "MAKEFILES",
+    "MAKELEVEL",
+];
+
 /// Variable héritée retirée de l'environnement d'un runner ?
 pub fn removed_for_runner(name: &str) -> bool {
     INHERITED_ENV_PREFIXES.iter().any(|p| name.starts_with(p))
         || RUNNER_REMOVED_PREFIXES.iter().any(|p| name.starts_with(p))
         || RUNNER_REMOVED_VARS.contains(&name)
+        || RUNNER_REMOVED_MAKE_VARS.contains(&name)
         || is_claude_session_marker(name)
 }
 
 /// Construit la commande d'un runner : environnement du démon sans
 /// `ORCH_*`, `DEVMAESTRO_*`, les marqueurs de session Claude Code,
-/// `ANTHROPIC_*`, `CLAUDE_*` / `CLAUDECODE` et les jetons GitHub
-/// ([`removed_for_runner`]) ; plus `PORT`, `HOST=127.0.0.1`, `TERM` et
+/// `ANTHROPIC_*`, `CLAUDE_*` / `CLAUDECODE`, les jetons GitHub et les
+/// variables de make (`MAKEFLAGS`, `MAKEFILES`… : [`removed_for_runner`]) ; plus `PORT`, `HOST=127.0.0.1`, `TERM` et
 /// `COLORTERM`. Le reste (`PATH`, `HOME`, mandataires…) est gardé.
 pub fn build_runner(spec: &RunnerSpec<'_>) -> CommandLine {
     let env: Vec<(String, OsString)> = vec![
@@ -361,6 +373,7 @@ pub fn build_runner(spec: &RunnerSpec<'_>) -> CommandLine {
     for fixed in [ENV_SOCKET, ENV_TOKEN, ENV_SESSION, "CLAUDE_CONFIG_DIR"]
         .into_iter()
         .chain(RUNNER_REMOVED_VARS.iter().copied())
+        .chain(RUNNER_REMOVED_MAKE_VARS.iter().copied())
     {
         env_remove.push(fixed.to_owned());
     }
@@ -592,10 +605,15 @@ mod tests {
             "GITHUB_TOKEN",
             "GH_ENTERPRISE_TOKEN",
             "GITHUB_ENTERPRISE_TOKEN",
+            "MAKEFLAGS",
+            "MFLAGS",
+            "GNUMAKEFLAGS",
+            "MAKEFILES",
+            "MAKELEVEL",
         ] {
             assert!(c.env_remove.iter().any(|r| r == k), "{k}");
         }
-        for k in ["GH_CONFIG_DIR", "HTTPS_PROXY", "PATH"] {
+        for k in ["GH_CONFIG_DIR", "HTTPS_PROXY", "PATH", "MAKE"] {
             assert!(!c.env_remove.iter().any(|r| r == k), "{k}");
         }
         let scoped = build_runner(&RunnerSpec {

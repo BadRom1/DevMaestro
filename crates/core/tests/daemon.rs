@@ -1219,3 +1219,111 @@ fn missing_worktree_directory() {
             .any(|s| s["cwd_exists"] == true)
     );
 }
+
+/// Reprise d'une ancienne session dans le dossier où Claude Code a rangé sa
+/// conversation (cas réel du 2026-10-21, anonymisé) : les lignes du
+/// transcript portent surtout le dossier personnel, mais le transcript est
+/// rangé sous le dossier de départ. Un dossier forcé incompatible donne un
+/// avertissement, puis un échec expliqué (« No conversation found »).
+#[test]
+fn resume_in_the_folder_claude_code_filed_the_conversation_under() {
+    use devmaestro_core::domain::transcript::project_dir_name;
+    let env = Env::new();
+    let _daemon = env.start_daemon();
+    let mut c = Client::connect(&env);
+
+    let home = env.proj.join("maison");
+    let start = home.join("espace de travail/next-level.run");
+    let sub = start.join("optimus-mcp");
+    std::fs::create_dir_all(&sub).unwrap();
+    let cid = "36b9efbf-1dfc-49d3-9414-723d97625117";
+    let dir = env
+        .home
+        .join(".claude/projects")
+        .join(project_dir_name(&start));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut transcript = String::new();
+    for (cwd, n) in [
+        (&home, 3),
+        (&home.join("espace de travail"), 1),
+        (&start, 2),
+        (&home, 1),
+        (&sub, 2),
+        (&home, 3),
+    ] {
+        for _ in 0..n {
+            transcript.push_str(
+                &json!({"type": "user", "cwd": cwd, "sessionId": cid,
+                        "timestamp": "2026-10-21T08:00:00Z",
+                        "message": {"content": "Reprends l'audit"}})
+                .to_string(),
+            );
+            transcript.push('\n');
+        }
+    }
+    std::fs::write(dir.join(format!("{cid}.jsonl")), transcript).unwrap();
+
+    // transcripts.list : le dossier de reprise, pas le premier `cwd` lu.
+    let list = c.call("transcripts.list", json!({}));
+    let e = list["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["claude_session_id"] == cid)
+        .unwrap()
+        .clone();
+    assert_eq!(e["cwd"], json!(start), "{e}");
+    assert_eq!(e["resume_cwd_inferred"], true);
+    assert_eq!(e["cwd_exists"], true);
+
+    // Reprise sans `cwd` : dans ce dossier, sans avertissement.
+    let r = c.call("sessions.resume", json!({"claude_session_id": cid}));
+    assert_eq!(r["warnings"], json!([]), "{r}");
+    assert_eq!(r["session"]["cwd"], json!(start));
+    let id: Uuid = r["session"]["id"].as_str().unwrap().parse().unwrap();
+    wait_idle(&mut c, id);
+    let launch = env.fake_launches().last().unwrap().clone();
+    assert_eq!(launch["cwd"], json!(start));
+    c.call("sessions.stop", json!({"id": id}));
+    c.wait_until("arrêtée", |c| {
+        c.last_session(id).is_some_and(|s| s["alive"] == false)
+    });
+
+    // Dossier forcé incompatible : avertissement, puis échec expliqué.
+    let r = c.call("sessions.resume", json!({"id": id, "cwd": home}));
+    let warnings = r["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w
+            .as_str()
+            .unwrap()
+            .starts_with("Claude Code ne trouvera pas la conversation depuis ce dossier")),
+        "{r}"
+    );
+    c.wait_until("reprise refusée par Claude Code", |c| {
+        c.last_session(id)
+            .is_some_and(|s| s["status"]["reason"] == "conversation_not_found")
+    });
+    let s = c.last_session(id).unwrap();
+    assert_eq!(s["status"]["state"], "error");
+    assert_eq!(s["last_exit"], json!({"code": 1}));
+    let message = s["status"]["message"].as_str().unwrap();
+    assert!(message.contains("No conversation found"), "{message}");
+    assert!(message.contains(&home.display().to_string()), "{message}");
+    let failed: Vec<Value> = c
+        .effects(id)
+        .into_iter()
+        .filter(|e| e["type"] == "resume_failed")
+        .collect();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["reason"], "conversation_not_found");
+    assert_eq!(failed[0]["message"], json!(message));
+
+    // Reprise suivante sans `cwd` : le dossier de la session ne convient
+    // plus, celui du transcript est repris ; l'échec est effacé.
+    let r = c.call("sessions.resume", json!({"id": id}));
+    assert_eq!(r["warnings"], json!([]), "{r}");
+    assert_eq!(r["session"]["cwd"], json!(start));
+    assert!(r["session"]["status"].get("message").is_none(), "{r}");
+    wait_idle(&mut c, id);
+    assert_eq!(env.fake_launches().last().unwrap()["cwd"], json!(start));
+}

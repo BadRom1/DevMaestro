@@ -278,6 +278,18 @@ select.mode { background: var(--panel-2); border: 1px solid var(--line-2); borde
 .mh { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--line) }
 .mh h2 { margin: 0; font-size: 16px }
 .mh .x { margin-left: auto; min-width: 30px; min-height: 30px; padding: 0; font-size: 18px; line-height: 1; display: inline-grid; place-items: center }
+/* Panneau redimensionnable (lot 15) : « Agrandir / Réduire » à gauche du ×. */
+.mh .mh-size { margin-left: auto; margin-right: 6px; min-height: 30px }
+.mh .mh-size + .x { margin-left: 0 }
+/* Panneau ancré à droite, toute la hauteur ; largeur choisie (poignée à gauche) ou toute la largeur disponible ; agrandi : toute la fenêtre. */
+.scrim.panel-scrim { place-items: stretch end; padding: 12px 0 12px 16px }
+.scrim.panel-scrim.max { padding: 0 }
+.modal.panel-modal { position: relative; height: 100%; max-width: 100%; min-width: min(560px, 100%); border-right: 0; border-radius: 10px 0 0 10px }
+.modal.panel-modal.max { width: 100%; border: 0; border-radius: 0 }
+.panel-grip { position: absolute; left: 0; top: 0; bottom: 0; width: 8px; cursor: ew-resize; z-index: 2; touch-action: none }
+.panel-grip::after { content: ""; position: absolute; left: 2px; top: 50%; width: 4px; height: 48px; margin-top: -24px; border-radius: 2px; background: var(--line-2) }
+.panel-grip:hover::after, .panel-grip:focus-visible::after { background: var(--accent) }
+.panel-grip:focus-visible { outline-offset: -2px }
 .mb { padding: 14px 16px; display: grid; gap: 14px }
 .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px }
 .field { display: grid; gap: 4px; min-width: 0; align-content: start }
@@ -517,6 +529,11 @@ tr.cm td { padding: 6px 12px 8px 60px; white-space: normal }
 .md th, .md td { border: 1px solid var(--line); padding: 4px 10px; text-align: left }
 .md hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0 }
 .md .img-alt { color: var(--muted); font-style: italic }
+/* Listes de tâches (lot 15) : case désactivée à la place de la puce, cochée ou non, lisible dans les deux modes. */
+.md li.task-item { list-style: none }
+.md .task-cb { appearance: none; -webkit-appearance: none; display: inline-block; position: relative; box-sizing: border-box; width: 14px; height: 14px; margin: 0 6px 0 -20px; vertical-align: -2px; border: 1.5px solid var(--muted); border-radius: 3px; background: var(--sunk); opacity: 1; cursor: default; pointer-events: none }
+.md .task-cb:checked { background: var(--accent); border-color: var(--accent) }
+.md .task-cb:checked::after { content: ""; position: absolute; left: 3.5px; top: 0.5px; width: 4px; height: 8px; border: solid var(--accent-ink); border-width: 0 2px 2px 0; transform: rotate(45deg) }
 .toc { border-left: 1px solid var(--line); overflow: auto; padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; min-height: 0 }
 .toc .lbl { padding: 0 6px 6px }
 .toc button { border: 0; background: transparent; text-align: left; padding: 3px 6px; border-radius: 4px; font-size: 12.5px; color: var(--muted) }
@@ -810,16 +827,32 @@ tr.cm td { padding: 6px 12px 8px 60px; white-space: normal }
 
 /* ---------- Forge : issues et epics (v0.3, lot 13a) ---------- */
 /* État en texte et glyphe (jamais par la seule couleur) ; étiquettes : texte, pastille, contraste ≥ 4,5:1 calculé. */
-.modal .issues-mb { min-height: min(560px, 70vh) }
-.issues { display: grid; grid-template-columns: minmax(280px, 2fr) minmax(0, 3fr); gap: 14px; min-height: 0 }
-@media (max-width: 760px) { .issues { grid-template-columns: minmax(0, 1fr) } }
-.ilist { display: grid; gap: 8px; align-content: start; min-width: 0 }
-.idetail { display: grid; gap: 8px; align-content: start; min-width: 0; border-left: 1px solid var(--line); padding-left: 14px }
-.ifilters { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end }
-.ifilters .field { width: auto; min-width: 110px }
-.ifilters .field.grow { flex: 1 1 160px }
-.ifilters .imine { grid-template-columns: 16px auto; padding-bottom: 4px }
-.irows { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; max-height: 52vh; overflow: auto }
+/* Panneau (lot 15) : le corps ne défile pas ; la barre de filtres reste en haut, la liste et le détail défilent chacun. */
+.modal .issues-mb { min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 10px }
+.issues-mb > * { flex: none }
+.issues-mb > .issues, .issues-mb > .iepic { flex: 1 1 auto; min-height: 0 }
+.issues-mb > .iepic { overflow: auto }
+.issues { display: grid; grid-template-columns: minmax(280px, 2fr) minmax(0, 3fr); grid-template-rows: auto minmax(0, 1fr); gap: 10px 14px; min-height: 0 }
+.ifilters-wrap { grid-column: 1 / -1; display: grid; gap: 4px; min-width: 0; padding-bottom: 10px; border-bottom: 1px solid var(--line) }
+.ifilters-wrap > .hint { margin: 0 }
+.ilist { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0 }
+.ilist > * { flex: none }
+.idetail { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; overflow: auto; border-left: 1px solid var(--line); padding-left: 14px }
+.idetail > * { flex: none }
+@media (max-width: 760px) {
+  .issues { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; overflow: auto }
+  .idetail { border-left: 0; padding-left: 0; overflow: visible }
+}
+/* Barre de filtres : une ligne, libellés au-dessus, tous les contrôles à la même hauteur (--ctl-h) et alignés en bas. */
+.ifilters { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end }
+.ifilters .field { width: auto; min-width: 120px }
+.ifilters .ifield-state { flex: 0 0 150px }
+.ifilters .lpick, .ifilters .ifield-labels { flex: 0 1 320px; min-width: 200px }
+.ifilters .field.grow { flex: 1 1 220px }
+.ifilters .imine { display: inline-flex; align-items: center; gap: 8px; height: var(--ctl-h); white-space: nowrap }
+.ifilters .imine input[type="checkbox"] { margin: 0 }
+.ifilters .ictl { height: var(--ctl-h); padding-block: 0 }
+.irows { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; align-content: start; flex: 1 1 auto; min-height: 0; overflow: auto }
 .irow { display: grid; gap: 3px; width: 100%; text-align: left; border: 1px solid transparent; background: transparent; border-radius: var(--r); padding: 6px 8px; color: var(--fg) }
 .irow:hover { background: var(--panel-2) }
 .irow[aria-current="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--panel)) }
@@ -832,12 +865,21 @@ tr.cm td { padding: 6px 12px 8px 60px; white-space: normal }
 .istate.open { color: var(--run-ink) }
 .istate.closed { color: var(--muted) }
 .ilabels { display: inline-flex; flex-wrap: wrap; gap: 4px }
-.ilabel { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line-2); border-radius: 99px; padding: 0 7px; font-size: 11.5px; line-height: 1.5; color: var(--fg); background: var(--panel-2); max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-/* Étiquette colorée : fond de la forge, texte noir ou blanc choisi pour le contraste ; liseré du thème pour rester visible sur le fond. */
-.ilabel.colored { box-shadow: 0 0 0 1px var(--line-2) }
-.ilabel .ldot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor }
+/* Étiquette (lot 15) : pastille neutre, sans fond (jamais l'aspect d'un bouton) ; la couleur de la forge n'est qu'un point ;
+   le nom, écrit dans la couleur du texte, porte l'information. */
+.ilabel { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line-2); border-radius: 99px; padding: 0 7px 0 6px; font-size: 11.5px; line-height: 1.5; color: var(--fg); background: transparent; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.ldot { flex: none; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); box-shadow: 0 0 0 1px color-mix(in srgb, var(--fg) 30%, transparent) }
 .iprog { font-variant-numeric: tabular-nums }
 .iissue { display: grid; gap: 10px; min-width: 0 }
+/* Issue : le texte défile, la barre d'actions reste en bas du détail, toujours visible. */
+.idetail:has(> .iissue-fixed) { overflow: hidden }
+.iissue.iissue-fixed { display: flex; flex-direction: column; gap: 0; flex: 1 1 auto; min-height: 0 }
+.iissue-body { flex: 1 1 auto; min-height: 0; overflow: auto; display: grid; gap: 10px; align-content: start; padding: 0 4px 12px 0 }
+.iissue-body .issue-md { max-height: none; overflow: visible }
+.iissue-bar { flex: none; display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; padding: 10px 0 2px; border-top: 1px solid var(--line); background: var(--panel) }
+.iissue-names { min-width: 0; flex: 1 1 260px; overflow-wrap: anywhere }
+.iissue-link { margin-left: auto }
+@media (max-width: 760px) { .iissue-bar { position: sticky; bottom: 0 } }
 .iissue .ih, .iepic .ih { margin: 0; font-size: 15px; overflow-wrap: anywhere }
 .imeta { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 12px }
 .iacts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center }
@@ -909,3 +951,32 @@ button.pull-chip:hover, button.pull-chip:focus-visible { border-color: var(--lin
 button.pull-chip:hover .mono, button.pull-chip:focus-visible .mono { text-decoration: underline }
 fieldset.ifilters { border: 0; margin: 0; padding: 0; min-width: 0 }
 .fmoved { margin: 0; padding-left: 18px; display: grid; gap: 2px; font-size: 12px }
+
+/* ---------- Sélecteur d'étiquettes (lot 15) ---------- */
+/* Boîte à la hauteur des autres contrôles (--ctl-h) ; pastilles retirables ; liste en surimpression. */
+.lpick { position: relative }
+.lpick-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-height: var(--ctl-h); padding: 3px 6px; background: var(--sunk); border: 1px solid var(--line-2); border-radius: var(--r); cursor: text }
+.lpick-box:focus-within { outline: 2px solid var(--accent); outline-offset: 1px }
+.field.lpick .lpick-box input[role="combobox"][aria-autocomplete] { flex: 1 1 60px; min-width: 60px; width: auto; height: 22px; line-height: 22px; border: 0; background: transparent; padding: 0 2px; outline: none }
+.lchip { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; height: 22px; padding: 0 2px 0 7px; border: 1px solid var(--line-2); border-radius: 99px; background: var(--panel); font-size: 12px; color: var(--fg) }
+.lchip-n { min-width: 0; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.lchip-x { display: inline-grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted); font-size: 14px; line-height: 1 }
+.lchip-x:hover, .lchip-x:focus-visible { color: var(--fg); background: var(--panel-2) }
+.lpick-pop { position: absolute; top: 100%; left: 0; z-index: 30; margin-top: 4px; width: max(100%, 300px); max-height: 320px; overflow: auto; padding: 4px; background: var(--panel); border: 1px solid var(--line-2); border-radius: var(--r); box-shadow: 0 8px 24px rgba(0, 0, 0, .28) }
+.lpick-pop ul { list-style: none; margin: 0; padding: 0 }
+.lpick-pop ul[hidden] { display: none }
+.lpick-empty { margin: 4px 8px }
+.lopt { display: grid; grid-template-columns: 14px 8px auto minmax(0, 1fr); align-items: center; gap: 7px; padding: 5px 8px; border-radius: 4px; cursor: pointer; font-size: 12.5px; color: var(--fg) }
+.lopt.active { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent) }
+.lopt[aria-selected="true"] .lopt-n { font-weight: 600 }
+.lopt[aria-disabled="true"] { opacity: .55; cursor: not-allowed }
+.lopt-check { color: var(--link); font-weight: 700; text-align: center }
+.lopt-n { white-space: nowrap }
+.lopt-d { min-width: 0; color: var(--faint); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+
+/* ---------- Confirmation d'un runner : fichiers de l'empreinte ---------- */
+.rn-files { display: grid; gap: 6px }
+.rn-files ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; max-height: 30vh; overflow: auto }
+.rn-file { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font-size: 12.5px }
+.rn-file-p { min-width: 0; overflow-wrap: anywhere }
+.rn-file-note { flex-basis: 100% }

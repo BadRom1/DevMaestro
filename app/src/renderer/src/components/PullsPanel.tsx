@@ -199,9 +199,9 @@ export function PullsTab({
 
   return (
     <div className="issues pulls">
-      <section className="ilist" aria-label="Liste des demandes de fusion">
-        <fieldset className="ifilters" aria-label="Filtres" disabled={busy}>
-          <label className="field">
+      <div className="ifilters-wrap">
+        <fieldset className="ifilters" aria-label="Filtres des demandes de fusion" disabled={busy}>
+          <label className="field ifield-state">
             <span className="lbl">État</span>
             <select value={filters.state} onChange={(e) => setFilters((f) => ({ ...f, state: e.target.value as PullStateFilter }))}>
               {PULL_STATE_FILTERS.map((s) => (
@@ -210,6 +210,10 @@ export function PullsTab({
                 </option>
               ))}
             </select>
+          </label>
+          <label className="optrow imine">
+            <input type="checkbox" checked={filters.mine} onChange={(e) => setFilters((f) => ({ ...f, mine: e.target.checked }))} />
+            <span>Les miennes</span>
           </label>
           <label className="field grow">
             <span className="lbl">Recherche</span>
@@ -221,14 +225,12 @@ export function PullsTab({
               onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
             />
           </label>
-          <label className="optrow imine">
-            <input type="checkbox" checked={filters.mine} onChange={(e) => setFilters((f) => ({ ...f, mine: e.target.checked }))} />
-            <span>Les miennes</span>
-          </label>
-          <button type="button" className="btn sm ghost" onClick={refresh} title="Redemander à la forge (sans le cache)">
+          <button type="button" className="btn ghost ictl" onClick={refresh} title="Redemander à la forge (sans le cache)">
             Actualiser
           </button>
         </fieldset>
+      </div>
+      <section className="ilist" aria-label="Liste des demandes de fusion">
         {list.phase === 'loading' && <p className="hint">Chargement des demandes de fusion…</p>}
         {list.phase === 'error' && (
           <p className="inline-err" role="alert">

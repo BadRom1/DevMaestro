@@ -1,4 +1,4 @@
-//! v0.3, lots 13a et 13b (ADR 0006) : forge GitHub par `gh`. Un faux `gh` (script
+//! v0.3, lots 13a, 13b et 15 (ADR 0006) : forge GitHub par `gh`. Un faux `gh` (script
 //! écrit par le test, chemin passé au démon de test par `DEVMAESTRO_GH_BIN`)
 //! répond avec des sorties enregistrées : aucun appel réseau.
 
@@ -64,6 +64,7 @@ case "$1 $2" in
       diff_huge) head -c 9437184 /dev/zero | tr '\0' ' '; exit 0 ;;
     esac
     cat "$FAKE_GH_DIR/gh-pr-diff.txt"; exit 0 ;;
+  "label list") cat "$FAKE_GH_DIR/gh-label-list.json"; exit 0 ;;
   "api graphql") cat "$FAKE_GH_DIR/graphql-review-threads.json"; exit 0 ;;
   "api -X")
     { cat; printf '\036\n'; } >> "$FAKE_GH_STDIN_LOG"
@@ -764,6 +765,97 @@ fn forge_env() -> Option<(Env, FakeGh, DaemonProc, Client, String)> {
     c.call("hello", json!({}));
     let root = env.proj.to_str().unwrap().to_owned();
     Some((env, gh, daemon, c, root))
+}
+
+#[test]
+fn labels_and_multi_label_filter_through_a_fake_gh() {
+    let Some((_env, gh, _daemon, mut c, root)) = forge_env() else {
+        return;
+    };
+    // Désactivé : rien n'est lancé.
+    let (code, _, data) =
+        error_of(&c.call_raw("forge.labels", json!({"root": root, "enabled": false})));
+    assert_eq!(code, -32022);
+    assert_eq!(data, json!({"reason": "désactivé dans les réglages"}));
+    assert!(gh.calls().is_empty(), "{:?}", gh.calls());
+
+    let labels = c.call("forge.labels", json!({"root": root}));
+    assert_eq!(
+        labels,
+        json!({"labels": [
+            {"name": "accessibility", "color": "f143ab",
+             "description": "Barrier affecting people with disabilities"},
+            {"name": "bug", "color": "d73a4a", "description": "Something isn't working"},
+            {"name": "good first issue", "color": "0075ca", "description": null},
+        ]})
+    );
+    assert_eq!(
+        gh.calls().last().unwrap(),
+        &argv(&[
+            "label",
+            "list",
+            "--repo",
+            "github.com/BadRom1/DevMaestro",
+            "--json",
+            "name,color,description",
+            "--limit=500",
+        ])
+    );
+    // Gardées : pas de nouvel appel ; `refresh` en force un.
+    let n = gh.calls().len();
+    assert_eq!(c.call("forge.labels", json!({"root": root})), labels);
+    assert_eq!(gh.calls().len(), n);
+    c.call("forge.labels", json!({"root": root, "refresh": true}));
+    assert!(gh.calls().len() > n);
+    for bad in [
+        json!({}),
+        json!({"root": "relatif"}),
+        json!({"root": root, "refresh": "oui"}),
+    ] {
+        assert_eq!(c.call_err("forge.labels", bad.clone()), -32602, "{bad}");
+    }
+    gh.set_mode("fail");
+    let (code, msg, _) =
+        error_of(&c.call_raw("forge.labels", json!({"root": root, "refresh": true})));
+    assert_eq!(code, -32603);
+    assert!(!msg.contains("ghp_") && !msg.contains('/'), "{msg}");
+    gh.set_mode("ok");
+
+    // Plusieurs étiquettes : une option `--label=` par nom, `label` d'abord ;
+    // un nom qui ressemble à une option ou contient `,` / `"` reste une
+    // seule valeur (jamais une option, jamais deux étiquettes pour pflag).
+    c.call(
+        "forge.issues",
+        json!({"root": root, "label": "bug",
+               "labels": ["--web", "a,b", "dit \"x\"", "bug", " "]}),
+    );
+    assert_eq!(
+        gh.calls().last().unwrap(),
+        &argv(&[
+            "issue",
+            "list",
+            "--repo",
+            "github.com/BadRom1/DevMaestro",
+            "--json",
+            "number,title,state,url,author,labels,assignees,updatedAt",
+            "--limit=51",
+            "--state=open",
+            "--label=bug",
+            "--label=--web",
+            "--label=\"a,b\"",
+            "--label=\"dit \"\"x\"\"\"",
+        ])
+    );
+    let too_many: Vec<String> = (0..21).map(|i| format!("l{i}")).collect();
+    for bad in [
+        json!({"root": root, "labels": too_many}),
+        json!({"root": root, "labels": "bug"}),
+        json!({"root": root, "labels": ["a\nb"]}),
+        json!({"root": root, "labels": [1]}),
+    ] {
+        assert_eq!(c.call_err("forge.issues", bad.clone()), -32602, "{bad}");
+    }
+    assert!(gh.records().iter().all(|(cwd, _)| cwd == "cwd=/"));
 }
 
 #[test]

@@ -28,8 +28,8 @@ use serde_json::Value;
 use super::git_exec::GitExec;
 use crate::domain::forge::{
     Capabilities, ForgeKind, ForgeStatus, Issue, IssueFilter, IssueRef, IssueState, Label,
-    RemoteRepo, SubIssuesSummary, clean_message, clean_text, one_line, parse_remote_url,
-    truncate_body,
+    MAX_REPO_LABELS, RemoteRepo, RepoLabel, SubIssuesSummary, clean_message, clean_text, one_line,
+    parse_remote_url, truncate_body,
 };
 use crate::ports::{Forge, ForgeError};
 
@@ -52,6 +52,21 @@ pub const GITHUB_HOST: &str = "github.com";
 /// Champs demandés à `gh issue list --json` (vérifiés avec gh 2.87.2 :
 /// `gh issue list --json` sans valeur liste les champs disponibles).
 pub const LIST_FIELDS: &str = "number,title,state,url,author,labels,assignees,updatedAt";
+
+/// Champs demandés à `gh label list --json` (vérifiés avec gh 2.87.2).
+pub const LABEL_FIELDS: &str = "name,color,description";
+
+/// Valeur d'une option « liste » de `gh` (`--label strings` : lue comme une
+/// ligne CSV par pflag) qui reste **une** valeur : entre guillemets, `"`
+/// doublés, si elle contient `,` ou `"` (un nom `a,b` ne devient pas deux
+/// étiquettes). Les contrôles (dont les fins de ligne) sont refusés en amont.
+pub fn csv_value(s: &str) -> String {
+    if s.contains([',', '"']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_owned()
+    }
+}
 
 /// Variables posées pour chaque appel.
 const FIXED_ENV: &[(&str, &str)] = &[
@@ -509,6 +524,24 @@ pub fn parse_gh_list(stdout: &[u8]) -> Result<Vec<Issue>, ForgeError> {
         .collect())
 }
 
+/// `gh label list --json name,color,description` : étiquettes nettoyées
+/// ([`RepoLabel::new`]), les illisibles écartées, au plus [`MAX_REPO_LABELS`].
+pub fn parse_gh_labels(stdout: &[u8]) -> Result<Vec<RepoLabel>, ForgeError> {
+    let v: Value = serde_json::from_slice(stdout).map_err(|_| invalid())?;
+    let items = v.as_array().ok_or_else(invalid)?;
+    Ok(items
+        .iter()
+        .filter_map(|l| {
+            RepoLabel::new(
+                l.get("name")?.as_str()?,
+                l.get("color").and_then(Value::as_str),
+                l.get("description").and_then(Value::as_str),
+            )
+        })
+        .take(MAX_REPO_LABELS)
+        .collect())
+}
+
 /// Numéro de l'issue parente d'après `parent_issue_url`
 /// (`…/repos/<propriétaire>/<dépôt>/issues/<n>`), seulement si elle est du
 /// même dépôt.
@@ -681,12 +714,17 @@ impl Forge for GithubCli {
         // Valeurs données par l'utilisateur : toujours `--option=valeur`,
         // jamais lues comme une option.
         let search = filter.search.as_ref().map(|s| format!("--search={s}"));
-        let label = filter.label.as_ref().map(|l| format!("--label={l}"));
+        // Une option par étiquette (ET logique), valeur protégée pour pflag.
+        let labels: Vec<String> = filter
+            .labels
+            .iter()
+            .map(|l| format!("--label={}", csv_value(l)))
+            .collect();
         args.extend(search.as_deref());
         if filter.assigned_to_me {
             args.push("--assignee=@me");
         }
-        args.extend(label.as_deref());
+        args.extend(labels.iter().map(String::as_str));
         let out = self.call(root, &remote.host, &args)?;
         if !out.ok {
             return Err(self.failed(root, &out));
@@ -695,6 +733,28 @@ impl Forge for GithubCli {
         let truncated = issues.len() > filter.limit;
         issues.truncate(filter.limit);
         Ok((issues, truncated))
+    }
+
+    fn labels(&self, root: &Path, remote: &RemoteRepo) -> Result<Vec<RepoLabel>, ForgeError> {
+        let repo = remote.slug();
+        let limit = format!("--limit={MAX_REPO_LABELS}");
+        let out = self.call(
+            root,
+            &remote.host,
+            &[
+                "label",
+                "list",
+                "--repo",
+                &repo,
+                "--json",
+                LABEL_FIELDS,
+                &limit,
+            ],
+        )?;
+        if !out.ok {
+            return Err(self.failed(root, &out));
+        }
+        parse_gh_labels(&out.stdout)
     }
 
     fn issue(&self, root: &Path, remote: &RemoteRepo, number: u64) -> Result<Issue, ForgeError> {
@@ -793,6 +853,7 @@ mod tests {
     const ISSUE: &[u8] = include_bytes!("../../tests/fixtures/forge/rest-issue-epic.json");
     const SUBS: &[u8] = include_bytes!("../../tests/fixtures/forge/rest-sub-issues.json");
     const AUTH: &[u8] = include_bytes!("../../tests/fixtures/forge/gh-auth-status.json");
+    const LABELS: &[u8] = include_bytes!("../../tests/fixtures/forge/gh-label-list.json");
 
     fn remote() -> RemoteRepo {
         parse_remote_url("git@github.com:BadRom1/DevMaestro.git").unwrap()
@@ -877,6 +938,45 @@ mod tests {
             Err(ForgeError::NotFound(_))
         ));
         assert!(parse_rest_issue(b"[]", &remote()).is_err());
+    }
+
+    #[test]
+    fn recorded_label_list_is_parsed() {
+        let list = parse_gh_labels(LABELS).unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(
+            list[0],
+            RepoLabel {
+                name: "accessibility".into(),
+                color: Some("f143ab".into()),
+                description: Some("Barrier affecting people with disabilities".into()),
+            }
+        );
+        // Entrées illisibles écartées, textes nettoyés, couleur douteuse retirée.
+        let odd = br#"[{"name":"","color":"fff"},{"color":"000000"},
+            {"name":"a\u202eb","color":"x\"><script>","description":""}]"#;
+        assert_eq!(
+            parse_gh_labels(odd).unwrap(),
+            vec![RepoLabel {
+                name: "ab".into(),
+                color: None,
+                description: None
+            }]
+        );
+        assert!(matches!(parse_gh_labels(b"{}"), Err(ForgeError::Failed(_))));
+        let many: Vec<Value> = (0..MAX_REPO_LABELS + 5)
+            .map(|i| serde_json::json!({"name": format!("l{i}")}))
+            .collect();
+        let many = serde_json::to_vec(&many).unwrap();
+        assert_eq!(parse_gh_labels(&many).unwrap().len(), MAX_REPO_LABELS);
+    }
+
+    #[test]
+    fn list_values_stay_one_value() {
+        assert_eq!(csv_value("bug"), "bug");
+        assert_eq!(csv_value("help wanted"), "help wanted");
+        assert_eq!(csv_value("a,b"), "\"a,b\"");
+        assert_eq!(csv_value("dit \"x\""), "\"dit \"\"x\"\"\"");
     }
 
     #[test]

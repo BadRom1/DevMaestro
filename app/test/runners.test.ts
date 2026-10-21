@@ -185,7 +185,8 @@ describe('regroupement et libellés', () => {
 
   it('texte de confirmation ; commande à faire accepter lue du refus du processus principal', () => {
     const c = { worktree: '/w/a', runner_id: 'dev', label: 'dev', command: ['pnpm', 'run', 'dev'], cwd: '', source: 'package.json:dev', body: 'vite', fingerprint: 'c'.repeat(64) }
-    expect(readConfirmation(c)).toEqual(c)
+    // Démon d'avant les fichiers de l'empreinte : extrait non coupé, liste des fichiers inconnue.
+    expect(readConfirmation(c)).toEqual({ ...c, body_truncated: false, files: null })
     expect(readConfirmation({ ...c, body: 3 })?.body).toBeNull()
     expect(readConfirmation({ ...c, fingerprint: 'court' })).toBeNull()
     expect(readConfirmation({ ...c, command: [] })).toBeNull()
@@ -343,7 +344,31 @@ describe('confirmation tenue par le processus principal (runners.start)', () => 
       cwd: '',
       source: 'package.json:dev',
       body: 'vite --port $PORT',
+      body_truncated: false,
+      files: null,
       fingerprint: FP,
+    })
+  })
+
+  it('fichiers de l’empreinte et extrait coupé transmis au dialogue (textes nettoyés, états inconnus = non résolu)', async () => {
+    const files = [
+      { path: 'package.json', size: 812, state: 'ok', note: null },
+      { path: 'scripts/dev.sh', size: 9_000_000, state: 'too_large', note: 'au-delà de 1 Mio' },
+      { path: '../hors.sh', size: null, state: 'outside', note: 'lien\u001b[2J hors du worktree' },
+      { path: 'x', state: 'bizarre' },
+      { path: '' },
+      'pas un objet',
+    ]
+    const { d } = deps({ runners: [{ ...runner, body_truncated: true, files }] })
+    const err = (await checkStart(d, S, runner.id).catch((e: unknown) => e)) as RpcError
+    expect(err.data).toMatchObject({
+      body_truncated: true,
+      files: [
+        { path: 'package.json', size: 812, state: 'ok', note: null },
+        { path: 'scripts/dev.sh', size: 9_000_000, state: 'too_large', note: 'au-delà de 1 Mio' },
+        { path: '../hors.sh', size: null, state: 'outside', note: 'lien[2J hors du worktree' },
+        { path: 'x', size: null, state: 'unresolved', note: null },
+      ],
     })
   })
 

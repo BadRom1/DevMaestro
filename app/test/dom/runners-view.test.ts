@@ -36,7 +36,10 @@ const FP = 'd'.repeat(64)
 let accepted: Set<string>
 /** Empreinte actuelle de la détection (change si le dépôt change). */
 let currentFp: string
+/** Champs ajoutés au refus (fichiers de l'empreinte, extrait coupé), par test. */
+let confExtra: Record<string, unknown> = {}
 const confirmation = (fingerprint: string) => ({
+  ...confExtra,
   worktree: '/w/alpha',
   runner_id: 'package.json:dev',
   label: 'dev',
@@ -105,13 +108,14 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  confExtra = {}
   act(() => root?.unmount())
   root = null
   host?.remove()
   host = null
 })
 
-async function render(opts: { onLink?: (u: string) => void; onUnsupported?: () => void } = {}) {
+async function render(opts: { onLink?: (u: string) => void; onUnsupported?: () => void; onOpenFile?: (p: string) => void } = {}) {
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -121,6 +125,7 @@ async function render(opts: { onLink?: (u: string) => void; onUnsupported?: () =
     onLink: opts.onLink ?? (() => undefined),
     onRunning: () => undefined,
     onUnsupported: opts.onUnsupported ?? (() => undefined),
+    onOpenFile: opts.onOpenFile,
   })
   await act(async () => {
     root!.render(createElement(SettingsProvider, { initial: defaultSettings(), children: view }))
@@ -159,6 +164,45 @@ describe('onglet « Lancer »', () => {
     // Seconde fois : déjà acceptée, plus de dialogue.
     await act(async () => buttons('Lancer')[0]!.click())
     expect(document.querySelector('[role="dialog"]')).toBeNull()
+  })
+
+  it('fichiers de l’empreinte : état en texte, « Voir » vers l’onglet Fichiers, avertissement, extrait coupé signalé', async () => {
+    confExtra = {
+      body_truncated: true,
+      files: [
+        { path: 'package.json', size: 812, state: 'ok', note: null },
+        { path: 'scripts/dev.sh', size: 2_000_000, state: 'too_large', note: null },
+        { path: '../hors.sh', size: null, state: 'outside', note: null },
+        { path: 'Makefile', size: null, state: 'absent', note: null },
+      ],
+    }
+    const onOpenFile = vi.fn()
+    await render({ onOpenFile })
+    await act(async () => buttons('Lancer')[0]!.click())
+    const dlg = document.querySelector('[role="dialog"]')!
+    expect(dlg.textContent).toContain('Extrait coupé : la suite n’est pas montrée')
+    expect(dlg.textContent).toContain('Tous ces fichiers sont pris en compte : toute modification redemandera ta confirmation.')
+    const rows = [...dlg.querySelectorAll('.rn-file')].map((li) => li.textContent)
+    expect(rows[0]).toContain('package.json')
+    expect(rows[0]).toContain('lu en entier')
+    expect(rows[1]).toContain('trop gros')
+    expect(rows[2]).toContain('hors du worktree')
+    expect(rows[3]).toContain('absent')
+    expect(dlg.querySelector('[role="alert"].forge-warn')?.textContent).toContain('2 fichiers n’ont pas pu être lus en entier')
+    // « Voir » : seulement pour un chemin du worktree lisible ; ferme le dialogue et ouvre l'onglet Fichiers.
+    const voir = [...dlg.querySelectorAll('button')].filter((b) => b.textContent === 'Voir')
+    expect(voir.map((b) => b.getAttribute('aria-label'))).toEqual(['Voir package.json dans l’onglet Fichiers', 'Voir scripts/dev.sh dans l’onglet Fichiers'])
+    act(() => voir[0]!.click())
+    expect(onOpenFile).toHaveBeenCalledWith('package.json')
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+  })
+
+  it('démon sans `files` : pas de liste ni d’avertissement', async () => {
+    await render()
+    await act(async () => buttons('Lancer')[0]!.click())
+    const dlg = document.querySelector('[role="dialog"]')!
+    expect(dlg.querySelector('.rn-files')).toBeNull()
+    expect(dlg.textContent).not.toContain('Extrait coupé')
   })
 
   it('commande changée entre l’affichage et « Lancer » : remontrée, rien n’est lancé', async () => {

@@ -13,7 +13,9 @@ import {
   WORKTREE_LOCATIONS,
   branchFromName,
   branchNameProblem,
+  branchTakenError,
   commonDirHash8,
+  nextFreeBranch,
   worktreePath,
   type WorktreeLocation,
 } from '../../../shared/worktrees'
@@ -143,6 +145,8 @@ export function NewSessionDialog({
   // Branche d'une issue : `<préfixe><n>-<slug>`, gardée telle quelle (pas recalculée depuis le nom).
   const [branch, setBranch] = useState(prefill?.branch ?? '')
   const [branchTouched, setBranchTouched] = useState(!!prefill?.branch)
+  /** Branches refusées au lancement (déjà extraites ailleurs, dossier existant) : jamais reproposées. */
+  const [refused, setRefused] = useState<ReadonlySet<string>>(() => new Set())
   /** Base choisie (`null` : branche de référence du dépôt). */
   const [base, setBase] = useState<string | null>(null)
   /** Emplacement choisi ici (`null` : réglage du projet). */
@@ -175,10 +179,26 @@ export function NewSessionDialog({
       (base !== null && base.trim() !== '' ? branchNameProblem(base.trim()) && `base : ${branchNameProblem(base.trim())}` : null) ??
       (effLocation === 'custom' && !customParent ? 'choisis le dossier où créer le worktree' : null) ??
       (wtPath && wtList?.worktrees.some((w) => w.path === wtPath) ? `le dossier existe déjà : ${tildify(wtPath, home)}` : null) ??
+      (refused.has(effBranch.trim()) ? `la branche ${effBranch.trim()} est déjà prise (refusée au lancement)` : null) ??
       ((() => {
         const other = wtList?.worktrees.find((w) => w.branch === effBranch.trim())
         return other ? `la branche ${effBranch.trim()} est déjà extraite dans ${tildify(other.path, home)}` : null
       })())
+
+  /** Branche déjà prise : refusée au lancement, extraite dans un worktree, ou dont le dossier existe. */
+  function branchTaken(b: string, refusedNow: ReadonlySet<string> = refused): boolean {
+    if (refusedNow.has(b) || wtList?.worktrees.some((w) => w.branch === b)) return true
+    if (!repoRoot) return false
+    const p = worktreePath({ location: effLocation, root: repoRoot, branch: b, managedDir, commonDirHash: commonDir ? commonDirHash8(commonDir) : null, customParent })
+    return !!p && !!wtList?.worktrees.some((w) => w.path === p)
+  }
+  // Branche prise : la même avec un suffixe, proposée (« Utiliser … »).
+  const freeBranch = wtOn && effBranch.trim() && branchTaken(effBranch.trim()) ? nextFreeBranch(effBranch.trim(), (b) => branchTaken(b)) : null
+  function applyBranch(b: string) {
+    setBranch(b)
+    setBranchTouched(true)
+    setError(null)
+  }
 
   // Dépôt git choisi : ses worktrees (support du démon, branche de référence).
   useEffect(() => {
@@ -346,6 +366,22 @@ export function NewSessionDialog({
       }
     } catch (e) {
       const uncertain = outcomeUncertain(errorCode(e))
+      const taken = effBranch.trim()
+      if (tab === 'prompt' && wtOn && !uncertain && branchTakenError(errorText(e))) {
+        // Branche déjà extraite ailleurs (ou dossier existant) : la même avec un suffixe, proposée d'office.
+        const nextRefused = new Set(refused).add(taken)
+        setRefused(nextRefused)
+        const free = nextFreeBranch(taken, (b) => branchTaken(b, nextRefused))
+        if (free) applyBranch(free)
+        setError(
+          free
+            ? `La branche « ${taken} » est déjà utilisée (extraite dans un autre worktree, ou son dossier existe) : je propose « ${free} », modifiable ci-dessus. Relance pour l’utiliser ; aucune session n’a été lancée.`
+            : `La branche « ${taken} » est déjà utilisée : choisis un autre nom. Aucune session n’a été lancée.`,
+        )
+        if (repoRoot) loadWorktrees(repoRoot)
+        setBusy(false)
+        return
+      }
       setError(
         tab === 'prompt' && wtOn
           ? uncertain
@@ -628,6 +664,14 @@ export function NewSessionDialog({
                     {wtProblem && (
                       <p className="inline-err" role="alert">
                         {wtProblem}
+                        {freeBranch && (
+                          <>
+                            {' '}
+                            <button type="button" className="btn sm" onClick={() => applyBranch(freeBranch)}>
+                              Utiliser « {freeBranch} »
+                            </button>
+                          </>
+                        )}
                       </p>
                     )}
                   </>

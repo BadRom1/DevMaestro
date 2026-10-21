@@ -74,6 +74,26 @@ export function branchNameProblem(name: string): string | null {
   return null
 }
 
+/**
+ * Branche libre proposée quand `branch` est déjà prise (extraite dans un
+ * autre worktree, dossier existant) : la même avec un suffixe `-2`, `-3`…,
+ * valide et non prise ; `null` au-delà de `-99`.
+ */
+export function nextFreeBranch(branch: string, taken: (b: string) => boolean): string | null {
+  const b = branch.trim().replace(/[-/.]+$/, '')
+  if (!b) return null
+  for (let n = 2; n < 100; n++) {
+    const c = `${b}-${n}`
+    if (!branchNameProblem(c) && !taken(c)) return c
+  }
+  return null
+}
+
+/** Refus du lancement parce que la branche ou son dossier est déjà pris (message du démon ou de git). */
+export function branchTakenError(message: string): boolean {
+  return /est déjà extraite|le dossier existe déjà|already exists|already checked out|is already used by worktree/i.test(message)
+}
+
 /** Préfixe de branche (réglage) : vide, ou un début de nom de branche valide (« romain/ », « feat- »). */
 export function branchPrefixProblem(prefix: string): string | null {
   if (prefix === '') return null

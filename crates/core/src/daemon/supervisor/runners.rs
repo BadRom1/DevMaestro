@@ -38,7 +38,8 @@ use crate::daemon::peer::{self, SupervisedProc};
 use crate::daemon::terminal::Terminal;
 use crate::domain::files::EntryKind;
 use crate::domain::runners::{
-    self, MAX_LIVE_PER_SESSION, MAX_SOURCE_BYTES, RepoView, Runner, RunnerKind, UrlScanner,
+    self, Loaded, MAX_HASH_BYTES, MAX_LIVE_PER_SESSION, MAX_SOURCE_BYTES, RepoView, Runner,
+    RunnerKind, UrlScanner,
 };
 use crate::ports::{ExitStatus, FileAccess, PtyControl, TermSize};
 use crate::protocol::error_code;
@@ -98,6 +99,25 @@ impl RepoView for FsView<'_> {
     }
     fn files(&self, rel: &str) -> Vec<String> {
         self.entries(rel, EntryKind::File)
+    }
+    fn hash_large(&self, rel: &str) -> Option<(u64, Option<String>)> {
+        self.files
+            .hash_beneath(self.root, rel, runners::MAX_STREAM_HASH_BYTES)
+            .ok()
+    }
+    fn load(&self, rel: &str) -> Loaded {
+        use crate::ports::FileError;
+        match self.files.read_beneath(self.root, rel, MAX_HASH_BYTES) {
+            Ok(f) => match f.bytes {
+                Some(b) => Loaded::Bytes(b),
+                None => Loaded::TooLarge(f.size),
+            },
+            Err(FileError::NotFound) => Loaded::Absent(None),
+            Err(FileError::Outside(_)) => Loaded::Outside,
+            Err(FileError::NotRegular) => Loaded::Absent(Some("pas un fichier ordinaire".into())),
+            Err(FileError::Denied) => Loaded::Absent(Some("lecture refusée".into())),
+            Err(_) => Loaded::Absent(Some("illisible".into())),
+        }
     }
 }
 
@@ -897,6 +917,12 @@ pub fn runner_json(r: &Runner) -> Value {
         "command": r.command,
         "cwd": r.cwd,
         "source": r.source,
+        "files": r.files.iter().map(|f| json!({
+            "path": f.path,
+            "size": f.size,
+            "state": f.state.as_str(),
+            "note": f.note,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -927,7 +953,7 @@ mod tests {
         write(
             &root,
             "Makefile",
-            "include piege.mk\n-include $(DEPS)\nall: build\nbuild:\n\tcc\n%.o: %.c\n-f:\nVAR=a:b\n",
+            "include piege.mk lien.mk\n-include $(DEPS)\nall: build\nbuild:\n\tcc\n%.o: %.c\n-f:\nVAR=a:b\n",
         );
         write(&root, "piege.mk", "cachee:\n\trm -rf /\n");
         write(
@@ -939,6 +965,7 @@ mod tests {
         write(&outside, "go.mod", "module x\n");
         std::os::unix::fs::symlink(&outside, root.join("lien")).unwrap();
         std::os::unix::fs::symlink(outside.join("go.mod"), root.join("go.mod")).unwrap();
+        std::os::unix::fs::symlink(outside.join("go.mod"), root.join("lien.mk")).unwrap();
         let root = root.canonicalize().unwrap();
         let view = FsView {
             files: &FsFiles,
@@ -956,5 +983,49 @@ mod tests {
             ],
         );
         assert_eq!(found[0].command, ["yarn", "run", "dev"]);
+        // Fichiers pris en compte, lus à travers l'adaptateur.
+        let files: Vec<(&str, &str, Option<u64>)> = found[1]
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.state.as_str(), f.size))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("GNUmakefile", "absent", None),
+                ("makefile", "absent", None),
+                ("Makefile", "ok", Some(85)),
+                ("piege.mk", "ok", Some(18)),
+                ("lien.mk", "outside", None),
+                ("$(DEPS)", "unresolved", None),
+            ]
+        );
+        let json = runner_json(&found[1]);
+        assert_eq!(
+            json["files"][2],
+            json!({"path": "Makefile", "size": 85, "state": "ok", "note": "source"})
+        );
+        assert!(
+            json["body"]
+                .as_str()
+                .unwrap()
+                .starts_with("Fichiers pris en compte")
+        );
+        // Fichier de plus de 16 Mio : haché par blocs à travers l'adaptateur ;
+        // modifié à taille égale, l'empreinte change.
+        let big = vec![b'#'; runners::MAX_HASH_BYTES as usize + 4096];
+        std::fs::write(root.join("compose.yaml"), &big).unwrap();
+        let fp = || {
+            let found = runners::detect(&view);
+            let r = found.iter().find(|r| r.id == "compose.yaml:up").unwrap();
+            assert_eq!(r.files[0].state.as_str(), "too_large");
+            assert_eq!(r.files[0].size, Some(big.len() as u64));
+            r.fingerprint()
+        };
+        let before = fp();
+        let mut changed = big.clone();
+        changed[10] = b'x';
+        std::fs::write(root.join("compose.yaml"), &changed).unwrap();
+        assert_ne!(before, fp());
     }
 }

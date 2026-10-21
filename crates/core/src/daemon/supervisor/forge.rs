@@ -1,10 +1,11 @@
 //! Forge (v0.3, lot 13a, ADR 0006) : `forge.status`, `forge.issues`,
-//! `forge.issue`, et le lien session ↔ issue de `sessions.launch` ;
+//! `forge.issue`, `forge.labels` (lot 15), et le lien session ↔ issue de `sessions.launch` ;
 //! demandes de fusion, CI et revue (lot 13b) : [`pulls`].
 //!
 //! Les appels à la forge passent par le port [`crate::ports::Forge`], hors
 //! du runtime et jamais sous le verrou du registre. Les réponses sont
-//! gardées en mémoire 60 s (30 s pour les demandes de fusion) par dépôt et par requête (rafraîchissement forcé
+//! gardées en mémoire 60 s (30 s pour les demandes de fusion, 5 min pour
+//! les étiquettes du dépôt) par dépôt et par requête (rafraîchissement forcé
 //! par `refresh: true`) ; rien n'est écrit en base ni au journal.
 
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use serde_json::{Value, json};
 use super::{Daemon, RpcError, opt_str};
 use crate::domain::forge::{
     Capabilities, ForgeStatus, Issue, IssueFilter, IssueRef, MAX_ISSUES_LIMIT, MAX_LABEL_CHARS,
-    MAX_SEARCH_CHARS, RemoteRepo, SessionIssue, StateFilter,
+    MAX_LABEL_FILTERS, MAX_SEARCH_CHARS, RemoteRepo, RepoLabel, SessionIssue, StateFilter,
 };
 use crate::ports::ForgeError;
 use crate::protocol::error_code;
@@ -100,6 +101,8 @@ pub(super) fn initial_param(params: &Value) -> Result<Option<InitialPrompt>, Rpc
 
 /// Durée de vie d'une réponse de la forge gardée en mémoire (état, issues).
 pub const FORGE_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Durée de vie des étiquettes du dépôt (`forge.labels`, lot 15).
+pub const LABELS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 /// Durée de vie des états des demandes de fusion et de leur CI (lot 13b).
 pub const PULL_CACHE_TTL: Duration = Duration::from_secs(30);
 /// Durée de vie du diff d'une demande de fusion, gardé par tête (`head.sha`) :
@@ -116,7 +119,7 @@ pub const DISABLED_REASON: &str = "désactivé dans les réglages";
 pub(super) type PullDiff = std::collections::HashMap<String, crate::domain::diff::FileDiff>;
 
 /// Réponses récentes de la forge, par clé (tableaux JSON `["status", …]`,
-/// `["issues", …]`, `["issue", …]`, `["pulls", …]`, `["pull", …]`,
+/// `["issues", …]`, `["issue", …]`, `["labels", …]`, `["pulls", …]`, `["pull", …]`,
 /// `["pull_for_branch", …]`), chacune avec sa durée de vie ; diffs des
 /// demandes de fusion à part (`["pull_diff", dépôt, numéro, tête]`).
 #[derive(Debug, Default)]
@@ -246,6 +249,11 @@ fn text_param(params: &Value, key: &str, max: usize) -> Result<Option<String>, R
     let Some(s) = opt_str(params, key)? else {
         return Ok(None);
     };
+    text_value(&s, key, max)
+}
+
+/// Règles de [`text_param`] sur une valeur déjà lue (`key` : pour le message).
+fn text_value(s: &str, key: &str, max: usize) -> Result<Option<String>, RpcError> {
     let s = s.trim();
     if s.is_empty() {
         return Ok(None);
@@ -261,6 +269,43 @@ fn text_param(params: &Value, key: &str, max: usize) -> Result<Option<String>, R
         )));
     }
     Ok(Some(s.to_owned()))
+}
+
+/// Étiquettes exigées : `label` (un nom) puis `labels` (tableau de noms,
+/// [`MAX_LABEL_FILTERS`] au plus), chaque nom validé comme `label` (vide :
+/// ignoré) ; doublons retirés, ordre gardé.
+fn labels_param(params: &Value) -> Result<Vec<String>, RpcError> {
+    let mut labels: Vec<String> = Vec::new();
+    let mut add = |l: Option<String>| {
+        if let Some(l) = l
+            && !labels.contains(&l)
+        {
+            labels.push(l);
+        }
+    };
+    add(text_param(params, "label", MAX_LABEL_CHARS)?);
+    match params.get("labels") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(a)) if a.len() <= MAX_LABEL_FILTERS => {
+            for v in a {
+                let s = v.as_str().ok_or_else(|| {
+                    RpcError::params("« labels » doit être un tableau de noms (textes)")
+                })?;
+                add(text_value(s, "labels", MAX_LABEL_CHARS)?);
+            }
+        }
+        Some(Value::Array(_)) => {
+            return Err(RpcError::params(format!(
+                "« labels » : {MAX_LABEL_FILTERS} étiquettes au plus"
+            )));
+        }
+        Some(_) => {
+            return Err(RpcError::params(
+                "« labels » doit être un tableau de noms (textes)",
+            ));
+        }
+    }
+    Ok(labels)
 }
 
 fn filter_param(params: &Value) -> Result<IssueFilter, RpcError> {
@@ -295,7 +340,7 @@ fn filter_param(params: &Value) -> Result<IssueFilter, RpcError> {
         state,
         search: text_param(params, "search", MAX_SEARCH_CHARS)?,
         assigned_to_me,
-        label: text_param(params, "label", MAX_LABEL_CHARS)?,
+        labels: labels_param(params)?,
         limit,
     })
 }
@@ -337,6 +382,10 @@ fn status_json(s: &ForgeStatus, caps: &Capabilities) -> Value {
         "reason": s.reason,
         "capabilities": if s.kind.is_some() { capabilities_json(caps) } else { Value::Null },
     })
+}
+
+fn repo_label_json(l: &RepoLabel) -> Value {
+    json!({"name": l.name, "color": l.color, "description": l.description})
 }
 
 fn issue_ref_json(r: &IssueRef) -> Value {
@@ -523,7 +572,7 @@ impl Daemon {
         Ok(status_json(&status, &self.deps.forge.capabilities()))
     }
 
-    /// `forge.issues {root, enabled?, refresh?, state?, search?, assignee?, label?, limit?}`.
+    /// `forge.issues {root, enabled?, refresh?, state?, search?, assignee?, label?, labels?, limit?}`.
     pub fn forge_issues(&self, params: &Value) -> Result<Value, RpcError> {
         let root = root_param(params)?;
         let refresh = bool_param(params, "refresh", false)?;
@@ -535,7 +584,7 @@ impl Daemon {
             filter.state.as_str(),
             filter.search,
             filter.assigned_to_me,
-            filter.label,
+            filter.labels,
             filter.limit,
         ]));
         self.forge_cached(key, refresh, || {
@@ -544,6 +593,19 @@ impl Daemon {
                 "issues": issues.iter().map(|i| issue_json(i, false)).collect::<Vec<_>>(),
                 "truncated": truncated,
             }))
+        })
+    }
+
+    /// `forge.labels {root, enabled?, refresh?}` : étiquettes du dépôt,
+    /// gardées [`LABELS_CACHE_TTL`].
+    pub fn forge_labels(&self, params: &Value) -> Result<Value, RpcError> {
+        let root = root_param(params)?;
+        let refresh = bool_param(params, "refresh", false)?;
+        let remote = self.forge_remote(&root, params, refresh)?;
+        let key = cache_key(&json!(["labels", remote.slug()]));
+        self.forge_cached_for(key, refresh, LABELS_CACHE_TTL, || {
+            let labels = self.deps.forge.labels(&root, &remote)?;
+            Ok(json!({"labels": labels.iter().map(repo_label_json).collect::<Vec<_>>()}))
         })
     }
 
@@ -592,10 +654,29 @@ mod tests {
 
     #[test]
     fn cache_keys_are_unambiguous() {
-        let a = cache_key(&json!(["issues", "h/o/r", "open", "a|b", false, null, 50]));
-        let b = cache_key(&json!(["issues", "h/o/r", "open", "a", false, "b", 50]));
-        let c = cache_key(&json!(["issues", "h/o/r", "open", null, false, null, 50]));
-        let d = cache_key(&json!(["issues", "h/o/r", "open", "", false, null, 50]));
+        let a = cache_key(&json!(["issues", "h/o/r", "open", "a|b", false, [], 50]));
+        let b = cache_key(&json!(["issues", "h/o/r", "open", "a", false, ["b"], 50]));
+        let c = cache_key(&json!(["issues", "h/o/r", "open", null, false, [], 50]));
+        let d = cache_key(&json!(["issues", "h/o/r", "open", "", false, [], 50]));
+        let e = cache_key(&json!([
+            "issues",
+            "h/o/r",
+            "open",
+            null,
+            false,
+            ["a,b"],
+            50
+        ]));
+        let f = cache_key(&json!([
+            "issues",
+            "h/o/r",
+            "open",
+            null,
+            false,
+            ["a", "b"],
+            50
+        ]));
+        assert_ne!(e, f);
         assert_ne!(a, b);
         assert_ne!(c, d);
         assert!(is_status_key(&cache_key(&json!([STATUS_KEY, "/p"]))));
@@ -613,10 +694,24 @@ mod tests {
         assert_eq!(f.state, StateFilter::All);
         assert_eq!(f.search.as_deref(), Some("relais"));
         assert!(f.assigned_to_me);
-        assert_eq!(f.label.as_deref(), Some("bug"));
+        assert_eq!(f.labels, vec!["bug".to_owned()]);
         assert_eq!(f.limit, 200);
-        let f = filter_param(&json!({"search": " ", "assignee": null, "label": ""})).unwrap();
-        assert_eq!((f.search, f.assigned_to_me, f.label), (None, false, None));
+        let f =
+            filter_param(&json!({"search": " ", "assignee": null, "label": "", "labels": null}))
+                .unwrap();
+        assert_eq!(
+            (f.search, f.assigned_to_me, f.labels),
+            (None, false, vec![])
+        );
+        // `label` puis `labels`, doublons et vides retirés, ordre gardé.
+        let f = filter_param(&json!({
+            "label": "bug", "labels": [" a,b ", "bug", "", "help wanted", "a,b"]
+        }))
+        .unwrap();
+        assert_eq!(f.labels, vec!["bug", "a,b", "help wanted"]);
+        let twenty: Vec<String> = (0..MAX_LABEL_FILTERS).map(|i| format!("l{i}")).collect();
+        let f = filter_param(&json!({"label": "x", "labels": twenty})).unwrap();
+        assert_eq!(f.labels.len(), MAX_LABEL_FILTERS + 1);
         for bad in [
             json!({"state": "merged"}),
             json!({"assignee": "octocat"}),
@@ -626,6 +721,12 @@ mod tests {
             json!({"search": "a\nb"}),
             json!({"search": "x".repeat(MAX_SEARCH_CHARS + 1)}),
             json!({"label": 3}),
+            json!({"labels": "bug"}),
+            json!({"labels": [3]}),
+            json!({"labels": [null]}),
+            json!({"labels": ["a\nb"]}),
+            json!({"labels": ["x".repeat(MAX_LABEL_CHARS + 1)]}),
+            json!({"labels": vec!["l"; MAX_LABEL_FILTERS + 1]}),
         ] {
             let e = filter_param(&bad).unwrap_err();
             assert_eq!(e.code, error_code::INVALID_PARAMS, "{bad}");

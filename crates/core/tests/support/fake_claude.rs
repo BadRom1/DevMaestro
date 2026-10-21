@@ -42,6 +42,12 @@
 //! - `/exit` (après un `SessionEnd`), `/crash` (code 3, sans `SessionEnd`),
 //!   `/tetu` (ignore `SIGHUP`).
 //!
+//! `--resume <id>` : comme Claude Code 2.1.306, la conversation n'est
+//! cherchée que dans le dossier de projet du dossier courant
+//! (`<config>/projects/<cwd encodé>/<id>.jsonl`) ; absente, il affiche « No
+//! conversation found with session ID: <id> » et sort avec le code 1, sans
+//! aucun hook.
+//!
 //! Chaque tour ordinaire écrit aussi son prompt, son appel `Bash` et son
 //! résultat, puis « Fait. » dans le transcript, et les hooks portent le vrai
 //! `transcript_path` (`<config>/projects/<cwd encodé>/<session_id>.jsonl`).
@@ -322,11 +328,7 @@ impl Fake {
         let config = std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))?;
-        let encoded: String = self
-            .cwd
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
+        let encoded = devmaestro_core::domain::transcript::project_dir_name(Path::new(&self.cwd));
         Some(config.join("projects").join(encoded))
     }
 
@@ -1339,6 +1341,21 @@ fn main() {
         None | Some("manual") => "default".to_owned(),
         Some(m) => m.to_owned(),
     };
+    if let Some(id) = &args.resume {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))
+            .unwrap_or_default();
+        let transcript = config
+            .join("projects")
+            .join(devmaestro_core::domain::transcript::project_dir_name(&cwd))
+            .join(format!("{id}.jsonl"));
+        if !transcript.is_file() {
+            eprintln!("No conversation found with session ID: {id}");
+            std::process::exit(1);
+        }
+    }
     let fake = Fake {
         cwd: std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())

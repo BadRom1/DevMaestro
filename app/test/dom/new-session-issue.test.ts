@@ -30,6 +30,8 @@ const PREFILL: IssuePrefill = {
 }
 
 const calls: { method: string; params: Record<string, unknown> }[] = []
+/** Branches que le démon refuse (déjà extraites dans un autre worktree). */
+let takenBranches = new Set<string>()
 
 type Mod = typeof import('../../src/renderer/src/components/NewSessionDialog')
 type Provider = typeof import('../../src/renderer/src/settings')['SettingsProvider']
@@ -40,6 +42,10 @@ beforeAll(async () => {
   ;(window as unknown as { devmaestro: object }).devmaestro = {
     call: async (method: string, params: Record<string, unknown>) => {
       calls.push({ method, params })
+      const wtBranch = (params.worktree as { branch?: string } | undefined)?.branch
+      if (method === 'sessions.launch' && wtBranch && takenBranches.has(wtBranch)) {
+        return { ok: false, error: { code: -32602, message: `la branche « ${wtBranch} » est déjà extraite dans /w/ailleurs` } }
+      }
       if (method === 'sessions.launch') return { ok: true, result: { session: { ...S, id: '00000000-0000-4000-8000-0000000000ff' }, worktree: { path: '/w/projet--x', branch: 'x', base: null } } }
       if (method === 'sessions.update') return { ok: true, result: { session: S } }
       return { ok: false, error: { code: -32601, message: 'inconnue' } }
@@ -53,6 +59,7 @@ let root: Root | null = null
 let host: HTMLElement | null = null
 beforeEach(() => {
   calls.length = 0
+  takenBranches = new Set()
 })
 afterEach(() => {
   act(() => root?.unmount())
@@ -150,5 +157,21 @@ describe('« Nouvelle session » depuis une issue', () => {
     await render(vi.fn(), open)
     act(() => ([...document.querySelectorAll('button')].find((b) => b.textContent === 'Depuis une issue…') as HTMLButtonElement).click())
     expect(open).toHaveBeenCalledWith({ root: ROOT, name: 'projet', key: `git:${ROOT}/.git` })
+  })
+
+  it('branche déjà extraite ailleurs : la même avec « -2 » proposée d’office, message clair, puis lancement', async () => {
+    takenBranches = new Set(['romain/42-corriger-l-export'])
+    const onLaunched = vi.fn()
+    await render(onLaunched)
+    await act(async () => (document.querySelector('form') as HTMLFormElement).requestSubmit())
+    expect(onLaunched).not.toHaveBeenCalled()
+    expect(field('Branche').value).toBe('romain/42-corriger-l-export-2')
+    const text = document.querySelector('[role="dialog"]')!.textContent!
+    expect(text).toContain('La branche « romain/42-corriger-l-export » est déjà utilisée')
+    expect(text).toContain('je propose « romain/42-corriger-l-export-2 »')
+    expect(text).not.toContain('Worktree ou lancement impossible')
+    await act(async () => (document.querySelector('form') as HTMLFormElement).requestSubmit())
+    expect(calls.filter((c) => c.method === 'sessions.launch').at(-1)!.params).toMatchObject({ worktree: { branch: 'romain/42-corriger-l-export-2' } })
+    expect(onLaunched).toHaveBeenCalledTimes(1)
   })
 })

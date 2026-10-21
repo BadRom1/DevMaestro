@@ -8,6 +8,7 @@ import type { RunnerConfirmation } from '../../../shared/bridge'
 import type { Runner, RunnerKind, Session } from '../../../shared/protocol'
 import { RUNNER_KINDS } from '../../../shared/protocol'
 import { previewUrl } from '../../../shared/preview'
+import { readRunnerFiles } from '../../../shared/runnerFiles'
 
 /** Exécution d'un runner, normalisée (identifiant unique `processId`). */
 export interface RunnerProc {
@@ -84,6 +85,7 @@ export function normalizeRunner(raw: unknown): Runner | null {
   if (!isObj(raw)) return null
   if (typeof raw.id !== 'string' || raw.id === '') return null
   if (!Array.isArray(raw.command) || raw.command.length === 0 || !raw.command.every((a) => typeof a === 'string')) return null
+  const files = readRunnerFiles(raw.files)
   return {
     id: raw.id,
     label: typeof raw.label === 'string' && raw.label.trim() !== '' ? raw.label : raw.id,
@@ -92,6 +94,8 @@ export function normalizeRunner(raw: unknown): Runner | null {
     cwd: typeof raw.cwd === 'string' ? raw.cwd : '',
     source: typeof raw.source === 'string' ? raw.source : '',
     body: typeof raw.body === 'string' ? raw.body.slice(0, MAX_BODY) : null,
+    ...(raw.body_truncated === true ? { body_truncated: true } : {}),
+    ...(files ? { files } : {}),
     ...(typeof raw.fingerprint === 'string' && FINGERPRINT_RE.test(raw.fingerprint) ? { fingerprint: raw.fingerprint } : {}),
   }
 }
@@ -198,7 +202,7 @@ export function previewable(urls: readonly string[], pageOrigin: string | null):
  */
 export function readConfirmation(raw: unknown): RunnerConfirmation | null {
   if (!isObj(raw)) return null
-  const { worktree, runner_id, label, command, cwd, source, body, fingerprint } = raw
+  const { worktree, runner_id, label, command, cwd, source, body, body_truncated, files, fingerprint } = raw
   if (typeof worktree !== 'string' || typeof runner_id !== 'string' || typeof fingerprint !== 'string') return null
   if (!FINGERPRINT_RE.test(fingerprint)) return null
   if (!Array.isArray(command) || command.length === 0 || !command.every((a) => typeof a === 'string')) return null
@@ -210,9 +214,15 @@ export function readConfirmation(raw: unknown): RunnerConfirmation | null {
     cwd: typeof cwd === 'string' ? cwd : '',
     source: typeof source === 'string' ? source : '',
     body: typeof body === 'string' ? body.slice(0, MAX_BODY) : null,
+    // Coupé par le démon, ou ici au-delà de MAX_BODY.
+    body_truncated: body_truncated === true || (typeof body === 'string' && body.length > MAX_BODY),
+    files: readRunnerFiles(files),
     fingerprint,
   }
 }
+
+/** Fichiers de l'empreinte : la confirmation porte sur leur contenu entier. */
+export const FILES_TEXT = 'Tous ces fichiers sont pris en compte : toute modification redemandera ta confirmation.'
 
 /** Texte de la confirmation demandée avant le premier lancement dans un worktree. */
 export const CONFIRM_TEXT = 'Cette commande vient du dépôt et va s’exécuter sur ta machine.'

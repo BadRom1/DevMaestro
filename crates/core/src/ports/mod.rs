@@ -54,6 +54,11 @@ pub trait TranscriptSource {
     /// Chemin du transcript de ce `session_id`, s'il existe (recherche par
     /// nom de fichier, sans rien lire).
     fn transcript_path(&self, profile: &Profile, session_id: &str) -> Option<PathBuf>;
+
+    /// Claude Code retrouvera-t-il la conversation `session_id` en étant
+    /// lancé dans `cwd` ? Il ne la cherche que dans le dossier de projet de
+    /// `cwd` (`<config>/projects/<cwd encodé>/<session_id>.jsonl`).
+    fn found_from(&self, profile: &Profile, session_id: &str, cwd: &Path) -> bool;
 }
 
 /// Position de lecture d'un fichier suivi (lecture incrémentale par
@@ -394,6 +399,16 @@ pub trait FileAccess: Send + Sync {
     /// Lit un fichier ordinaire sous la racine (liens suivis s'ils y restent),
     /// au plus `max` octets.
     fn read_beneath(&self, root: &Path, rel: &str, max: u64) -> Result<ReadFile, FileError>;
+    /// SHA-256 du contenu d'un fichier ordinaire sous la racine (mêmes
+    /// garanties que [`FileAccess::read_beneath`]), lu par blocs sans le
+    /// garder en mémoire : `(taille, empreinte)`, l'empreinte `None` au-delà
+    /// de `max` octets.
+    fn hash_beneath(
+        &self,
+        root: &Path,
+        rel: &str,
+        max: u64,
+    ) -> Result<(u64, Option<String>), FileError>;
     /// `rel` est un vrai dossier sous la racine, sans lien sur le chemin.
     fn check_dir(&self, root: &Path, rel: &str) -> Result<(), FileError>;
     /// Genre et taille d'une entrée, sans suivre de lien ; `None` si absente.
@@ -487,6 +502,13 @@ pub trait Forge: Send + Sync {
         remote: &crate::domain::forge::RemoteRepo,
         filter: &crate::domain::forge::IssueFilter,
     ) -> Result<(Vec<crate::domain::forge::Issue>, bool), ForgeError>;
+    /// Étiquettes du dépôt (nettoyées), au plus
+    /// [`crate::domain::forge::MAX_REPO_LABELS`], dans l'ordre de la forge.
+    fn labels(
+        &self,
+        root: &Path,
+        remote: &crate::domain::forge::RemoteRepo,
+    ) -> Result<Vec<crate::domain::forge::RepoLabel>, ForgeError>;
     /// Une issue complète : corps (borné), parente, sous-issues.
     fn issue(
         &self,

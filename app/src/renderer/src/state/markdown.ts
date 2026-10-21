@@ -8,7 +8,10 @@
  * - blocs de code colorés (highlight.js, langage de l'info du bloc, sortie
  *   échappée ; langage inconnu ou document trop gros : texte échappé) ;
  * - chaque bloc porte ses lignes source (`data-source-start` / `data-source-end`,
- *   1-based, bornes comprises), tirées de `token.map`, pour commenter une sélection.
+ *   1-based, bornes comprises), tirées de `token.map`, pour commenter une sélection ;
+ * - listes de tâches (`- [ ]`, `- [x]`, `* [X]`, `1. [ ]`) : cases à cocher
+ *   désactivées, produites par une règle maison (balise fixe, jamais tirée du
+ *   texte ; le reste de l'élément reste échappé).
  */
 import MarkdownIt from 'markdown-it'
 import type { MarkdownIt as MarkdownItInstance, StateCore } from 'markdown-it'
@@ -50,6 +53,45 @@ function sourceLines(state: StateCore): void {
   }
 }
 
+/** Marqueur de tâche en tête d'un élément de liste : « [ ] », « [x] » ou « [X] », suivi d'un blanc ou de rien. */
+const TASK_MARKER = /^\[([ xX])\](?=\s|$)\s*/
+
+/**
+ * Listes de tâches : un élément dont le premier paragraphe commence par un
+ * marqueur reçoit la classe `task-item` (et sa liste `task-list`) ; le
+ * marqueur est retiré du texte et remplacé par un jeton `task_checkbox`, rendu
+ * en `<input type="checkbox" disabled>` (coché pour « x »). Le marqueur doit
+ * ouvrir le texte brut de l'élément : `[ ]` au milieu d'une phrase, dans du
+ * code ou suivi d'une lettre reste du texte.
+ */
+function taskLists(state: StateCore): void {
+  const tokens = state.tokens
+  for (let i = 0; i + 2 < tokens.length; i++) {
+    const li = tokens[i]!
+    if (li.type !== 'list_item_open') continue
+    const para = tokens[i + 1]!
+    const inline = tokens[i + 2]!
+    if (para.type !== 'paragraph_open' || inline.type !== 'inline') continue
+    const first = inline.children?.[0]
+    if (!first || first.type !== 'text') continue
+    const m = TASK_MARKER.exec(first.content)
+    if (!m) continue
+    first.content = first.content.slice(m[0].length)
+    const box = new state.Token('task_checkbox', 'input', 0)
+    box.meta = { checked: m[1] !== ' ' }
+    inline.children!.unshift(box)
+    li.attrJoin('class', 'task-item')
+    // Liste qui contient l'élément : le dernier ouvrant de niveau inférieur.
+    for (let j = i - 1; j >= 0; j--) {
+      const t = tokens[j]!
+      if ((t.type === 'bullet_list_open' || t.type === 'ordered_list_open') && t.level === li.level - 1) {
+        if (!String(t.attrGet('class') ?? '').split(' ').includes('task-list')) t.attrJoin('class', 'task-list')
+        break
+      }
+    }
+  }
+}
+
 function makeMd(highlight: boolean): MarkdownItInstance {
   const md = new MarkdownIt({
     html: false,
@@ -66,6 +108,10 @@ function makeMd(highlight: boolean): MarkdownItInstance {
     const src = String(t.attrGet('src') ?? '')
     return `<span class="img-alt" title="${escape(src)}">[image${alt ? ` : ${escape(alt)}` : ''}]</span>`
   }
+  // Balise fixe : rien du texte source n'y entre. Désactivée (lecture seule), état annoncé par le lecteur d'écran.
+  md.renderer.rules.task_checkbox = (tokens, idx) =>
+    `<input type="checkbox" class="task-cb" disabled${(tokens[idx]!.meta as { checked?: boolean } | null)?.checked ? ' checked' : ''}> `
+  md.core.ruler.push('task_lists', taskLists)
   md.core.ruler.push('source_lines', sourceLines)
   return md
 }

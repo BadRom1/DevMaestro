@@ -490,6 +490,7 @@ impl Connection {
             "forge.status"
             | "forge.issues"
             | "forge.issue"
+            | "forge.labels"
             | "forge.pulls"
             | "forge.pull"
             | "forge.pullFile"
@@ -501,6 +502,7 @@ impl Connection {
                     "forge.status" => d2.forge_status(&params),
                     "forge.issues" => d2.forge_issues(&params),
                     "forge.issue" => d2.forge_issue(&params),
+                    "forge.labels" => d2.forge_labels(&params),
                     "forge.pulls" => d2.forge_pulls(&params),
                     "forge.pull" => d2.forge_pull(&params),
                     "forge.pullFile" => d2.forge_pull_file(&params),

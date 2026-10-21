@@ -45,6 +45,7 @@ toml.workspace = true
 ureq.workspace = true
 notify.workspace = true
 ring.workspace = true
+yaml-rust2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

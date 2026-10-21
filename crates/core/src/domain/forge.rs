@@ -21,6 +21,12 @@ pub const MAX_ISSUES_LIMIT: usize = 200;
 pub const MAX_SEARCH_CHARS: usize = 256;
 /// Longueur maximale d'un nom d'étiquette demandé, en caractères.
 pub const MAX_LABEL_CHARS: usize = 100;
+/// Étiquettes demandées au plus dans `labels` (`forge.issues`).
+pub const MAX_LABEL_FILTERS: usize = 20;
+/// Étiquettes du dépôt lues au plus (`forge.labels`).
+pub const MAX_REPO_LABELS: usize = 500;
+/// Description d'étiquette gardée au plus, en caractères.
+pub const MAX_LABEL_DESCRIPTION_CHARS: usize = 500;
 /// Titre d'issue gardé avec une session, en caractères.
 pub const MAX_ISSUE_TITLE_CHARS: usize = 256;
 /// URL d'issue gardée avec une session, en octets.
@@ -212,6 +218,44 @@ pub struct Label {
     pub color: Option<String>,
 }
 
+/// Étiquette du dépôt (`forge.labels`) : nom et description ramenés à une
+/// ligne ([`one_line`]) ; couleur [`clean_color`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoLabel {
+    pub name: String,
+    pub color: Option<String>,
+    pub description: Option<String>,
+}
+
+impl RepoLabel {
+    /// Étiquette nettoyée ; `None` si le nom est vide une fois nettoyé.
+    /// Description vide : `None` ; coupée à [`MAX_LABEL_DESCRIPTION_CHARS`].
+    pub fn new(name: &str, color: Option<&str>, description: Option<&str>) -> Option<Self> {
+        let name = one_line(name);
+        if name.is_empty() {
+            return None;
+        }
+        let description = description
+            .map(one_line)
+            .filter(|d| !d.is_empty())
+            .map(|d| d.chars().take(MAX_LABEL_DESCRIPTION_CHARS).collect());
+        Some(Self {
+            name,
+            color: color.and_then(clean_color),
+            description,
+        })
+    }
+}
+
+/// Couleur d'étiquette sûre à poser telle quelle dans un style : six
+/// chiffres hexadécimaux (un `#` de tête est retiré), en minuscules ;
+/// autre chose : `None`.
+pub fn clean_color(color: &str) -> Option<String> {
+    let c = color.trim();
+    let c = c.strip_prefix('#').unwrap_or(c);
+    (c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit())).then(|| c.to_ascii_lowercase())
+}
+
 /// Sous-issue (ou issue parente) en bref.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueRef {
@@ -286,7 +330,9 @@ pub struct IssueFilter {
     pub search: Option<String>,
     /// Seulement les issues assignées à l'utilisateur connecté.
     pub assigned_to_me: bool,
-    pub label: Option<String>,
+    /// Étiquettes exigées toutes (ET logique), sans doublon, dans l'ordre
+    /// donné (`label` d'abord, puis `labels`).
+    pub labels: Vec<String>,
     /// 1 à [`MAX_ISSUES_LIMIT`].
     pub limit: usize,
 }
@@ -297,7 +343,7 @@ impl Default for IssueFilter {
             state: StateFilter::Open,
             search: None,
             assigned_to_me: false,
-            label: None,
+            labels: Vec::new(),
             limit: DEFAULT_ISSUES_LIMIT,
         }
     }
@@ -631,6 +677,31 @@ mod tests {
             clean_text("l1\r\nl2\rl3\n\tfin\u{1b}[31m\u{7}"),
             "l1\nl2\nl3\n\tfin[31m"
         );
+    }
+
+    #[test]
+    fn repo_labels_are_cleaned() {
+        let l = RepoLabel::new(
+            " bug\u{202E}\n critique ",
+            Some("#D73A4A"),
+            Some("Ne\u{200B} marche\r\npas"),
+        )
+        .unwrap();
+        assert_eq!(l.name, "bug critique");
+        assert_eq!(l.color.as_deref(), Some("d73a4a"));
+        assert_eq!(l.description.as_deref(), Some("Ne marche pas"));
+        let l = RepoLabel::new("x", Some("red;background:url(x)"), Some(" \u{FEFF} ")).unwrap();
+        assert_eq!((l.color, l.description), (None, None));
+        assert!(RepoLabel::new("\u{200B} \n", None, None).is_none());
+        let long = RepoLabel::new("x", None, Some(&"é".repeat(2000))).unwrap();
+        assert_eq!(
+            long.description.unwrap().chars().count(),
+            MAX_LABEL_DESCRIPTION_CHARS
+        );
+        for bad in ["fff", "ggg000", "1234567", "", "#"] {
+            assert_eq!(clean_color(bad), None, "{bad}");
+        }
+        assert_eq!(clean_color("0dd8ac").as_deref(), Some("0dd8ac"));
     }
 
     #[test]

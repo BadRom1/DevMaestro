@@ -9,7 +9,7 @@
  *   l'instantané d'écran, pour qu'il arrive toujours avant les octets qui le
  *   suivent.
  */
-import type { Methods, MethodName, Notification, Snapshot } from './protocol'
+import type { Methods, MethodName, Notification, RunnerFile, Snapshot } from './protocol'
 import type { AppSettings, SettingsPatch, ZoomDirection } from './settings'
 
 export type ConnectionState =
@@ -54,6 +54,10 @@ export interface RunnerConfirmation {
   source: string
   /** Contenu exécuté (texte du dépôt, non fiable), `null` si le démon n'en donne pas. */
   body: string | null
+  /** Extrait `body` coupé par le démon. */
+  body_truncated: boolean
+  /** Fichiers pris en compte par l'empreinte ; `null` : le démon ne les donne pas. */
+  files: RunnerFile[] | null
   /** Empreinte du démon (`Runner.fingerprint`) : renvoyée telle quelle par `confirmRunner`. */
   fingerprint: string
 }

@@ -205,6 +205,14 @@ export interface IssueLabel {
   color: string | null
 }
 
+/** Étiquette du dépôt (`forge.labels`, lot 15) : contenu **non fiable** (nom nettoyé, couleur validée). */
+export interface RepoLabel {
+  name: string
+  /** « d73a4a », sans « # » ; validée avant usage. */
+  color: string | null
+  description: string | null
+}
+
 export interface SubIssue {
   number: number
   title: string
@@ -360,7 +368,10 @@ export interface IssueFilter {
   state?: IssueStateFilter
   search?: string
   assignee?: '@me' | null
+  /** Une étiquette (compatibilité avec un démon d'avant le lot 15). */
   label?: string
+  /** Plusieurs étiquettes, toutes requises (lot 15). */
+  labels?: string[]
   limit?: number
 }
 
@@ -943,12 +954,29 @@ export interface Runner {
    * 4 Kio au plus ; texte du dépôt, non fiable : affiché tel quel, en code.
    */
   body?: string | null
+  /** Extrait `body` coupé (la suite n'est pas montrée). */
+  body_truncated?: boolean
+  /**
+   * Fichiers lus en entier pour l'empreinte : toute modification de l'un
+   * d'eux redemande la confirmation ; absent d'un démon plus ancien.
+   */
+  files?: RunnerFile[]
   /**
    * Empreinte du démon (SHA-256 de la commande, du dossier, de la source, du
    * corps et du verrou) : la confirmation porte sur elle ; absente d'un démon
    * plus ancien (lancement refusé).
    */
   fingerprint?: string
+}
+
+export type RunnerFileState = 'ok' | 'absent' | 'outside' | 'too_large' | 'unresolved'
+
+/** Fichier pris en compte par l'empreinte d'un runner (chemin relatif au worktree ; texte du dépôt, non fiable). */
+export interface RunnerFile {
+  path: string
+  size: number | null
+  state: RunnerFileState
+  note: string | null
 }
 
 export type RunnerState = 'running' | 'exited'
@@ -1086,6 +1114,8 @@ export interface Methods {
   'forge.status': { params: { root: string; refresh?: boolean }; result: ForgeStatus }
   /** Issues du projet, sans corps ; `limit` 50 par défaut, 200 au plus. */
   'forge.issues': { params: { root: string; refresh?: boolean } & IssueFilter; result: { issues: Issue[]; truncated: boolean } }
+  /** Étiquettes du dépôt (lot 15), pour le filtre ; cache de 5 min côté démon. */
+  'forge.labels': { params: { root: string; refresh?: boolean }; result: { labels: RepoLabel[] } }
   /** Une issue complète, sous-issues comprises. */
   'forge.issue': { params: { root: string; number: number; refresh?: boolean }; result: Issue }
   /** Demandes de fusion du projet, sans corps (lot 13b). */
@@ -1118,6 +1148,7 @@ export interface Methods {
 export const FORGE_METHODS: readonly MethodName[] = [
   'forge.status',
   'forge.issues',
+  'forge.labels',
   'forge.issue',
   'forge.pulls',
   'forge.pull',
@@ -1167,6 +1198,7 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'sessions.sendPrompt',
   'forge.status',
   'forge.issues',
+  'forge.labels',
   'forge.issue',
   'forge.pulls',
   'forge.pull',

@@ -13,7 +13,8 @@ import type { ITheme } from '@xterm/xterm'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { previewLabel } from '../../../shared/preview'
-import type { Runner, Session } from '../../../shared/protocol'
+import type { Runner, RunnerFile, Session } from '../../../shared/protocol'
+import { RUNNER_FILE_STATE_LABELS, openableRunnerFile, riskyRunnerFile } from '../../../shared/runnerFiles'
 import { ErrorCode } from '../../../shared/protocol'
 import type { RunnerConfirmation } from '../../../shared/bridge'
 import { CallError, api, call, errorText, runnerChannel } from '../api'
@@ -21,6 +22,7 @@ import { describeError } from '../state/errors'
 import { relativeTime } from '../state/format'
 import {
   CONFIRM_TEXT,
+  FILES_TEXT,
   commandText,
   groupRunners,
   normalizeList,
@@ -50,6 +52,7 @@ export function RunnersView({
   onLink,
   onRunning,
   onUnsupported,
+  onOpenFile,
 }: {
   session: Session
   theme: ITheme
@@ -58,6 +61,8 @@ export function RunnersView({
   onRunning: (sessionId: string, running: RunnerProc[]) => void
   /** Le démon ne connaît pas les runners (trop ancien) : l'onglet est masqué. */
   onUnsupported: () => void
+  /** « Voir » un fichier de l'empreinte : onglet « Fichiers », en lecture. */
+  onOpenFile?: (path: string) => void
 }) {
   const [data, setData] = useState<RunnersData | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -461,7 +466,25 @@ export function RunnersView({
                 <pre className="mono rn-body-src">
                   <code>{confirm.c.body}</code>
                 </pre>
+                {confirm.c.body_truncated && (
+                  <p className="hint rn-cut" role="note" style={{ margin: 0 }}>
+                    Extrait coupé : la suite n’est pas montrée. Ouvre le fichier pour tout lire.
+                  </p>
+                )}
               </>
+            )}
+            {confirm.c.files && confirm.c.files.length > 0 && (
+              <RunnerFiles
+                files={confirm.c.files}
+                onOpen={
+                  onOpenFile
+                    ? (path) => {
+                        setConfirm(null)
+                        onOpenFile(path)
+                      }
+                    : undefined
+                }
+              />
             )}
             <p className="hint" style={{ margin: 0 }}>
               Dans <span className="mono">{confirm.c.worktree}</span>
@@ -482,4 +505,53 @@ export function RunnersView({
       )}
     </div>
   )
+}
+
+/**
+ * Fichiers pris en compte par l'empreinte : état écrit en texte, « Voir »
+ * (onglet « Fichiers », lecture), avertissement si l'un n'a pas pu être lu
+ * en entier (trop gros, non résolu, hors du worktree).
+ */
+function RunnerFiles({ files, onOpen }: { files: readonly RunnerFile[]; onOpen?: (path: string) => void }) {
+  const risky = files.filter(riskyRunnerFile)
+  return (
+    <div className="rn-files">
+      <span className="hint">Fichiers lus pour cette commande :</span>
+      <ul role="list">
+        {files.map((f) => (
+          <li key={f.path} className={`rn-file ${f.state}`}>
+            <span className="mono rn-file-p">{f.path}</span>
+            <span className={`fbadge sm${riskyRunnerFile(f) ? ' pend' : f.state === 'absent' ? ' muted' : ' ok'}`}>
+              {riskyRunnerFile(f) && <span aria-hidden="true">⚠ </span>}
+              {RUNNER_FILE_STATE_LABELS[f.state]}
+            </span>
+            {f.size !== null && <span className="hint">{formatBytes(f.size)}</span>}
+            {f.note && <span className="hint rn-file-note">{f.note}</span>}
+            {onOpen && openableRunnerFile(f) && (
+              <button type="button" className="btn sm ghost" onClick={() => onOpen(f.path)} aria-label={`Voir ${f.path} dans l’onglet Fichiers`}>
+                Voir
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p style={{ margin: 0 }}>{FILES_TEXT}</p>
+      {risky.length > 0 && (
+        <p className="forge-warn" role="alert">
+          <span aria-hidden="true">⚠ </span>
+          {risky.length > 1 ? `${risky.length} fichiers n’ont pas pu être lus en entier` : `${risky[0]!.path} n’a pas pu être lu en entier`} (
+          {risky.map((f) => RUNNER_FILE_STATE_LABELS[f.state]).filter((v, i, a) => a.indexOf(v) === i).join(', ')}) : une partie de ce qui
+          s’exécute n’est pas couverte par ta confirmation. Relis-les avant de lancer.
+        </p>
+      )}
+    </div>
+  )
+}
+
+/** Taille lisible : « 812 o », « 4,2 Kio », « 1,3 Mio ». */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} o`
+  const k = n / 1024
+  if (k < 1024) return `${k.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} Kio`
+  return `${(k / 1024).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} Mio`
 }

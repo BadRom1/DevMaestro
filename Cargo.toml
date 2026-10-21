@@ -41,3 +41,8 @@ notify = { version = "8.2.0", default-features = false }
 # Version vérifiée sur crates.io le 2026-10-20 (`cargo info` : 0.17.14, la
 # dernière ; `sha2` 0.11.1 aurait ajouté `digest` et ses dépendances).
 ring = { version = "0.17.14", default-features = false }
+# Runners (v0.3, lot 15) : lecture des fichiers compose (`include`, `extends`,
+# `env_file`, `build`) pour l'empreinte. Version vérifiée sur crates.io le
+# 2026-10-21 (`cargo search` / `cargo info` : 0.13.0, la dernière). Analyseur
+# par événements seulement (aucun alias développé) ; sans `encoding_rs`.
+yaml-rust2 = { version = "0.13.0", default-features = false }

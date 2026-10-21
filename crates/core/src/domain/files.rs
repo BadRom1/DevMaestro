@@ -183,15 +183,40 @@ impl FileVersion {
 
 /// Empreinte SHA-256 en hexadécimal minuscule.
 pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
+}
+
+/// SHA-256 d'un flux lu par blocs (64 Kio), `max` octets au plus : `(taille
+/// lue, empreinte)`, l'empreinte `None` si le flux dépasse `max`.
+pub fn sha256_stream(
+    mut r: impl std::io::Read,
+    max: u64,
+) -> std::io::Result<(u64, Option<String>)> {
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        total += n as u64;
+        if total > max {
+            return Ok((total, None));
+        }
+        ctx.update(&buf[..n]);
+    }
+    Ok((total, Some(hex(ctx.finish().as_ref()))))
+}
+
+fn hex(digest: &[u8]) -> String {
     use std::fmt::Write;
-    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
-    digest
-        .as_ref()
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
+    digest.iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// Empreinte reçue d'un client : 64 caractères hexadécimaux minuscules.
