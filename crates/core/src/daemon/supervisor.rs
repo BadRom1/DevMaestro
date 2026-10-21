@@ -385,7 +385,7 @@ fn changeset_json(c: &crate::domain::diff::ChangeSet) -> Value {
     })
 }
 
-fn file_diff_json(d: &crate::domain::diff::FileDiff) -> Value {
+pub(super) fn file_diff_json(d: &crate::domain::diff::FileDiff) -> Value {
     json!({
         "hunks": d.hunks.iter().map(|h| json!({
             "header": h.header,

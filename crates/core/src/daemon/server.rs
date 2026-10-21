@@ -443,13 +443,29 @@ impl Connection {
                     .await
                     .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
             }
-            "forge.status" | "forge.issues" | "forge.issue" => {
+            // Socket de contrôle seulement (le socket des relais ferme toute
+            // connexion qui envoie du JSON-RPC) : `forge.submitReview`, seule
+            // écriture vers la forge, ne part que d'une action de l'utilisateur
+            // dans l'app (ADR 0006, point 5).
+            "forge.status"
+            | "forge.issues"
+            | "forge.issue"
+            | "forge.pulls"
+            | "forge.pull"
+            | "forge.pullFile"
+            | "forge.pullForBranch"
+            | "forge.submitReview" => {
                 // `git` et `gh` : hors du runtime.
                 let (d2, params, m) = (d.clone(), params.clone(), method.to_owned());
                 tokio::task::spawn_blocking(move || match m.as_str() {
                     "forge.status" => d2.forge_status(&params),
                     "forge.issues" => d2.forge_issues(&params),
-                    _ => d2.forge_issue(&params),
+                    "forge.issue" => d2.forge_issue(&params),
+                    "forge.pulls" => d2.forge_pulls(&params),
+                    "forge.pull" => d2.forge_pull(&params),
+                    "forge.pullFile" => d2.forge_pull_file(&params),
+                    "forge.pullForBranch" => d2.forge_pull_for_branch(&params),
+                    _ => d2.forge_submit_review(&params),
                 })
                 .await
                 .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??

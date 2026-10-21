@@ -4,8 +4,12 @@
 //!
 //! Le contenu des issues n'est jamais enregistré en base ni journalisé : seul
 //! le lien session ↔ issue ([`SessionIssue`]) l'est.
+//!
+//! Demandes de fusion, CI et revue publiée (lot 13b) : [`pulls`].
 
 use std::path::Path;
+
+pub mod pulls;
 
 /// Corps d'une issue gardé au plus (64 Kio, coupé sur un caractère entier).
 pub const MAX_BODY_BYTES: usize = 64 * 1024;

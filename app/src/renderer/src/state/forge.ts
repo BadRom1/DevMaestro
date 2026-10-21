@@ -291,7 +291,7 @@ export function launchedFrom(results: Readonly<Record<number, RowResult>>): Map<
   return out
 }
 
-/* ---------- Liste, filtres, affichage ---------- *//* ---------- Liste, filtres, affichage ---------- */
+/* ---------- Liste, filtres, affichage ---------- */
 
 export interface IssueFilters {
   state: IssueStateFilter

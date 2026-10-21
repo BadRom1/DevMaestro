@@ -1,8 +1,11 @@
 /**
- * Panneau « Issues du projet » (v0.3, lot 13a, ADR 0006) : liste filtrable
- * (état, recherche, assignées à moi, étiquette), détail avec le corps en
- * Markdown (rendu sûr), « Lancer une session » (préremplit « Nouvelle
- * session ») et, pour un epic, « Lancer une session par sous-issue ».
+ * Panneau « Forge » d'un projet (v0.3, ADR 0006), à deux onglets :
+ * « Issues » (lot 13a) et « Demandes de fusion » (lot 13b, `PullsPanel`).
+ *
+ * Issues : liste filtrable (état, recherche, assignées à moi, étiquette),
+ * détail avec le corps en Markdown (rendu sûr), « Lancer une session »
+ * (préremplit « Nouvelle session ») et, pour un epic, « Lancer une session
+ * par sous-issue ».
  *
  * Contenu venu de la forge = non fiable : Markdown sans HTML brut ni image,
  * liens ouverts seulement après la confirmation des liens externes, couleurs
@@ -10,7 +13,7 @@
  * lancer soi-même (jamais exécutée par l'app). Démon d'avant la forge :
  * `onUnsupported` masque les entrées.
  */
-import { useEffect, useId, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import { ISSUE_STATE_FILTERS, type ForgeStatus, type Issue, type IssueStateFilter, type Session } from '../../../shared/protocol'
 import { api, call, errorCode, errorText, CallError } from '../api'
@@ -20,7 +23,6 @@ import {
   EPIC_MODES,
   FORGE_CONTENT_WARNING,
   UNCERTAIN_LAUNCH,
-  cleanForge,
   invisibleNote,
   onlyRepoIssues,
   prepareEpic,
@@ -33,7 +35,6 @@ import {
   issuePrefill,
   issueStateLabel,
   issuesParams,
-  labelColors,
   oneLine,
   openSubIssues,
   runEpicPlan,
@@ -45,9 +46,13 @@ import {
   type RowResult,
 } from '../state/forge'
 import { relativeTime, shortAgo } from '../state/format'
-import { classifyLink, renderMarkdown } from '../state/markdown'
 import { useSettings } from '../settings'
+import { ForgeMarkdown, IssueLabels } from './ForgeContent'
 import { Modal } from './Modal'
+import { PullsTab } from './PullsPanel'
+
+/** Onglet du panneau « Forge ». */
+export type ForgeTab = 'issues' | 'pulls'
 
 const NO_LAUNCHED: ReadonlyMap<number, 'done' | 'uncertain'> = new Map()
 
@@ -71,29 +76,6 @@ export interface EpicLaunchContext {
   launch: (row: EpicRow, prefill: IssuePrefill, mode: EpicMode) => Promise<{ session: Session; warnings: string[] }>
   /** Session lancée (la liste de l'app est mise à jour, sans changer de vue). */
   onLaunched: (s: Session) => void
-}
-
-export function IssueLabels({ labels }: { labels: Issue['labels'] }) {
-  if (!labels?.length) return null
-  return (
-    <span className="ilabels">
-      {labels.map((l, i) => {
-        const c = labelColors(l.color)
-        const name = oneLine(l.name)
-        return (
-          <span
-            key={`${name}-${i}`}
-            className={`ilabel${c ? ' colored' : ''}`}
-            style={c ? { background: c.background, color: c.color, borderColor: c.background } : undefined}
-            title={`Étiquette : ${name}`}
-          >
-            <span className="ldot" aria-hidden="true" />
-            {name}
-          </span>
-        )
-      })}
-    </span>
-  )
 }
 
 function IssueState({ state }: { state: string }) {
@@ -129,7 +111,7 @@ function Unavailable({ a, onRetry }: { a: ForgeAvailability; onRetry: () => void
   return (
     <div className="forge-off" role="status">
       <p>
-        <b>Issues indisponibles :</b> {a.reason}
+        <b>Forge indisponible :</b> {a.reason}
       </p>
       {a.command && (
         <>
@@ -157,48 +139,18 @@ function Unavailable({ a, onRetry }: { a: ForgeAvailability; onRetry: () => void
 
 /** Corps de l'issue : Markdown sûr ; liens externes par la confirmation, ancres internes, le reste inerte. */
 function IssueBody({ issue, onLink }: { issue: Issue; onLink: (url: string) => void }) {
-  const ref = useRef<HTMLElement>(null)
-  // Contenu de la forge : contrôles et caractères invisibles (bidi, tags Unicode…) retirés avant le rendu.
-  const clean = useMemo(() => cleanForge(issue.body ?? ''), [issue.body])
-  const body = clean.text
-  const html = useMemo(() => (body.trim() ? renderMarkdown(body, { idPrefix: `issue-${issue.number}` }).html : null), [body, issue.number])
-  const note = invisibleNote(clean.invisible)
-  function onClick(e: MouseEvent<HTMLElement>) {
-    const a = (e.target as HTMLElement).closest('a')
-    if (!a) return
-    e.preventDefault()
-    const t = classifyLink(a.getAttribute('href'), '')
-    if (t.kind === 'external') onLink(t.url)
-    else if (t.kind === 'anchor') {
-      ref.current?.querySelector(`[id="issue-${issue.number}-${CSS.escape(t.id)}"]`)?.scrollIntoView({ block: 'start' })
-    }
-  }
-  if (!html) return <p className="hint">Aucune description.</p>
-  return (
-    <>
-      {note && (
-        <p className="chip pend" role="note">
-          {note} de la description
-        </p>
-      )}
-      {issue.truncated && (
-        <p className="ag-cut" role="note">
-          Description coupée par le démon (64 Kio au plus) : la suite est sur la forge.
-        </p>
-      )}
-      {/* HTML produit par markdown-it sans HTML brut (échappé) ni image chargée, comme l'onglet Fichiers. */}
-      <article ref={ref} className="md issue-md" onClick={onClick} dangerouslySetInnerHTML={{ __html: html }} />
-    </>
-  )
+  return <ForgeMarkdown text={issue.body} idPrefix={`issue-${issue.number}`} onLink={onLink} truncated={issue.truncated} />
 }
 
 type ListState = { phase: 'idle' } | { phase: 'loading' } | { phase: 'ready'; issues: Issue[]; truncated: boolean } | { phase: 'error'; message: string }
 type DetailState = { phase: 'loading'; number: number } | { phase: 'ready'; issue: Issue } | { phase: 'error'; number: number; message: string }
 
-export function IssuesPanel({
+export function ForgePanel({
   root,
   name,
   initialNumber,
+  initialTab = 'issues',
+  initialPull,
   epic,
   onClose,
   onLink,
@@ -211,6 +163,10 @@ export function IssuesPanel({
   name: string
   /** Issue à ouvrir d'emblée (« #42 » d'une session). */
   initialNumber?: number | null
+  /** Onglet ouvert d'emblée (« PR #n » d'une session : demandes de fusion). */
+  initialTab?: ForgeTab
+  /** Demande de fusion à ouvrir d'emblée. */
+  initialPull?: number | null
   epic: EpicLaunchContext
   onClose: () => void
   onLink: (url: string) => void
@@ -236,6 +192,10 @@ export function IssuesPanel({
   const [detailSeq, setDetailSeq] = useState(0)
   const [epicOpen, setEpicOpen] = useState(false)
   const [epicBusy, setEpicBusy] = useState(false)
+  const [tab, setTab] = useState<ForgeTab>(initialTab)
+  /** Publication d'une revue en cours : la fenêtre ne se ferme pas. */
+  const [pullBusy, setPullBusy] = useState(false)
+  const busy = epicBusy || pullBusy
   /** Sous-issues lancées depuis ce panneau, par epic (marquées et décochées au retour). */
   const [launchedSubs, setLaunchedSubs] = useState<Record<number, Map<number, 'done' | 'uncertain'>>>({})
   const onSupportedRef = useRef(onSupported)
@@ -345,13 +305,30 @@ export function IssuesPanel({
   )
 
   return (
-    <Modal title={`Issues du projet · ${name}`} onClose={onClose} width={1040} busy={epicBusy}>
+    <Modal title={`Forge du projet · ${name}`} onClose={onClose} width={tab === 'pulls' ? 1320 : 1040} busy={busy}>
       <div className="mb issues-mb">
+        {available && (
+          <div className="ftabs" role="tablist" aria-label="Forge">
+            {(
+              [
+                ['issues', 'Issues'],
+                ['pulls', 'Demandes de fusion'],
+              ] as const
+            ).map(([id, label]) => (
+              <button key={id} type="button" role="tab" className="ftab" aria-selected={tab === id} disabled={busy && tab !== id} onClick={() => setTab(id)}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+        {available && tab === 'pulls' && (
+          <PullsTab root={root} status={avail.status} initialNumber={initialPull ?? null} onLink={onLink} onBusy={setPullBusy} />
+        )}
         {avail.kind === 'loading' && <p className="hint">Connexion à la forge…</p>}
         {(avail.kind === 'unavailable' || avail.kind === 'unsupported') && (
           <Unavailable a={avail} onRetry={() => setStatusSeq((n) => n + 1)} />
         )}
-        {available && epicOpen && current && (
+        {available && tab === 'issues' && epicOpen && current && (
           <EpicLaunch
             epic={current}
             ctx={epic}
@@ -365,7 +342,7 @@ export function IssuesPanel({
             onBack={() => setEpicOpen(false)}
           />
         )}
-        {available && !epicOpen && (
+        {available && tab === 'issues' && !epicOpen && (
           <div className="issues">
             <section className="ilist" aria-label="Liste des issues">
               <div className="ifilters" role="group" aria-label="Filtres">
@@ -479,7 +456,7 @@ export function IssuesPanel({
         <span className="hint" style={{ marginRight: 'auto' }}>
           {avail.kind === 'available' && avail.status.repo ? `${avail.status.host ? `${avail.status.host} · ` : ''}${avail.status.repo}` : ''}
         </span>
-        <button type="button" className="btn ghost" onClick={onClose} disabled={epicBusy}>
+        <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>
           Fermer
         </button>
       </div>

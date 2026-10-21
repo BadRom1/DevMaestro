@@ -7,8 +7,10 @@
 import {
   COMMIT_RANGES,
   FULL_PARTS,
+  FORGE_REVIEW_EVENTS,
   ISSUE_STATE_FILTERS,
   MAX_FILE_WRITE_BYTES,
+  PULL_STATE_FILTERS,
   MAX_TITLE,
   SESSION_COLORS,
   type MethodName,
@@ -353,6 +355,53 @@ function initialMessage(o: Obj, k: string): Obj {
   }
 }
 
+/** Limites d'une revue publiée sur la forge (lot 13b) : corps de 65 536 caractères, 100 commentaires. */
+export const MAX_FORGE_REVIEW_BODY = 65_536
+export const MAX_FORGE_REVIEW_COMMENTS = 100
+
+/** Chemin d'un fichier d'une demande de fusion : relatif au dépôt, sans « . », « .. » ni composant vide. */
+function repoPath(o: Obj, k: string): string {
+  return writePath(o, k)
+}
+
+/** Texte d'une revue de la forge : 65 536 caractères au plus, sans caractère nul ni moitié de paire isolée. */
+function forgeText(o: Obj, k: string, nonEmpty: boolean): string {
+  const v = str(o, k, MAX_FORGE_REVIEW_BODY, { codePoints: true, nonEmpty })
+  if (v.includes('\0')) throw new ValidationError(`« ${k} » contient un caractère nul`)
+  if (LONE_SURROGATE_RE.test(v)) throw new ValidationError(`« ${k} » n’est pas du texte Unicode valide`)
+  return v
+}
+
+/** Revue publiée sur la forge : seuls les champs connus sont gardés. */
+function forgeReview(o: Obj, out: Obj): void {
+  out.root = absPath(o, 'root')
+  out.number = issueNumber(o, 'number')
+  out.expected_head_sha = sha(o, 'expected_head_sha')
+  out.event = oneOf(o, 'event', FORGE_REVIEW_EVENTS)
+  out.body = present(o, 'body') ? forgeText(o, 'body', false) : ''
+  const list = o.comments === undefined ? [] : o.comments
+  if (!Array.isArray(list) || list.length > MAX_FORGE_REVIEW_COMMENTS) {
+    throw new ValidationError(`« comments » : liste de ${MAX_FORGE_REVIEW_COMMENTS} commentaires au plus`)
+  }
+  out.comments = list.map((c, i) => {
+    const x = obj(c)
+    try {
+      return {
+        path: repoPath(x, 'path'),
+        line: int(x, 'line', 1, 10_000_000),
+        side: oneOf(x, 'side', ['new', 'old'] as const),
+        body: forgeText(x, 'body', true),
+      }
+    } catch (e) {
+      throw new ValidationError(`commentaire ${i + 1} : ${(e as Error).message}`)
+    }
+  })
+  // Approuver sans texte est permis ; commenter ou demander des modifications exige un commentaire général (GitHub l'exige).
+  if (out.event !== 'approve' && (out.body as string).trim() === '') {
+    throw new ValidationError('commentaire général obligatoire pour « comment » et « request_changes » (GitHub l’exige)')
+  }
+}
+
 /** Délai des opérations git longues du démon (création, liste, suppression de worktrees). */
 export const WORKTREE_TIMEOUT_MS = 120_000
 
@@ -361,14 +410,16 @@ export const FORGE_TIMEOUT_MS = 90_000
 
 /**
  * Délai d'attente d'une méthode relayée : 120 s pour `worktrees.*` et pour
- * un lancement qui crée un worktree (extraction d'un gros dépôt) ;
+ * un lancement qui crée un worktree (extraction d'un gros dépôt) ; 90 s pour
+ * `forge.*` (plusieurs appels de `gh`) ;
  * `undefined` : délai par défaut du client.
  */
 export function requestTimeoutMs(method: MethodName, clean: Obj): number | undefined {
   if (method === 'worktrees.list' || method === 'worktrees.remove') return WORKTREE_TIMEOUT_MS
   if (method === 'sessions.launch' && clean.worktree !== undefined) return WORKTREE_TIMEOUT_MS
   // `gh` a 15 s par appel côté démon, et `forge.issue` en enchaîne plusieurs (issue, sous-issues).
-  if (method === 'forge.status' || method === 'forge.issues' || method === 'forge.issue') return FORGE_TIMEOUT_MS
+  // `forge.pull` lit aussi la CI et les fils de revue ; `forge.submitReview` publie (une écriture lente côté GitHub).
+  if (method.startsWith('forge.')) return FORGE_TIMEOUT_MS
   return undefined
 }
 
@@ -591,9 +642,32 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       optional(o, out, 'refresh', bool)
       return out
     case 'forge.issue':
+    case 'forge.pull':
       out.root = absPath(o, 'root')
       out.number = issueNumber(o, 'number')
       optional(o, out, 'refresh', bool)
+      return out
+    case 'forge.pulls':
+      out.root = absPath(o, 'root')
+      optional(o, out, 'state', (x, k) => oneOf(x, k, PULL_STATE_FILTERS))
+      optional(o, out, 'search', filterText(MAX_ISSUE_SEARCH))
+      nullable(o, out, 'author', (x, k) => oneOf(x, k, ['@me'] as const))
+      optional(o, out, 'limit', (x, k) => int(x, k, 1, MAX_ISSUE_LIMIT))
+      optional(o, out, 'refresh', bool)
+      return out
+    case 'forge.pullFile':
+      out.root = absPath(o, 'root')
+      out.number = issueNumber(o, 'number')
+      out.path = repoPath(o, 'path')
+      optional(o, out, 'refresh', bool)
+      return out
+    case 'forge.pullForBranch':
+      out.root = absPath(o, 'root')
+      out.branch = branchName(o, 'branch')
+      optional(o, out, 'refresh', bool)
+      return out
+    case 'forge.submitReview':
+      forgeReview(o, out)
       return out
   }
 }

@@ -28,6 +28,7 @@ import { displayedMode, idleMode, modeReducer, normalizeMode } from '../state/mo
 import { glyphFor } from '../state/status'
 import { sessionIssue } from '../state/forge'
 import { IssueChip } from './IssueChip'
+import { PullChip, useBranchPull } from './PullChip'
 import type { ITheme } from '@xterm/xterm'
 
 import { TerminalView } from '../terminal/TerminalView'
@@ -111,9 +112,11 @@ function Header({
   onSessionUpdated,
   onForget,
   onOpenIssue,
+  onOpenPull,
 }: {
   session: Session
   onOpenIssue?: (s: Session) => void
+  onOpenPull?: (s: Session, number: number) => void
   agents: readonly Subagent[] | undefined
   project: ProjectInfo | undefined
   profiles: Profile[]
@@ -143,6 +146,8 @@ function Header({
   const color = sessionColor(session)
   const agentsRunning = runningLabel(runningCount(session, agents))
   const iss = sessionIssue(session)
+  // Demande de fusion de la branche (lot 13b) : relue toutes les 60 s tant que la session est affichée.
+  const pull = useBranchPull(project?.root ?? session.project_root ?? null, session.branch ?? project?.branch ?? null, !!onOpenPull && project?.is_git !== false && project?.exists !== false)
 
   async function run(kind: 'stop' | 'resume', f: () => Promise<unknown>, what: string) {
     setBusy(kind)
@@ -202,6 +207,7 @@ function Header({
             {projectName} <span>/</span> {branch}
           </span>
           {iss && <IssueChip issue={iss} onOpen={onOpenIssue ? () => onOpenIssue(session) : undefined} />}
+          {pull && <PullChip pull={pull} onOpen={onOpenPull ? () => onOpenPull(session, pull.number) : undefined} />}
         </div>
         <div className="sh-tags">
           <ProfileChip profile={session.profile} profiles={profiles} />
@@ -369,6 +375,7 @@ export function SessionPane({
   onSessionUpdated,
   onForget,
   onOpenIssue,
+  onOpenPull,
   diffSeq,
   draft,
   review,
@@ -412,6 +419,8 @@ export function SessionPane({
   onForget: (id: string) => Promise<void>
   /** Ouvre le détail de l’issue liée (absent : forge masquée ou désactivée). */
   onOpenIssue?: (s: Session) => void
+  /** Ouvre la demande de fusion de la branche (absent : forge masquée ou désactivée, rien n'est demandé). */
+  onOpenPull?: (s: Session, number: number) => void
 }) {
   const pending = session?.pending ?? []
   const termHost = useRef<HTMLDivElement>(null)
@@ -511,6 +520,7 @@ export function SessionPane({
           onSessionUpdated={onSessionUpdated}
           onForget={onForget}
           onOpenIssue={onOpenIssue}
+          onOpenPull={onOpenPull}
         />
       ) : (
         <div className="sh">

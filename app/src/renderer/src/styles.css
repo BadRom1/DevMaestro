@@ -818,3 +818,47 @@ button.srow-issue:hover, button.srow-issue:focus-visible { text-decoration: unde
 .forge-pre { margin: 4px 0; max-height: 30vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--f-mono); font-size: 12px; background: var(--sunk); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font-variant-ligatures: none }
 .iepic-opts { display: grid; gap: 6px }
 .iepic-opts .field { max-width: 360px }
+
+/* ---------- Forge : demandes de fusion, CI et revue (v0.3, lot 13b) ---------- */
+/* État, décision de revue et CI : glyphe + texte (jamais la couleur seule) ; texte en variantes « -ink » (≥ 4,5:1, test des thèmes). */
+.ftabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 4px }
+.ftabs [role="tab"], .ptabs [role="tab"] { border: 0; background: transparent; padding: 6px 12px; color: var(--muted); border-bottom: 2px solid transparent; font-size: 13px }
+.ftabs [role="tab"][aria-selected="true"], .ptabs [role="tab"][aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600 }
+.ptabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--line) }
+.ptabs [role="tab"] { font-size: 12.5px; padding: 5px 10px }
+.issues.pulls { grid-template-columns: minmax(240px, 1fr) minmax(0, 3fr) }
+.fbadge { display: inline-flex; gap: 3px; align-items: center; font-size: 11.5px; border: 1px solid currentColor; border-radius: 99px; padding: 0 6px; line-height: 1.5; white-space: nowrap; color: var(--muted) }
+.fbadge.ok { color: var(--run-ink) }
+.fbadge.bad { color: var(--err-ink) }
+.fbadge.pend { color: var(--wait-ink) }
+.fbadge.open { color: var(--run-ink) }
+.fbadge.done { color: var(--done-ink) }
+.fbadge.muted { color: var(--muted) }
+.fbadge.sm { font-size: 10.5px; padding: 0 5px }
+.pbranch { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.pdetail .issue-md { max-height: 40vh }
+.pchecks { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px }
+.pchecks li { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 12.5px; padding: 3px 0; border-bottom: 1px solid var(--line) }
+.pcheck-n { min-width: 0; overflow-wrap: anywhere; flex: 1 1 200px }
+.pthreads { display: grid; gap: 10px; max-height: 50vh; overflow: auto }
+.pthread { display: grid; gap: 6px; padding: 6px 0; border-bottom: 1px solid var(--line) }
+.pthread-h { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12.5px; overflow-wrap: anywhere }
+.pthread .issue-md { max-height: none; border-top: 0; padding-top: 0 }
+.diffpane.pfiles { height: min(56vh, 620px); border: 1px solid var(--line); border-radius: var(--r) }
+.fdraft { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--line-2); border-radius: var(--r); background: var(--panel-2) }
+.fdraft-h { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 12.5px }
+.fdest { display: inline-flex; gap: 2px; align-items: center; padding: 1px 8px; border: 1px solid var(--wait); border-radius: 99px; color: var(--wait-ink); font-size: 12px; font-weight: 600 }
+.fdest.big { display: block; margin: 0; padding: 6px 10px; border-radius: var(--r); font-size: 13px; color: var(--fg); background: color-mix(in srgb, var(--wait) 8%, var(--panel)); overflow-wrap: anywhere }
+.pevents { border: 0; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 16px }
+.pevents .optrow { grid-template-columns: 16px auto }
+.ppublish textarea { min-height: 110px }
+.ppreview { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid var(--line-2); border-radius: var(--r); max-height: 48vh; overflow: auto }
+.ppreview p { margin: 0 }
+.ppreview-c { margin: 0; padding-left: 20px; display: grid; gap: 6px; font-size: 12.5px }
+.ppreview-c .pline { display: block; font-size: 11.5px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere }
+.pull-chip { display: inline-flex; gap: 5px; align-items: center; font-size: 11.5px; color: var(--link); border-color: color-mix(in srgb, var(--link) 45%, var(--line)); background: transparent; flex: none }
+button.pull-chip { cursor: pointer }
+button.pull-chip:hover, button.pull-chip:focus-visible { border-color: var(--link) }
+button.pull-chip:hover .mono, button.pull-chip:focus-visible .mono { text-decoration: underline }
+fieldset.ifilters { border: 0; margin: 0; padding: 0; min-width: 0 }
+.fmoved { margin: 0; padding-left: 18px; display: grid; gap: 2px; font-size: 12px }

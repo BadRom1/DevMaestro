@@ -372,6 +372,155 @@ pub fn parse_unified(out: &[u8]) -> FileDiff {
     diff
 }
 
+/// Chemin d'un en-tête de diff tel que l'écrit git : entre guillemets avec
+/// des échappements C (`"a/\303\251.txt"`) quand il contient des caractères
+/// spéciaux, sinon tel quel. `None` : citation mal formée ou octets qui ne
+/// sont pas de l'UTF-8.
+pub fn unquote_git_path(s: &str) -> Option<String> {
+    let Some(inner) = s.strip_prefix('"') else {
+        return Some(s.to_owned());
+    };
+    let inner = inner.strip_suffix('"')?.as_bytes();
+    let mut out = Vec::with_capacity(inner.len());
+    let mut i = 0;
+    while i < inner.len() {
+        let b = inner[i];
+        i += 1;
+        if b != b'\\' {
+            out.push(b);
+            continue;
+        }
+        let e = *inner.get(i)?;
+        i += 1;
+        out.push(match e {
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'r' => b'\r',
+            b'a' => 7,
+            b'b' => 8,
+            b'f' => 12,
+            b'v' => 11,
+            b'\\' => b'\\',
+            b'"' => b'"',
+            b'0'..=b'7' => {
+                let digits = inner.get(i - 1..i + 2)?;
+                if !digits.iter().all(|d| (b'0'..=b'7').contains(d)) {
+                    return None;
+                }
+                i += 2;
+                let v = digits
+                    .iter()
+                    .fold(0u32, |acc, d| acc * 8 + u32::from(d - b'0'));
+                u8::try_from(v).ok()?
+            }
+            _ => return None,
+        });
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Chemin d'une ligne `--- a/x` / `+++ b/x` (ou `rename to x`, sans
+/// préfixe) : citation de git retirée, tabulation finale retirée (git en
+/// ajoute une quand le nom contient une espace), préfixe ôté.
+/// `None` pour `/dev/null`.
+fn header_path(value: &str, prefix: &str) -> Option<String> {
+    let value = value.strip_suffix('\t').unwrap_or(value);
+    if value == "/dev/null" {
+        return None;
+    }
+    let path = unquote_git_path(value)?;
+    match path.strip_prefix(prefix) {
+        Some(p) => Some(p.to_owned()),
+        None if prefix.is_empty() => Some(path),
+        None => None,
+    }
+}
+
+/// Chemin de `diff --git a/<p> b/<p>` quand les deux côtés sont égaux (seul
+/// cas lisible sans ambiguïté sans `---`/`+++`).
+fn git_header_path(rest: &str) -> Option<String> {
+    if rest.starts_with('"') {
+        let (a, b) = rest.split_once("\" \"")?;
+        let a = header_path(&format!("{a}\""), "a/")?;
+        let b = header_path(&format!("\"{b}"), "b/")?;
+        return (a == b).then_some(b);
+    }
+    let n = rest.len();
+    if n < 7 || !(n - 5).is_multiple_of(2) {
+        return None;
+    }
+    let k = (n - 5) / 2;
+    let a = rest.get(2..2 + k)?;
+    (rest.get(..2) == Some("a/") && rest.get(2 + k..) == Some(&format!(" b/{a}")))
+        .then(|| a.to_owned())
+}
+
+/// Lit le diff unifié de plusieurs fichiers (`gh pr diff`, sortie de
+/// `git diff`) : un [`FileDiff`] par fichier, sous son **nouveau** chemin
+/// (l'ancien pour une suppression), dans l'ordre du diff. Chaque fichier
+/// est lu par [`parse_unified`] (mêmes limites : plus de
+/// [`MAX_DIFF_LINES`] lignes → `too_large`) ; la partie d'un fichier qui
+/// dépasse [`MAX_FILE_BYTES`] est `too_large` sans être lue (la taille des
+/// deux versions n'est pas connue ici). Un fichier dont le chemin est
+/// illisible est écarté.
+pub fn split_unified_diff(out: &[u8]) -> Vec<(String, FileDiff)> {
+    let text = String::from_utf8_lossy(out);
+    // Débuts de section : lignes `diff --git `.
+    let mut starts: Vec<usize> = Vec::new();
+    let mut pos = 0;
+    for line in text.split_inclusive('\n') {
+        if line.starts_with("diff --git ") {
+            starts.push(pos);
+        }
+        pos += line.len();
+    }
+    let mut files = Vec::new();
+    for (i, &start) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(text.len());
+        let section = &text[start..end];
+        let mut minus = None;
+        let mut plus = None;
+        let mut renamed = None;
+        let mut first = true;
+        let mut git_line = "";
+        for line in section.split('\n') {
+            if first {
+                git_line = line.strip_prefix("diff --git ").unwrap_or("");
+                first = false;
+                continue;
+            }
+            if line.starts_with("@@ ") || line.starts_with("Binary files ") {
+                break;
+            }
+            if let Some(v) = line.strip_prefix("--- ") {
+                minus = Some(header_path(v, "a/"));
+            } else if let Some(v) = line.strip_prefix("+++ ") {
+                plus = Some(header_path(v, "b/"));
+            } else if let Some(v) = line
+                .strip_prefix("rename to ")
+                .or_else(|| line.strip_prefix("copy to "))
+            {
+                renamed = header_path(v, "");
+            }
+        }
+        let path = match (plus, minus) {
+            (Some(Some(p)), _) => Some(p),
+            (Some(None), Some(m)) => m,
+            _ => renamed.or_else(|| git_header_path(git_line.trim_end_matches('\r'))),
+        };
+        let Some(path) = path.filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let diff = if section.len() as u64 > MAX_FILE_BYTES {
+            FileDiff::too_large()
+        } else {
+            parse_unified(section.as_bytes())
+        };
+        files.push((path, diff));
+    }
+    files
+}
+
 /// Diff d'un fichier non suivi : tout est ajouté.
 pub fn untracked_diff(content: &[u8]) -> FileDiff {
     if looks_binary(content) {
@@ -1115,5 +1264,50 @@ mod tests {
         let total = big.finish().unwrap_err();
         assert_eq!(total, format_review(None, &vec![entry(40); 4]).len());
         assert!(total > MAX_REVIEW_BYTES);
+    }
+
+    #[test]
+    fn git_quoted_paths_are_read() {
+        assert_eq!(unquote_git_path("a/b c.rs").as_deref(), Some("a/b c.rs"));
+        assert_eq!(
+            unquote_git_path(r#""a/\303\251t\303\251 \"x\"\t.md""#).as_deref(),
+            Some("a/été \"x\"\t.md")
+        );
+        assert_eq!(unquote_git_path(r#""a\\b""#).as_deref(), Some("a\\b"));
+        for bad in [r#""ouvert"#, r#""\q""#, r#""\3""#, r#""\377""#, r#""\400""#] {
+            assert_eq!(unquote_git_path(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn multi_file_diffs_are_split() {
+        let out = b"diff --git a/un fichier.txt b/un fichier.txt\n\
+            index 1..2 100644\n\
+            --- a/un fichier.txt\t\n\
+            +++ b/un fichier.txt\t\n\
+            @@ -1 +1 @@\n\
+            -a\n\
+            +b\n\
+            diff --git a/mode.sh b/mode.sh\n\
+            old mode 100644\n\
+            new mode 100755\n\
+            diff --git a/x b/x\n\
+            illisible\n";
+        let files = split_unified_diff(out);
+        let names: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(names, vec!["un fichier.txt", "mode.sh", "x"]);
+        assert_eq!(files[0].1.hunks[0].lines.len(), 2);
+        assert!(files[1].1.hunks.is_empty() && !files[1].1.binary);
+        assert!(split_unified_diff(b"").is_empty());
+        assert!(split_unified_diff(b"pas un diff\n@@ -1 +1 @@\n+x\n").is_empty());
+        // Partie trop grosse : `too_large` sans lecture ; trop de lignes aussi.
+        let mut big = b"diff --git a/g b/g\n--- a/g\n+++ b/g\n@@ -0,0 +1,1 @@\n".to_vec();
+        big.extend(std::iter::repeat_n(b'+', MAX_FILE_BYTES as usize + 1));
+        assert!(split_unified_diff(&big)[0].1.too_large);
+        let mut many = b"diff --git a/m b/m\n--- a/m\n+++ b/m\n@@ -0,0 +1,30000 @@\n".to_vec();
+        for _ in 0..=MAX_DIFF_LINES {
+            many.extend_from_slice(b"+l\n");
+        }
+        assert!(split_unified_diff(&many)[0].1.too_large);
     }
 }

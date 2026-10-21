@@ -18,6 +18,7 @@ const FRIENDLY: Record<number, string> = {
   [ErrorCode.WorktreeBusy]: 'une session tourne dans ce worktree : arrête-la d’abord',
   [ErrorCode.WorktreeDirty]: 'le worktree a des modifications non commitées',
   [ErrorCode.FileChanged]: 'le fichier a été modifié depuis son ouverture',
+  [ErrorCode.PullChanged]: 'la demande de fusion a changé depuis son ouverture',
   [ErrorCode.Timeout]: 'le démon n’a pas répondu à temps',
   [ErrorCode.Disconnected]: 'démon non connecté',
 }

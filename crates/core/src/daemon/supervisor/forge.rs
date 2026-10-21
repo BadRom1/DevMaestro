@@ -1,9 +1,10 @@
 //! Forge (v0.3, lot 13a, ADR 0006) : `forge.status`, `forge.issues`,
-//! `forge.issue`, et le lien session ↔ issue de `sessions.launch`.
+//! `forge.issue`, et le lien session ↔ issue de `sessions.launch` ;
+//! demandes de fusion, CI et revue (lot 13b) : [`pulls`].
 //!
 //! Les appels à la forge passent par le port [`crate::ports::Forge`], hors
 //! du runtime et jamais sous le verrou du registre. Les réponses sont
-//! gardées en mémoire 60 s par dépôt et par requête (rafraîchissement forcé
+//! gardées en mémoire 60 s (30 s pour les demandes de fusion) par dépôt et par requête (rafraîchissement forcé
 //! par `refresh: true`) ; rien n'est écrit en base ni au journal.
 
 use std::path::{Path, PathBuf};
@@ -19,6 +20,8 @@ use crate::domain::forge::{
 };
 use crate::ports::ForgeError;
 use crate::protocol::error_code;
+
+pub mod pulls;
 
 /// Consigne tapée d'un prompt initial, en caractères au plus.
 pub const MAX_INITIAL_INSTRUCTION_CHARS: usize = 2000;
@@ -95,17 +98,31 @@ pub(super) fn initial_param(params: &Value) -> Result<Option<InitialPrompt>, Rpc
     }))
 }
 
-/// Durée de vie d'une réponse de la forge gardée en mémoire.
+/// Durée de vie d'une réponse de la forge gardée en mémoire (état, issues).
 pub const FORGE_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Durée de vie des états des demandes de fusion et de leur CI (lot 13b).
+pub const PULL_CACHE_TTL: Duration = Duration::from_secs(30);
+/// Durée de vie du diff d'une demande de fusion, gardé par tête (`head.sha`) :
+/// un diff ne change pas tant que la tête ne bouge pas.
+pub const PULL_DIFF_TTL: Duration = Duration::from_secs(10 * 60);
 /// Réponses gardées au plus (les plus anciennes partent d'abord).
 const FORGE_CACHE_MAX: usize = 128;
+/// Diffs de demandes de fusion gardés au plus (jusqu'à 8 Mio chacun).
+const PULL_DIFF_CACHE_MAX: usize = 8;
 /// Raison quand l'accès aux forges est désactivé dans les réglages de l'app.
 pub const DISABLED_REASON: &str = "désactivé dans les réglages";
 
-/// Réponses récentes de la forge, par clé (tableaux JSON `["status", …]`, `["issues", …]`, `["issue", …]`).
+/// Diff d'une demande de fusion, par fichier (nouveau chemin).
+pub(super) type PullDiff = std::collections::HashMap<String, crate::domain::diff::FileDiff>;
+
+/// Réponses récentes de la forge, par clé (tableaux JSON `["status", …]`,
+/// `["issues", …]`, `["issue", …]`, `["pulls", …]`, `["pull", …]`,
+/// `["pull_for_branch", …]`), chacune avec sa durée de vie ; diffs des
+/// demandes de fusion à part (`["pull_diff", dépôt, numéro, tête]`).
 #[derive(Debug, Default)]
 pub(super) struct ForgeCache {
-    entries: std::collections::HashMap<String, (Instant, Arc<Cached>)>,
+    entries: std::collections::HashMap<String, (Instant, Duration, Arc<Cached>)>,
+    diffs: std::collections::HashMap<String, (Instant, Arc<PullDiff>)>,
 }
 
 #[derive(Debug)]
@@ -117,7 +134,7 @@ pub(super) enum Cached {
 impl ForgeCache {
     fn get(&mut self, key: &str, now: Instant) -> Option<Arc<Cached>> {
         match self.entries.get(key) {
-            Some((at, v)) if now.duration_since(*at) < FORGE_CACHE_TTL => Some(v.clone()),
+            Some((at, ttl, v)) if now.duration_since(*at) < *ttl => Some(v.clone()),
             Some(_) => {
                 self.entries.remove(key);
                 None
@@ -126,14 +143,14 @@ impl ForgeCache {
         }
     }
 
-    fn put(&mut self, key: String, value: Cached, now: Instant) -> Arc<Cached> {
+    fn put(&mut self, key: String, value: Cached, now: Instant, ttl: Duration) -> Arc<Cached> {
         self.entries
-            .retain(|_, (at, _)| now.duration_since(*at) < FORGE_CACHE_TTL);
+            .retain(|_, (at, ttl, _)| now.duration_since(*at) < *ttl);
         while self.entries.len() >= FORGE_CACHE_MAX {
             let Some(oldest) = self
                 .entries
                 .iter()
-                .min_by_key(|(_, (at, _))| *at)
+                .min_by_key(|(_, (at, _, _))| *at)
                 .map(|(k, _)| k.clone())
             else {
                 break;
@@ -141,8 +158,47 @@ impl ForgeCache {
             self.entries.remove(&oldest);
         }
         let value = Arc::new(value);
-        self.entries.insert(key, (now, value.clone()));
+        self.entries.insert(key, (now, ttl, value.clone()));
         value
+    }
+
+    fn get_diff(&mut self, key: &str, now: Instant) -> Option<Arc<PullDiff>> {
+        match self.diffs.get(key) {
+            Some((at, d)) if now.duration_since(*at) < PULL_DIFF_TTL => Some(d.clone()),
+            Some(_) => {
+                self.diffs.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn put_diff(&mut self, key: String, diff: Arc<PullDiff>, now: Instant) {
+        self.diffs
+            .retain(|_, (at, _)| now.duration_since(*at) < PULL_DIFF_TTL);
+        while self.diffs.len() >= PULL_DIFF_CACHE_MAX {
+            let Some(oldest) = self
+                .diffs
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            self.diffs.remove(&oldest);
+        }
+        self.diffs.insert(key, (now, diff));
+    }
+
+    /// Oublie les réponses sur les demandes de fusion d'un dépôt (après une
+    /// revue publiée : décision de revue, fils).
+    fn forget_pulls(&mut self, slug: &str) {
+        self.entries.retain(|k, _| {
+            serde_json::from_str::<Value>(k).map_or(true, |v| {
+                !(matches!(v[0].as_str(), Some("pulls" | "pull" | "pull_for_branch"))
+                    && v[1] == slug)
+            })
+        });
     }
 }
 
@@ -395,8 +451,12 @@ impl Daemon {
         }
         // Hors du verrou du cache : `git` et `gh` peuvent prendre du temps.
         let status = self.deps.forge.status(root);
-        self.forge_cache()
-            .put(key, Cached::Status(status.clone()), Instant::now());
+        self.forge_cache().put(
+            key,
+            Cached::Status(status.clone()),
+            Instant::now(),
+            FORGE_CACHE_TTL,
+        );
         status
     }
 
@@ -425,6 +485,17 @@ impl Daemon {
         refresh: bool,
         fetch: impl FnOnce() -> Result<Value, ForgeError>,
     ) -> Result<Value, RpcError> {
+        self.forge_cached_for(key, refresh, FORGE_CACHE_TTL, fetch)
+    }
+
+    /// [`Daemon::forge_cached`] avec une durée de vie donnée.
+    fn forge_cached_for(
+        &self,
+        key: String,
+        refresh: bool,
+        ttl: Duration,
+        fetch: impl FnOnce() -> Result<Value, ForgeError>,
+    ) -> Result<Value, RpcError> {
         if !refresh
             && let Some(c) = self.forge_cache().get(&key, Instant::now())
             && let Cached::Json(v) = c.as_ref()
@@ -439,7 +510,7 @@ impl Daemon {
             forge_error(e)
         })?;
         self.forge_cache()
-            .put(key, Cached::Json(value.clone()), Instant::now());
+            .put(key, Cached::Json(value.clone()), Instant::now(), ttl);
         Ok(value)
     }
 
@@ -502,7 +573,7 @@ mod tests {
     fn cache_expires_and_is_bounded() {
         let mut c = ForgeCache::default();
         let t0 = Instant::now();
-        c.put("a".into(), Cached::Json(json!(1)), t0);
+        c.put("a".into(), Cached::Json(json!(1)), t0, FORGE_CACHE_TTL);
         assert!(c.get("a", t0 + Duration::from_secs(59)).is_some());
         assert!(c.get("a", t0 + FORGE_CACHE_TTL).is_none());
         assert!(c.entries.is_empty());
@@ -511,6 +582,7 @@ mod tests {
                 format!("k{i}"),
                 Cached::Json(json!(i)),
                 t0 + Duration::from_millis(i as u64),
+                FORGE_CACHE_TTL,
             );
         }
         assert_eq!(c.entries.len(), FORGE_CACHE_MAX);

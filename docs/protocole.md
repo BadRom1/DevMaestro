@@ -88,9 +88,10 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `-32019` | `worktrees.remove` refusé : « une session tourne dans ce worktree » (session vivante du démon dont le `cwd` est dans ce worktree) ; aussi `sessions.launch` / `sessions.resume` dans un worktree en cours de suppression (« ce worktree est en cours de suppression ») |
 | `-32020` | `worktrees.remove` refusé sans `force` : le worktree a des modifications non commitées ou des fichiers non suivis non ignorés ; `data: {files: [chemins], total}` (au plus 20 chemins, relatifs au worktree) |
 | `-32021` | `files.write` refusé : « le fichier a été modifié depuis son ouverture » ; `data: {version}` (version actuelle, `null` si le fichier n'existe plus) ; rien n'est écrit |
-| `-32022` | forge indisponible (`forge.issues`, `forge.issue`) : accès désactivé, dépôt hors GitHub, `gh` absent ou non connecté ; message « forge indisponible : <raison> », `data: {reason}` (la raison seule, en français) |
+| `-32022` | forge indisponible (toutes les méthodes `forge.*` sauf `forge.status`) : accès désactivé, dépôt hors GitHub, `gh` absent ou non connecté ; message « forge indisponible : <raison> », `data: {reason}` (la raison seule, en français) |
+| `-32023` | `forge.submitReview` refusé : « la demande de fusion a changé depuis son ouverture » (la tête relue n'est plus `expected_head_sha`) ; `data: {head_sha}` (tête actuelle) ; rien n'est publié |
 
-Une erreur peut porter un champ `data` (objet) avec des détails structurés, en plus de `code` et `message` ; il n'est présent que là où ce document le décrit (aujourd'hui : commentaires de fichier de `sessions.sendReview`, `{index, path, line, line_end}` ; `-32020` de `worktrees.remove`, `{files, total}` ; `-32021` de `files.write`, `{version}` ; `-32022` des méthodes `forge.*`, `{reason}`). Un client doit ignorer un `data` qu'il ne connaît pas.
+Une erreur peut porter un champ `data` (objet) avec des détails structurés, en plus de `code` et `message` ; il n'est présent que là où ce document le décrit (aujourd'hui : commentaires de fichier de `sessions.sendReview`, `{index, path, line, line_end}` ; `-32020` de `worktrees.remove`, `{files, total}` ; `-32021` de `files.write`, `{version}` ; `-32022` des méthodes `forge.*`, `{reason}` ; `-32023` de `forge.submitReview`, `{head_sha}` ; `-32602` d'un commentaire de `forge.submitReview`, `{index, path, line, side}`). Un client doit ignorer un `data` qu'il ne connaît pas.
 
 ## 4. Méthodes
 
@@ -137,6 +138,11 @@ Une erreur peut porter un champ `data` (objet) avec des détails structurés, en
 | `forge.status` | `{root, enabled?, refresh?}` | `{available, kind, host, repo, reason, capabilities}` (voir « Forge ») |
 | `forge.issues` | `{root, enabled?, refresh?, state?, search?, assignee?, label?, limit?}` | `{issues: [Issue sans corps], truncated}` |
 | `forge.issue` | `{root, number, enabled?, refresh?}` | `Issue` complète, sous-issues comprises |
+| `forge.pulls` | `{root, enabled?, refresh?, state?, search?, author?, limit?}` | `{pulls: [Pull sans corps], truncated}` (voir « Forge : demandes de fusion ») |
+| `forge.pull` | `{root, number, enabled?, refresh?}` | `Pull` complète : corps, `files`, `check_runs`, `review_threads` |
+| `forge.pullFile` | `{root, number, path, enabled?, refresh?}` | `{hunks, binary, too_large}` |
+| `forge.pullForBranch` | `{root, branch, enabled?, refresh?}` | `Pull` sans corps, ou `null` |
+| `forge.submitReview` | `{root, number, expected_head_sha, event, body?, comments?, enabled?}` | `{url}` — **écriture** vers la forge, socket de contrôle seulement |
 
 Détails :
 
@@ -464,7 +470,7 @@ Limites : `"squashed"` ne reconnaît que l'intégration **au contenu identique**
 
 ### Forge : issues et epics (v0.3, lot 13a, ADR 0006)
 
-Le démon lit les issues du dépôt d'un projet par la **CLI `gh` de l'utilisateur** : il ne tient aucun jeton, n'ouvre aucune connexion lui-même et n'écrit aucune configuration ; l'authentification, le mandataire et l'hôte (github.com ou GitHub Enterprise) sont ceux de `gh`. Rien n'est appelé tant qu'un client n'appelle pas une méthode `forge.*` (en pratique : l'utilisateur ouvre l'onglet « Issues »). Lecture seule dans ce lot : aucune écriture vers la forge.
+Le démon lit les issues du dépôt d'un projet par la **CLI `gh` de l'utilisateur** : il ne tient aucun jeton, n'ouvre aucune connexion lui-même et n'écrit aucune configuration ; l'authentification, le mandataire et l'hôte (github.com ou GitHub Enterprise) sont ceux de `gh`. Rien n'est appelé tant qu'un client n'appelle pas une méthode `forge.*` (en pratique : l'utilisateur ouvre l'onglet « Issues »). Lot 13a en lecture seule ; la seule écriture vers la forge est `forge.submitReview` (lot 13b, ci-dessous).
 
 **Paramètres communs** : `root` (chemin absolu d'un dossier existant, résolu ; en pratique la racine rendue par `projects.resolve` ; sinon `-32602`) ; `enabled` (booléen, `true` par défaut) : le réglage global « Accès aux forges » de l'app, envoyé à **chaque** appel (le démon ne garde aucun réglage) ; `false` : `available: false`, raison « désactivé dans les réglages », ni `git` ni `gh` ne sont lancés ; `refresh` (booléen, `false` par défaut) : ignorer le cache. Un autre type que booléen : `-32602`.
 
@@ -488,11 +494,11 @@ La commande à lancer est affichée par l'app, **jamais exécutée** par elle ni
 {"available": true, "kind": "github" | null, "host": "github.com" | null,
  "repo": "BadRom1/DevMaestro" | null,      // « propriétaire/dépôt »
  "reason": null | "texte en français",
- "capabilities": {"sub_issues": true, "epics": true, "review_comments": false, "checks": false,
+ "capabilities": {"sub_issues": true, "epics": true, "review_comments": true, "checks": true,
                   "initial_prompt": true} | null}
 ```
 
-`host` et `repo` sont donnés dès que l'URL est lue, même indisponible. `capabilities` (`null` sans forge reconnue) : ce que l'adaptateur sait faire **dans cette version** (revue ligne à ligne et CI viendront avec leurs lots) ; `initial_prompt: true` : `sessions.launch` accepte `initial` (voir plus bas ; aussi annoncé par `hello`, même sans forge).
+`host` et `repo` sont donnés dès que l'URL est lue, même indisponible. `capabilities` (`null` sans forge reconnue) : ce que l'adaptateur sait faire **dans cette version** (depuis le lot 13b : `review_comments` — revue ligne à ligne publiée par `forge.submitReview` — et `checks` — état de la CI des demandes de fusion) ; `initial_prompt: true` : `sessions.launch` accepte `initial` (voir plus bas ; aussi annoncé par `hello`, même sans forge).
 
 **`forge.issues`** : `state` `"open"` (défaut) | `"closed"` | `"all"` ; `search` : texte dans la syntaxe de recherche de GitHub (blancs de bord retirés, vide = absent, sans caractère de contrôle, 256 caractères au plus ; la combinaison de `state` et de qualificatifs écrits dans `search`, `is:closed` par exemple, est celle de `gh`, non vérifiée) ; `assignee` : `"@me"` ou `null` (autre valeur : `-32602`) ; `label` : un nom d'étiquette (100 caractères au plus) ; `limit` : entier de 1 à **200**, **50** par défaut. Lancé : `gh issue list --repo <hôte>/<propriétaire>/<dépôt> --json number,title,state,url,author,labels,assignees,updatedAt --limit=<limit+1> --state=<state> [--search=<texte>] [--assignee=@me] [--label=<étiquette>]` (champs vérifiés avec gh 2.87.2 ; valeurs de l'utilisateur toujours sous la forme `--option=valeur`, jamais lues comme une option ; les demandes de fusion n'y sont pas). `truncated` : il y en avait plus que `limit`. Ordre : celui rendu par `gh` (sans `search` : les plus récentes d'abord ; avec `search` : celui de la recherche de GitHub), non retouché. Chaque issue a la forme ci-dessous **sans** `body` ni `truncated` ; `parent` vaut `null`, `sub_issues` `[]` et `sub_issues_summary` `null` (`gh issue list` ne donne ni parente ni sous-issues : connues seulement par `forge.issue`).
 
@@ -535,6 +541,74 @@ Le contenu des issues (titres, corps, étiquettes) est **non fiable** : à affic
 La réponse de `sessions.launch` est inchangée (elle arrive avant l'envoi). Disponibilité : `hello.capabilities.initial_prompt` et `forge.status.capabilities.initial_prompt`.
 
 **Tests** : un binaire construit avec la fonctionnalité `test-support` lit `DEVMAESTRO_GH_BIN` (chemin absolu du faux `gh`), `DEVMAESTRO_GH_TIMEOUT_MS` (délai) et `DEVMAESTRO_INITIAL_PROMPT_TIMEOUT_MS` (délai du prompt initial) ; le binaire distribué les ignore et lance `gh` du `PATH`.
+
+### Forge : demandes de fusion, CI et revue (v0.3, lot 13b, ADR 0006)
+
+Mêmes paramètres communs (`root`, `enabled`, `refresh`), même lanceur de `gh`, mêmes erreurs (`-32022`, `-32602`, `-32603`) et même nettoyage que pour les issues (titres et étiquettes ramenés à une ligne, corps nettoyés et bornés à 64 Kio, caractères invisibles retirés ; contenu **non fiable**, jamais journalisé ni écrit en base). Demande de fusion introuvable : `-32602` « demande de fusion #n introuvable ». `number` : entier de 1 à 2³¹ − 1.
+
+**`forge.pulls`** : `state` `"open"` (défaut) | `"closed"` | `"merged"` | `"all"` ; `search` comme pour `forge.issues` ; `author` : `"@me"` ou `null` (autre valeur : `-32602`) ; `limit` 1 à **200**, **50** par défaut. Lancé : `gh pr list --repo <hôte>/<propriétaire>/<dépôt> --json number,title,state,isDraft,url,author,headRefName,headRefOid,baseRefName,isCrossRepository,headRepositoryOwner,updatedAt,additions,deletions,changedFiles,reviewDecision,statusCheckRollup,labels --limit=<limit+1> --state=<state> [--search=<texte>] [--author=@me]` (champs vérifiés avec gh 2.87.2). `truncated` : il y en avait plus que `limit`. Ordre : celui de `gh`.
+
+`Pull` :
+
+```json
+{"number": 21, "title": "…", "state": "open" | "closed" | "merged", "draft": false,
+ "url": "https://github.com/BadRom1/DevMaestro/pull/21",
+ "author": "BadRom1" | null,                 // « app/dependabot » pour une application
+ "head": {"branch": "13b-forge-revue", "sha": "04b39294…"},   // sha en minuscules
+ "base": {"branch": "main"},
+ "updated_at": "2026-10-20T16:40:42Z" | null,
+ "additions": 55, "deletions": 7, "changed_files": 4,
+ "review_decision": "approved" | "changes_requested" | "review_required" | null,
+ "checks": {"state": "success" | "failure" | "pending" | "none", "total": 4, "passed": 2, "failed": 1, "pending": 1},
+ "labels": [{"name": "forge", "color": "0366d6" | null}],
+ "body": "…", "truncated": false}            // forge.pull seulement
+```
+
+**CI** (`statusCheckRollup` de la tête) : jobs de workflow (*check runs*) et statuts de commit. Un job (`status`, `conclusion`) : pas encore `COMPLETED` → `pending` ; `SUCCESS`, `NEUTRAL` → `success` ; `SKIPPED` → `skipped` ; `CANCELLED`, `STALE` → `cancelled` ; autre conclusion (`FAILURE`, `TIMED_OUT`, `ACTION_REQUIRED`, `STARTUP_FAILURE`…) → `failure`. Un statut de commit (`state`) : `SUCCESS` → `success`, `PENDING`, `EXPECTED` → `pending`, autre (`FAILURE`, `ERROR`) → `failure`. Doublons (même workflow et même nom : relances) ramenés au plus récent (`started_at`). Résumé `checks` : `passed` = `success` + `skipped`, `failed` = `failure` + `cancelled`, `pending` ; `total` = leur somme ; `state` : `failure` dès qu'un échoue, sinon `pending` s'il en reste en cours, sinon `success` ; `none` sans vérification.
+
+**`forge.pull {number}`** → `Pull` complète, plus :
+
+```json
+{"files": [{"path": "docs/nouveau nom.md", "old_path": "docs/vieux nom.md",   // old_path : renommage seulement
+            "status": "A" | "M" | "D" | "R", "additions": 0, "deletions": 0}],
+ "files_truncated": false,                    // liste incomplète : changed_files > fichiers rendus (l'API REST s'arrête à 3 000)
+ "check_runs": [{"name": "build", "workflow": "Unit tests" | null,           // null : statut de commit
+                 "state": "success" | "failure" | "pending" | "skipped" | "cancelled",
+                 "url": "https://…" | null, "started_at": "…" | null, "completed_at": "…" | null}],
+ "review_threads": [{"path": "crates/core/src/domain/forge.rs", "line": 12 | null,  // null : fil périmé
+                     "side": "new" | "old", "resolved": false, "outdated": false,
+                     "comments": [{"author": "relecteur" | null, "body": "…", "created_at": "…" | null}],
+                     "comments_truncated": false}],
+ "review_threads_truncated": false}
+```
+
+Trois appels : `gh pr view <n> --repo … --json <champs de la liste>,body` ; `gh api --hostname <hôte> repos/<o>/<r>/pulls/<n>/files?per_page=100 --paginate --jq '.[] | {filename, previous_filename, status, additions, deletions}'` (API REST : `gh pr view --json files` n'a ni statut ni ancien chemin ; `status` : `added` et `copied` → `A`, `removed` → `D`, `renamed` → `R`, `modified`, `changed`, `unchanged` → `M` ; **3 000** fichiers au plus, limite de l'API) ; `gh api graphql --hostname <hôte> -f query=<requête> -f owner=<o> -f name=<r> -F number=<n>` (requête : `reviewThreads(first:100){totalCount nodes{path line diffSide isResolved isOutdated comments(first:50){totalCount nodes{author{login} body createdAt}}}}` ; fils de revue : l'API REST n'a pas l'état « résolu » ; **100** fils et **50** commentaires par fil au plus, `*_truncated` s'il y en avait plus ; `side` : `LEFT` → `"old"`, sinon `"new"`). Les URL (`url` des vérifications) ne sont gardées que si elles commencent par `https://` ou `http://`. Fils de revue en lecture seule.
+
+**`forge.pullFile {number, path}`** : `path` doit être un `path` de `files` de `forge.pull` (le détail gardé, sinon relu ; sinon `-32602`). Hunks à la forme et aux limites de `sessions.diffFile`, calculés à partir de `gh pr diff <n> --repo … --color=never`, découpé par fichier (en-têtes `diff --git`, chemin pris dans `+++ b/…`, `--- a/…` pour une suppression, `rename to` pour un renommage sans changement ; chemins cités par git, `"a/\303\251.md"`, décodés). `binary: true` pour `Binary files … differ` ; `too_large: true` si la partie du fichier dépasse **1 Mio** ou **20 000** lignes. Un fichier listé mais absent du diff (changement de mode seul) : aucun bloc.
+
+**Grosses demandes de fusion** : si `gh pr diff` échoue parce que GitHub refuse le diff (HTTP 406 : plus de 300 fichiers ou de 20 000 lignes) ou si sa sortie dépasse 8 Mio, le diff est reconstruit fichier par fichier à partir du champ `patch` de l'API REST : `gh api --hostname <hôte> repos/<o>/<r>/pulls/<n>/files?per_page=100 --paginate --jq '.[] | {filename, status, additions, deletions, patch}'` (chaque `patch` lu comme un diff unifié, mêmes limites ; plus de 1 Mio : `too_large`). Un fichier sans `patch` (GitHub ne dit pas pourquoi) : `too_large` si des lignes sont comptées, aucun bloc pour un renommage pur, `binary` sinon (un changement de mode seul est aussi vu comme binaire). Limites : 3 000 fichiers au plus (API REST) et 8 Mio de sortie pour l'ensemble des `patch` (au-delà : `-32603` « gh : réponse trop volumineuse… »). `forge.submitReview` vérifie ses lignes sur la même source. Le diff est gardé **par tête** (`head.sha`) : 10 min, 8 diffs au plus. Risque résiduel : `gh pr diff` lit la tête du moment ; une tête qui bouge entre la lecture du détail et celle du diff donne le diff de la nouvelle tête pendant au plus 30 s (« Recharger » ou `refresh: true`).
+
+**`forge.pullForBranch {branch}`** → `Pull` sans corps, ou `null` : `gh pr list --repo … --json <champs de la liste> --head=<branche> --state=open --limit=50`, puis la première dont la tête est dans le dépôt lui-même (`isCrossRepository: false` **et** `headRepositoryOwner.login` égal, sans casse, au propriétaire du dépôt : des fourches peuvent avoir une branche du même nom) et s'appelle exactement `branch`. `branch` : non vide, 255 octets au plus, sans blanc ni caractère de contrôle, sans `..`, ne commence pas par `-` ; sinon `-32602`.
+
+**Cache** : états des demandes de fusion et de leur CI (`forge.pulls`, `forge.pull`, `forge.pullForBranch`) gardés **30 s** (clés `["pulls", dépôt, état, recherche, @me, limite]`, `["pull", dépôt, numéro]`, `["pull_for_branch", dépôt, branche]`) ; diff par tête (ci-dessus) ; `refresh: true` relance `gh`. Une revue publiée (ou tentée), ou un conflit de tête, oublie tout ce qui est gardé des demandes de fusion du dépôt.
+
+**`forge.submitReview {root, number, expected_head_sha, event, body?, comments?, enabled?}`** → `{"url": "https://github.com/…/pull/21#pullrequestreview-80"}` (`html_url` de la revue créée). **Seule écriture vers la forge.** Servie seulement sur le socket de contrôle : le socket des relais ferme toute connexion qui envoie du JSON-RPC, et le socket de contrôle refuse les processus des sessions (§ 10) ; elle n'est donc jamais appelée par Claude au travers de l'app, seulement par une action explicite de l'utilisateur (ADR 0006, point 5).
+
+- `event` : `"comment"` | `"approve"` | `"request_changes"` ; `expected_head_sha` : la tête lue par l'utilisateur (`head.sha`), 40 ou 64 chiffres hexadécimaux (sans casse) ; `body` : texte (absent ou `null` = vide) ; `comments` : tableau (absent ou `null` = vide) de `{path, line, side: "new" | "old", body}`, **100** au plus.
+- Validation, **avant tout appel à `gh`** (`-32602`) : textes **écrits par l'utilisateur** nettoyés moins durement que le contenu venu de la forge : fins de ligne `\r\n` / `\r` ramenées à `\n`, caractères de contrôle (sauf `\n` et `\t`) et contrôles bidirectionnels (U+202A–U+202E, U+2066–U+2069, U+200E, U+200F, U+061C) retirés ; tout le reste est gardé (antiliant U+200D, sélecteurs de variation, U+00AD… : un émoji composé reste entier) ; seules les lignes blanches de début et de fin sont retirées (ligne blanche : blancs et caractères invisibles seulement), l'indentation de la première ligne est gardée (bloc de code). Cas de référence partagés avec le front : `crates/core/tests/fixtures/forge/user-text-cleaning.json` (`[{name, input, expected}]`). **65 536** caractères au plus par corps, 4 Mio de textes au plus en tout ; `body` **non vide** pour `comment` et `request_changes` (règle de l'API de GitHub, même avec des commentaires de ligne) : « « body » : un commentaire général est exigé pour « comment » (règle de l'API de GitHub) » ; `approve` peut être vide ; pour un commentaire : objet, `path` texte non vide sans contrôle, `line` entier de 1 à 2³¹ − 1, `side` `"new"` ou `"old"`, `body` non vide après nettoyage. Une erreur sur un commentaire commence par « commentaire <rang> : » et porte `data: {index, path, line, side}` (`index` à partir de 0, valeurs telles que reçues, `null` si absentes).
+- **Tête relue sans cache** : `gh pr view <n> --repo … --json headRefOid` ; différente de `expected_head_sha` : `-32023` « la demande de fusion a changé depuis son ouverture », `data: {head_sha}`, rien n'est publié.
+- **Lignes vérifiées contre le diff de cette tête** (s'il y a des commentaires ; diff gardé ou relu comme pour `forge.pullFile`) : le fichier doit être dans le diff (« « p » ne fait pas partie de la demande de fusion »), ni binaire, ni trop gros (« le diff de « p » est trop gros pour vérifier la ligne »), et la ligne doit être une ligne d'un bloc (ajoutée, retirée ou de contexte) de son côté : numéro dans la nouvelle version pour `"new"`, dans l'ancienne pour `"old"` (« la ligne n (nouvelle version) de « p » n'est pas dans le diff ») ; sinon `-32602` avec `data` du commentaire.
+- **Publication**, une seule fois, jamais relancée : `gh api -X POST repos/<o>/<r>/pulls/<n>/reviews --hostname <hôte> --input -`, le document écrit sur **l'entrée standard** de `gh` (jamais dans les arguments, visibles des autres processus ; 8 Mio au plus) :
+
+```json
+{"commit_id": "<expected_head_sha en minuscules>", "event": "COMMENT" | "APPROVE" | "REQUEST_CHANGES",
+ "body": "…",                                // "" seulement pour APPROVE
+ "comments": [{"path": "a.rs", "line": 12, "side": "RIGHT" | "LEFT", "body": "…"}]}   // RIGHT : "new", LEFT : "old"
+```
+
+- Échec : `-32603` « gh : <message> » (nettoyé), complété du détail de l'API (`errors` de la réponse, erreur 422 par exemple). Délai dépassé : `-32603` « gh n'a pas répondu à temps (délai de 15 s) : la revue a peut-être été publiée, vérifiez sur la forge avant de la renvoyer ». Le démon journalise la publication (genre et nombre de commentaires, jamais leur contenu).
+
+**Tests** : tout l'aller-retour d'écriture est vérifié avec le faux `gh` (`DEVMAESTRO_GH_BIN`), qui journalise ses arguments et l'entrée standard reçue ; aucun test n'écrit sur une vraie forge.
 
 ### Changer de mode (`sessions.setMode`)
 
@@ -890,7 +964,7 @@ Par profil, deux sources ; **chaque fenêtre** (`five_hour`, `seven_day`) garde 
 - **Transcripts** (vue conversation) : le démon ne lit que ceux des sessions qu'il connaît, résolus sous `<dossier du profil>/projects/` ; leur contenu ne va qu'aux clients du socket de contrôle et n'est jamais journalisé (§ 4, « Vue conversation »).
 - **Le relais n'autorise jamais rien par défaut** (délai, démon absent : sortie sans décision).
 
-- **Forge (`gh`)** : le démon lance la CLI `gh` de l'utilisateur, à la demande d'un client (méthodes `forge.*`), en lecture seule ; c'est `gh` qui va sur le réseau, avec la connexion et le mandataire de l'utilisateur. Le démon ne lit, ne transmet ni ne journalise aucun jeton : les variables `GH_*` / `GITHUB_*` héritées (jetons, hôte, dépôt) sont retirées de l'environnement de `gh` (sauf `GH_CONFIG_DIR`), aucune option `--show-token` n'est passée, et les messages de `gh` sont nettoyés (jetons masqués, chemins retirés) avant d'aller au client. Le contenu des issues n'est ni journalisé ni écrit en base (§ 4, « Forge »). Désactivable par le réglage « Accès aux forges » de l'app.
+- **Forge (`gh`)** : le démon lance la CLI `gh` de l'utilisateur, à la demande d'un client (méthodes `forge.*`), en lecture seule sauf `forge.submitReview` (publication d'une revue, à l'initiative explicite de l'utilisateur dans l'app, servie seulement sur le socket de contrôle, § 4 « Forge : demandes de fusion ») ; c'est `gh` qui va sur le réseau, avec la connexion et le mandataire de l'utilisateur. Le démon ne lit, ne transmet ni ne journalise aucun jeton : les variables `GH_*` / `GITHUB_*` héritées (jetons, hôte, dépôt) sont retirées de l'environnement de `gh` (sauf `GH_CONFIG_DIR`), aucune option `--show-token` n'est passée, et les messages de `gh` sont nettoyés (jetons masqués, chemins retirés) avant d'aller au client. Le contenu des issues et des demandes de fusion (dont les revues publiées) n'est ni journalisé ni écrit en base (§ 4, « Forge »). Désactivable par le réglage « Accès aux forges » de l'app.
 - **Identifiants Claude Code et réseau** : le démon lit (jamais n'écrit) le jeton OAuth de chaque profil (`.credentials.json`) pour l'API d'usage ; il ne l'envoie qu'à `https://api.anthropic.com/api/oauth/usage` en HTTPS (TLS rustls, sans suivre de redirection ni passer par un mandataire), ne le journalise pas et ne le renvoie à aucun client. C'est la seule connexion que le démon ouvre lui-même (`gh`, voir ci-dessus, ouvre les siennes) ; elle se coupe par `[quotas] usage_api = false` (§ 9). Aucun port n'est ouvert.
 
 ### Ce qui n'est pas protégé (atténuation, pas un bac à sable)

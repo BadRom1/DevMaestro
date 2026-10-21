@@ -54,7 +54,7 @@ const copied: string[] = []
 
 type Mod = typeof import('../../src/renderer/src/components/IssuesPanel')
 type Provider = typeof import('../../src/renderer/src/settings')['SettingsProvider']
-let IssuesPanel: Mod['IssuesPanel']
+let ForgePanel: Mod['ForgePanel']
 let SettingsProvider: Provider
 
 beforeAll(async () => {
@@ -73,7 +73,7 @@ beforeAll(async () => {
       return true
     },
   }
-  ;({ IssuesPanel } = await import('../../src/renderer/src/components/IssuesPanel'))
+  ;({ ForgePanel } = await import('../../src/renderer/src/components/IssuesPanel'))
   ;({ SettingsProvider } = await import('../../src/renderer/src/settings'))
 })
 
@@ -114,7 +114,7 @@ async function render(props: {
   onSupported?: (s: ForgeStatus) => void
 }) {
   const settings = { ...defaultSettings(), worktrees: { ...defaultSettings().worktrees, branchPrefix: 'romain/' } }
-  const panel = createElement(IssuesPanel, {
+  const panel = createElement(ForgePanel, {
     root: ROOT,
     name: 'projet',
     initialNumber: props.initialNumber ?? null,

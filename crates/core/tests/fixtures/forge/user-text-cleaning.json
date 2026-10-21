@@ -1,0 +1,67 @@
+[
+ {
+  "name": "texte simple",
+  "input": "Bien vu",
+  "expected": "Bien vu"
+ },
+ {
+  "name": "fins de ligne CRLF et CR",
+  "input": "a\r\nb\rc",
+  "expected": "a\nb\nc"
+ },
+ {
+  "name": "lignes blanches de d\u00e9but et de fin retir\u00e9es",
+  "input": "\n \t\n texte\n\n  \n",
+  "expected": " texte"
+ },
+ {
+  "name": "indentation de la premi\u00e8re ligne gard\u00e9e (bloc de code)",
+  "input": "\n    fn main() {\n        x();\n    }\n",
+  "expected": "    fn main() {\n        x();\n    }"
+ },
+ {
+  "name": "blancs de fin de la derni\u00e8re ligne gard\u00e9s",
+  "input": "a  ",
+  "expected": "a  "
+ },
+ {
+  "name": "tabulations gard\u00e9es",
+  "input": "\tx\ty",
+  "expected": "\tx\ty"
+ },
+ {
+  "name": "contr\u00f4les retir\u00e9s",
+  "input": "a\u0007b\u001b[31mc\u0000d\u007f\u0085e",
+  "expected": "ab[31mcde"
+ },
+ {
+  "name": "contr\u00f4les bidirectionnels retir\u00e9s",
+  "input": "a\u202ab\u202bc\u202cd\u202de\u202ef\u2066g\u2067h\u2068i\u2069j\u200ek\u200fl\u061cm",
+  "expected": "abcdefghijklm"
+ },
+ {
+  "name": "\u00e9moji compos\u00e9 intact (ZWJ, s\u00e9lecteur de variation)",
+  "input": "\ud83d\udc69\u200d\ud83d\udcbb \u2764\ufe0f \ud83c\udff3\ufe0f\u200d\ud83c\udf08",
+  "expected": "\ud83d\udc69\u200d\ud83d\udcbb \u2764\ufe0f \ud83c\udff3\ufe0f\u200d\ud83c\udf08"
+ },
+ {
+  "name": "trait d'union conditionnel et espace sans chasse gard\u00e9s",
+  "input": "anti\u00adconstitution\u200bnel",
+  "expected": "anti\u00adconstitution\u200bnel"
+ },
+ {
+  "name": "ligne faite d'invisibles seulement : blanche",
+  "input": "\u200b\n\u200dtexte\n\ufeff",
+  "expected": "\u200dtexte"
+ },
+ {
+  "name": "rien que des blancs : vide",
+  "input": " \n\t\r\n \u200b ",
+  "expected": ""
+ },
+ {
+  "name": "lignes blanches du milieu gard\u00e9es",
+  "input": "a\n\n\nb",
+  "expected": "a\n\n\nb"
+ }
+]

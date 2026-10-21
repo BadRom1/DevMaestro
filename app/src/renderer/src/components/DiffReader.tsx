@@ -7,7 +7,7 @@ import { Fragment, type KeyboardEvent, type ReactNode, type RefObject } from 're
 
 import type { DiffFile } from '../../../shared/protocol'
 import { STATUS_LABELS, countLabel, linesLabel, stepFile, type DiffRow, type LineAnchor } from '../state/diff'
-import type { ReviewAction, ReviewDraft } from '../state/review'
+import type { ReviewEditing } from '../state/review'
 import { PathLabel } from './common'
 import { CommentBox } from './ReviewBar'
 
@@ -119,7 +119,15 @@ export interface LineComment {
   text: string
 }
 
-/** Lignes du diff d'un fichier, avec « + » pour commenter, commentaires en attente et boîte ouverte. */
+/** Actions de la boîte de commentaire, communes au brouillon pour Claude et à celui de la forge. */
+export type TableAction = { type: 'editText'; text: string } | { type: 'save' } | { type: 'cancel' } | { type: 'delete'; id: number }
+
+/**
+ * Lignes du diff d'un fichier, avec « + » pour commenter, commentaires en
+ * attente et boîte ouverte. Le brouillon est celui de la revue pour Claude
+ * (onglets Diff, Commits) ou celui de la forge (demande de fusion) : jamais
+ * les deux à la fois.
+ */
 export function DiffTable({
   rows,
   draft,
@@ -128,10 +136,19 @@ export function DiffTable({
   commentsAt,
   editingAt,
   onEdit,
+  pendingLabel = 'Toi · commentaire en attente',
+  maxChars,
+  readOnly = false,
 }: {
   rows: readonly DiffRow[]
-  draft: ReviewDraft
-  review: (a: ReviewAction) => void
+  draft: { editing: Pick<ReviewEditing, 'text'> | null }
+  review: (a: TableAction) => void
+  /** Mention de chaque commentaire en attente (destination). */
+  pendingLabel?: string
+  /** Longueur maximale d'un commentaire (compteur de la boîte). */
+  maxChars?: number
+  /** Lecture seule : pas de « + ». */
+  readOnly?: boolean
   /** Limite de commentaires atteinte : plus de « + ». */
   full: boolean
   commentsAt: (a: LineAnchor) => readonly LineComment[]
@@ -160,7 +177,7 @@ export function DiffTable({
             <Fragment key={r.key}>
               <tr className={r.kind}>
                 <td className="cbtn">
-                  {a && !full && (
+                  {a && !full && !readOnly && (
                     <button
                       type="button"
                       aria-label={`Commenter la ligne ${a.line} (${a.side === 'new' ? 'nouvelle' : 'ancienne'} version)`}
@@ -185,7 +202,7 @@ export function DiffTable({
                   <td colSpan={4}>
                     <div className="cbox">
                       <div className="who">
-                        <span>Toi · commentaire en attente</span>
+                        <span>{pendingLabel}</span>
                         <button
                           type="button"
                           className="btn sm ghost"
@@ -208,6 +225,7 @@ export function DiffTable({
                       onText={(text) => review({ type: 'editText', text })}
                       onSave={() => review({ type: 'save' })}
                       onCancel={() => review({ type: 'cancel' })}
+                      {...(maxChars ? { max: maxChars } : {})}
                     />
                   </td>
                 </tr>

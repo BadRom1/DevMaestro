@@ -10,7 +10,8 @@ import { forgetCommitsMemory } from './state/commits'
 import { forgetCommitDiffs } from './components/CommitsView'
 import { forgetFilesMemory } from './components/FilesView'
 import { LinkDialog } from './components/LinkDialog'
-import { IssuesPanel, type EpicLaunchContext } from './components/IssuesPanel'
+import { ForgePanel, type EpicLaunchContext, type ForgeTab } from './components/IssuesPanel'
+import { resetBranchPullSupport } from './components/PullChip'
 import { NewSessionDialog } from './components/NewSessionDialog'
 import { SessionPane } from './components/SessionPane'
 import { Sidebar } from './components/Sidebar'
@@ -600,10 +601,18 @@ export function App() {
     if (state.connection.state !== 'connected') return
     setForgeSupported(null)
     setInitialSupported(false)
+    resetBranchPullSupport()
   }, [state.connection])
   const forgeOn = settings.forges.enabled && forgeSupported !== false
-  /** Panneau « Issues du projet » ouvert. */
-  const [issues, setIssues] = useState<{ root: string; name: string; key: string; number: number | null } | null>(null)
+  /** Panneau « Forge » du projet ouvert (onglet, issue ou demande de fusion à afficher). */
+  const [issues, setIssues] = useState<{
+    root: string
+    name: string
+    key: string
+    number: number | null
+    tab: ForgeTab
+    pull: number | null
+  } | null>(null)
   const closeIssues = useCallback(() => setIssues(null), [])
   const forgeUnsupported = useCallback(() => setForgeSupported(false), [])
   /**
@@ -617,10 +626,10 @@ export function App() {
     setInitialSupported(supportsInitialPrompt(status))
   }, [])
   const openIssues = useCallback(
-    (p: { root: string; name: string; key: string }, number: number | null = null) => {
+    (p: { root: string; name: string; key: string }, number: number | null = null, pull: number | null = null) => {
       setDialog(false)
       setDialogFrom(null)
-      setIssues({ ...p, number })
+      setIssues({ ...p, number, tab: pull !== null ? 'pulls' : 'issues', pull })
       loadWorktrees(p.root)
     },
     [loadWorktrees],
@@ -630,6 +639,14 @@ export function App() {
       const iss = sessionIssue(s)
       const g = groups.find((x) => x.sessions.some((y) => y.id === s.id))
       if (iss && g) openIssues({ root: g.root, name: g.name, key: g.key }, iss.number)
+    },
+    [groups, openIssues],
+  )
+  /** « PR #n » de l'en-tête d'une session : onglet « Demandes de fusion », détail de la demande. */
+  const openSessionPull = useCallback(
+    (s: Session, number: number) => {
+      const g = groups.find((x) => x.sessions.some((y) => y.id === s.id))
+      if (g) openIssues({ root: g.root, name: g.name, key: g.key }, null, number)
     },
     [groups, openIssues],
   )
@@ -730,6 +747,7 @@ export function App() {
       onSelectAgent={selectAgent}
       openAgents={openAgents}
       onOpenIssue={forgeOn ? openSessionIssue : undefined}
+      onOpenPull={forgeOn ? openSessionPull : undefined}
     />
   )
 
@@ -855,11 +873,13 @@ export function App() {
         />
       )}
       {issues && epicContext && (
-        <IssuesPanel
-          key={`${issues.root}#${issues.number ?? ''}`}
+        <ForgePanel
+          key={`${issues.root}#${issues.number ?? ''}#${issues.tab}#${issues.pull ?? ''}`}
           root={issues.root}
           name={issues.name}
           initialNumber={issues.number}
+          initialTab={issues.tab}
+          initialPull={issues.pull}
           epic={epicContext}
           onClose={closeIssues}
           onLink={setLink}

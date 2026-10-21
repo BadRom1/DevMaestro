@@ -120,7 +120,7 @@ export function Sidebar(props: {
   worktreesEnabled?: boolean
   /** Ouvre « Nettoyer les worktrees » d'un dépôt (`focus` : worktree visé). */
   onCleanup?: (root: string, name: string, focus: string | null) => void
-  /** Ouvre « Issues du projet » d'un dépôt (absent : forge masquée ou désactivée). */
+  /** Ouvre le panneau « Forge » (issues, demandes de fusion) d'un dépôt (absent : forge masquée ou désactivée). */
   onOpenIssues?: (project: { root: string; name: string; key: string }) => void
   /** Ouvre le détail de l'issue liée à une session (absent : « #n » affiché sans lien). */
   onOpenIssue?: (s: Session) => void
@@ -363,8 +363,8 @@ export function Sidebar(props: {
                 {canIssues && (
                   <button
                     className="proj-act"
-                    aria-label={`Issues de ${g.name}…`}
-                    title="Issues du projet…"
+                    aria-label={`Forge de ${g.name} : issues et demandes de fusion…`}
+                    title="Forge du projet : issues et demandes de fusion…"
                     onClick={() => props.onOpenIssues!({ root: g.root, name: g.name, key: g.key })}
                   >
                     <span aria-hidden="true">◎</span>

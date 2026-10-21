@@ -462,7 +462,8 @@ pub struct SessionRecord {
 pub enum ForgeError {
     /// Forge indisponible (CLI absente, non connectée…) : raison en français.
     Unavailable(String),
-    /// Issue introuvable (ou qui n'est pas une issue) : message en français.
+    /// Issue ou demande de fusion introuvable (ou qui n'est pas une issue) :
+    /// message en français.
     NotFound(String),
     /// La CLI a échoué, n'a pas répondu à temps ou a répondu trop ou mal
     /// (message nettoyé, sans chemin ni jeton).
@@ -493,6 +494,53 @@ pub trait Forge: Send + Sync {
         remote: &crate::domain::forge::RemoteRepo,
         number: u64,
     ) -> Result<crate::domain::forge::Issue, ForgeError>;
+    /// Demandes de fusion du dépôt, sans corps ; `true` s'il y en avait plus
+    /// que `filter.limit` (lot 13b).
+    fn pulls(
+        &self,
+        root: &Path,
+        remote: &crate::domain::forge::RemoteRepo,
+        filter: &crate::domain::forge::pulls::PullFilter,
+    ) -> Result<(Vec<crate::domain::forge::pulls::Pull>, bool), ForgeError>;
+    /// Une demande de fusion complète : corps, fichiers, vérifications, fils
+    /// de revue.
+    fn pull(
+        &self,
+        root: &Path,
+        remote: &crate::domain::forge::RemoteRepo,
+        number: u64,
+    ) -> Result<crate::domain::forge::pulls::PullDetail, ForgeError>;
+    /// Tête actuelle (empreinte du dernier commit) de la demande de fusion,
+    /// lue sans cache.
+    fn pull_head(
+        &self,
+        root: &Path,
+        remote: &crate::domain::forge::RemoteRepo,
+        number: u64,
+    ) -> Result<String, ForgeError>;
+    /// Diff de la demande de fusion, par fichier (nouveau chemin).
+    fn pull_diff(
+        &self,
+        root: &Path,
+        remote: &crate::domain::forge::RemoteRepo,
+        number: u64,
+    ) -> Result<Vec<(String, crate::domain::diff::FileDiff)>, ForgeError>;
+    /// Demande de fusion ouverte dont la tête est `branch` (du même dépôt).
+    fn pull_for_branch(
+        &self,
+        root: &Path,
+        remote: &crate::domain::forge::RemoteRepo,
+        branch: &str,
+    ) -> Result<Option<crate::domain::forge::pulls::Pull>, ForgeError>;
+    /// **Écriture** : publie la revue (déjà validée, lignes vérifiées) ; rend
+    /// l'URL de la revue. Jamais relancée d'elle-même.
+    fn submit_review(
+        &self,
+        root: &Path,
+        remote: &crate::domain::forge::RemoteRepo,
+        number: u64,
+        review: &crate::domain::forge::pulls::ForgeReview,
+    ) -> Result<String, ForgeError>;
 }
 
 /// Persistance des sessions.

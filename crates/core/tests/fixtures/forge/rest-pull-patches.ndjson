@@ -1,0 +1,6 @@
+{"additions": 1, "deletions": 1, "filename": "crates/core/src/domain/forge.rs", "patch": "@@ -10,4 +10,4 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024;\n /// dix\n /// onze\n-pub const GH_TIMEOUT: u64 = 10;\n+pub const GH_TIMEOUT: u64 = 15;\n /// treize", "status": "modified"}
+{"additions": 3, "deletions": 0, "filename": "crates/core/src/domain/forge/pulls.rs", "patch": "@@ -0,0 +1,3 @@\n+//! Demandes de fusion.\n+\n+pub mod x;", "status": "added"}
+{"additions": 0, "deletions": 2, "filename": "docs/ancien.md", "patch": "@@ -1,2 +0,0 @@\n-# Ancien\n-texte", "status": "removed"}
+{"additions": 0, "deletions": 0, "filename": "docs/nouveau nom.md", "patch": null, "status": "renamed"}
+{"additions": 0, "deletions": 0, "filename": "app/icone.png", "patch": null, "status": "modified"}
+{"additions": 30000, "deletions": 0, "filename": "données/énorme.json", "patch": null, "status": "added"}

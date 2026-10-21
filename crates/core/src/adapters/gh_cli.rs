@@ -1,4 +1,5 @@
-//! Forge GitHub par la CLI `gh` de l'utilisateur (ADR 0006, v0.3 lot 13a).
+//! Forge GitHub par la CLI `gh` de l'utilisateur (ADR 0006, v0.3 lots 13a
+//! et 13b ; demandes de fusion et revue : [`pulls`]).
 //!
 //! Le démon ne tient aucun jeton et n'ouvre aucune connexion lui-même : il
 //! lance `gh` (arguments séparés, jamais de shell, délai, sortie bornée,
@@ -32,10 +33,14 @@ use crate::domain::forge::{
 };
 use crate::ports::{Forge, ForgeError};
 
+pub mod pulls;
+
 /// Délai maximal d'un appel à `gh`.
 pub const GH_TIMEOUT: Duration = Duration::from_secs(15);
 /// Sortie maximale lue d'un appel à `gh` (au-delà : réponse refusée).
 pub const MAX_GH_OUTPUT: usize = 8 * 1024 * 1024;
+/// Entrée standard écrite au plus (`gh api --input -`).
+pub const MAX_GH_INPUT: usize = 8 * 1024 * 1024;
 /// Sortie d'erreur gardée au plus.
 const MAX_STDERR: u64 = 64 * 1024;
 /// Sous-issues lues au plus : GitHub en permet 100 par issue parente, en une
@@ -139,6 +144,24 @@ impl GhExec {
     /// processus (tué en entier au bout du délai, et après sa fin : aucun
     /// descendant ne survit), entrée fermée.
     pub fn run(&self, args: &[&str]) -> GhRun {
+        self.run_with(args, None)
+    }
+
+    /// Comme [`GhExec::run`], avec `input` écrit sur l'entrée standard (puis
+    /// fermée) : de quoi passer un document (`gh api --input -`) sans jamais
+    /// le mettre dans les arguments, visibles de tout processus. Au plus
+    /// [`MAX_GH_INPUT`] octets (au-delà : rien n'est lancé).
+    pub fn run_input(&self, args: &[&str], input: &[u8]) -> GhRun {
+        if input.len() > MAX_GH_INPUT {
+            return GhRun::SpawnFailed(format!(
+                "entrée trop volumineuse ({} Mio au plus)",
+                MAX_GH_INPUT / (1024 * 1024)
+            ));
+        }
+        self.run_with(args, Some(input.to_vec()))
+    }
+
+    fn run_with(&self, args: &[&str], input: Option<Vec<u8>>) -> GhRun {
         let Some(program) = &self.program else {
             return GhRun::Missing;
         };
@@ -146,7 +169,11 @@ impl GhExec {
         command
             .args(args)
             .current_dir(NEUTRAL_DIR)
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
@@ -162,6 +189,16 @@ impl GhExec {
             Err(e) => return GhRun::SpawnFailed(e.to_string()),
         };
         let pgid = child.id() as i32;
+        // Écriture dans un fil à part : si `gh` ne lit pas son entrée, le fil
+        // reste bloqué jusqu'à la fin (ou la mort) du groupe, qui ferme le
+        // tube (erreur d'écriture, SIGPIPE ignoré par Rust).
+        let writer = match (input, child.stdin.take()) {
+            (Some(bytes), Some(mut stdin)) => Some(std::thread::spawn(move || {
+                use std::io::Write;
+                let _ = stdin.write_all(&bytes);
+            })),
+            _ => None,
+        };
         let mut stdout = child.stdout.take().expect("piped");
         let mut stderr = child.stderr.take().expect("piped");
         let max = self.max_output as u64;
@@ -211,6 +248,9 @@ impl GhExec {
         };
         let mut stdout = reader.join().unwrap_or_default();
         let stderr = err_reader.join().unwrap_or_default();
+        if let Some(w) = writer {
+            let _ = w.join();
+        }
         let truncated = stdout.len() > self.max_output;
         stdout.truncate(self.max_output);
         GhRun::Done(GhOut {
@@ -342,7 +382,12 @@ impl GithubCli {
     /// Appel de `gh` qui doit réussir : sortie standard, ou l'erreur
     /// (`gh` absent ou non connecté : forge indisponible).
     fn call(&self, root: &Path, host: &str, args: &[&str]) -> Result<GhOut, ForgeError> {
-        match self.gh.run(args) {
+        self.done(root, host, self.gh.run(args))
+    }
+
+    /// Issue d'un lancement de `gh` ramenée à sa sortie, ou à l'erreur.
+    fn done(&self, root: &Path, host: &str, run: GhRun) -> Result<GhOut, ForgeError> {
+        match run {
             GhRun::Missing => Err(ForgeError::Unavailable(GH_MISSING.into())),
             GhRun::TimedOut => Err(ForgeError::Failed(format!(
                 "gh n'a pas répondu à temps (délai de {} s)",
@@ -608,8 +653,8 @@ impl Forge for GithubCli {
         Capabilities {
             sub_issues: true,
             epics: true,
-            review_comments: false,
-            checks: false,
+            review_comments: true,
+            checks: true,
         }
     }
 
@@ -681,6 +726,61 @@ impl Forge for GithubCli {
             issue.sub_issues = parse_rest_sub_issues(&out.stdout)?;
         }
         Ok(issue)
+    }
+
+    fn pulls(
+        &self,
+        root: &Path,
+        remote: &RemoteRepo,
+        filter: &crate::domain::forge::pulls::PullFilter,
+    ) -> Result<(Vec<crate::domain::forge::pulls::Pull>, bool), ForgeError> {
+        self.gh_pulls(root, remote, filter)
+    }
+
+    fn pull(
+        &self,
+        root: &Path,
+        remote: &RemoteRepo,
+        number: u64,
+    ) -> Result<crate::domain::forge::pulls::PullDetail, ForgeError> {
+        self.gh_pull(root, remote, number)
+    }
+
+    fn pull_head(
+        &self,
+        root: &Path,
+        remote: &RemoteRepo,
+        number: u64,
+    ) -> Result<String, ForgeError> {
+        self.gh_pull_head(root, remote, number)
+    }
+
+    fn pull_diff(
+        &self,
+        root: &Path,
+        remote: &RemoteRepo,
+        number: u64,
+    ) -> Result<Vec<(String, crate::domain::diff::FileDiff)>, ForgeError> {
+        self.gh_pull_diff(root, remote, number)
+    }
+
+    fn pull_for_branch(
+        &self,
+        root: &Path,
+        remote: &RemoteRepo,
+        branch: &str,
+    ) -> Result<Option<crate::domain::forge::pulls::Pull>, ForgeError> {
+        self.gh_pull_for_branch(root, remote, branch)
+    }
+
+    fn submit_review(
+        &self,
+        root: &Path,
+        remote: &RemoteRepo,
+        number: u64,
+        review: &crate::domain::forge::pulls::ForgeReview,
+    ) -> Result<String, ForgeError> {
+        self.gh_submit_review(root, remote, number, review)
     }
 }
 
@@ -964,6 +1064,38 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn launcher_writes_bounded_standard_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        // L'entrée est lue en entier (au-delà de la taille d'un tube).
+        let cat = GhExec::new(Some(script(d, "cat", "wc -c")), Duration::from_secs(5));
+        let doc = vec![b'x'; 300_000];
+        match cat.run_input(&["api"], &doc) {
+            GhRun::Done(o) => assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "300000"),
+            other => panic!("{other:?}"),
+        }
+        // `run` garde l'entrée fermée.
+        match cat.run(&[]) {
+            GhRun::Done(o) => assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "0"),
+            other => panic!("{other:?}"),
+        }
+        // Un `gh` qui ne lit pas son entrée ne bloque pas : délai, groupe tué.
+        let deaf = GhExec::new(
+            Some(script(d, "sourd", "sleep 30")),
+            Duration::from_millis(300),
+        );
+        let start = Instant::now();
+        assert!(matches!(deaf.run_input(&[], &doc), GhRun::TimedOut));
+        assert!(start.elapsed() < Duration::from_secs(3));
+        // Un `gh` qui sort sans lire : rendu normalement.
+        let quick = GhExec::new(Some(script(d, "vite", "echo ok")), Duration::from_secs(5));
+        assert!(matches!(quick.run_input(&[], &doc), GhRun::Done(o) if o.ok));
+        // Entrée trop grosse : rien n'est lancé.
+        let huge = vec![b'x'; MAX_GH_INPUT + 1];
+        assert!(matches!(cat.run_input(&[], &huge), GhRun::SpawnFailed(_)));
     }
 
     #[test]

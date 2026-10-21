@@ -74,6 +74,9 @@ pub mod error_code {
     /// Forge indisponible (`forge.issues`, `forge.issue`) : accès désactivé,
     /// dépôt hors GitHub, `gh` absent ou non connecté (raison dans `data.reason`).
     pub const FORGE_UNAVAILABLE: i64 = -32022;
+    /// `forge.submitReview` refusé : la tête de la demande de fusion a changé
+    /// depuis sa lecture (`data: {head_sha}`) ; rien n'est publié.
+    pub const PULL_HEAD_CHANGED: i64 = -32023;
 }
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {

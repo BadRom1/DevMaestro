@@ -38,6 +38,7 @@ export function CommentBox({
   placeholder = 'Ton commentaire sur cette ligne… (Entrée : ajouter, Maj+Entrée : nouvelle ligne, Échap : annuler)',
   label = 'Commentaire sur la ligne',
   title,
+  max = MAX_COMMENT_CHARS,
 }: {
   text: string
   onText: (t: string) => void
@@ -47,6 +48,8 @@ export function CommentBox({
   label?: string
   /** En-tête facultatif (lignes commentées…). */
   title?: string
+  /** Longueur maximale (compteur affiché près de la limite). */
+  max?: number
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
@@ -54,7 +57,8 @@ export function CommentBox({
   }, [])
   const n = [...text].length
   return (
-    <div className="cbox">
+    // Échap annule le commentaire sans fermer la fenêtre qui le contient (panneau « Forge »).
+    <div className="cbox" data-own-escape>
       {title && <div className="who">{title}</div>}
       <textarea
         ref={ref}
@@ -75,7 +79,7 @@ export function CommentBox({
       />
       <div className="row">
         <span className="hint counter" aria-live="polite">
-          {n > MAX_COMMENT_CHARS * 0.9 ? `${n}/${MAX_COMMENT_CHARS}` : ''}
+          {n > max * 0.9 ? `${n}/${max}` : ''}
         </span>
         <button type="button" className="btn sm ghost" onClick={onCancel}>
           Annuler

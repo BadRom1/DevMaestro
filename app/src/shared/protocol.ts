@@ -229,6 +229,130 @@ export interface Issue {
   sub_issues_summary?: { total: number; completed: number } | null
 }
 
+/* ---------- Forge : demandes de fusion, CI et revue (v0.3, lot 13b) ---------- */
+
+export type PullState = 'open' | 'closed' | 'merged'
+/** Filtre d'état de `forge.pulls`. */
+export type PullStateFilter = PullState | 'all'
+export const PULL_STATE_FILTERS: readonly PullStateFilter[] = ['open', 'merged', 'closed', 'all']
+
+export type ReviewDecision = 'approved' | 'changes_requested' | 'review_required'
+
+/** État résumé de la CI d'une demande de fusion. */
+export type ChecksState = 'success' | 'failure' | 'pending' | 'none'
+
+export interface ChecksSummary {
+  state: ChecksState
+  total: number
+  passed: number
+  failed: number
+  pending: number
+}
+
+export type CheckRunState = 'success' | 'failure' | 'pending' | 'skipped' | 'cancelled'
+
+export interface CheckRun {
+  name: string
+  /** Workflow du job ; `null` : statut de commit (absent : démon plus ancien). */
+  workflow?: string | null
+  state: CheckRunState
+  /** Page de la vérification sur la forge (non fiable : ouverte par la confirmation des liens). */
+  url: string | null
+  started_at: string | null
+  completed_at: string | null
+}
+
+/** Demande de fusion (PR, MR) : contenu **non fiable**, comme une issue. */
+export interface Pull {
+  number: number
+  title: string
+  state: PullState
+  draft: boolean
+  url: string
+  author: string | null
+  head: { branch: string; sha: string }
+  /** Propriétaire du dépôt de la tête (une fourche peut avoir le même nom de branche) ; absent : démon plus ancien. */
+  head_owner?: string | null
+  base: { branch: string }
+  updated_at: string | null
+  additions: number | null
+  deletions: number | null
+  changed_files: number | null
+  review_decision: ReviewDecision | null
+  checks: ChecksSummary | null
+  labels: IssueLabel[]
+  /** `forge.pull` seulement : Markdown, 64 Kio au plus. */
+  body?: string | null
+  truncated?: boolean | null
+}
+
+/** Fichier d'une demande de fusion ; `status` tel que donné par le démon (lettre de git ou mot de la forge). */
+export interface PullFile {
+  path: string
+  old_path?: string | null
+  status: string
+  additions: number | null
+  deletions: number | null
+}
+
+export interface ReviewThreadComment {
+  author: string | null
+  body: string
+  created_at: string | null
+}
+
+/** Fil de revue existant (lecture seule). `line` absent : commentaire sur une version dépassée du diff. */
+export interface ReviewThread {
+  path: string
+  line: number | null
+  side: ReviewSide | null
+  resolved: boolean
+  /** Fil sur une version dépassée du diff. */
+  outdated?: boolean
+  comments: ReviewThreadComment[]
+  /** Plus de 50 commentaires : les suivants sont sur la forge. */
+  comments_truncated?: boolean
+}
+
+/** `forge.pull` : la demande complète. */
+export interface PullDetail extends Pull {
+  files: PullFile[]
+  /** Liste des fichiers coupée (3 000 au plus, limite de l'API). */
+  files_truncated?: boolean
+  check_runs: CheckRun[]
+  review_threads: ReviewThread[]
+  /** Plus de 100 fils de revue : les suivants sont sur la forge. */
+  review_threads_truncated?: boolean
+}
+
+/** Filtres de `forge.pulls`. */
+export interface PullFilter {
+  state?: PullStateFilter
+  search?: string
+  author?: '@me' | null
+  limit?: number
+}
+
+export type ForgeReviewEvent = 'comment' | 'approve' | 'request_changes'
+export const FORGE_REVIEW_EVENTS: readonly ForgeReviewEvent[] = ['comment', 'approve', 'request_changes']
+
+/** Commentaire ligne à ligne d'une revue publiée sur la forge. */
+export interface ForgeReviewComment {
+  path: string
+  line: number
+  side: ReviewSide
+  body: string
+}
+
+/** Paramètres de `forge.submitReview` (hors `root`) : exactement ce qui est publié. */
+export interface ForgeReviewPayload {
+  number: number
+  expected_head_sha: string
+  event: ForgeReviewEvent
+  body: string
+  comments: ForgeReviewComment[]
+}
+
 /** Filtres de `forge.issues`. */
 export interface IssueFilter {
   state?: IssueStateFilter
@@ -908,10 +1032,32 @@ export interface Methods {
   'forge.issues': { params: { root: string; refresh?: boolean } & IssueFilter; result: { issues: Issue[]; truncated: boolean } }
   /** Une issue complète, sous-issues comprises. */
   'forge.issue': { params: { root: string; number: number; refresh?: boolean }; result: Issue }
+  /** Demandes de fusion du projet, sans corps (lot 13b). */
+  'forge.pulls': { params: { root: string; refresh?: boolean } & PullFilter; result: { pulls: Pull[]; truncated: boolean } }
+  /** Une demande complète : fichiers, vérifications de CI, fils de revue existants. */
+  'forge.pull': { params: { root: string; number: number; refresh?: boolean }; result: PullDetail }
+  /** Hunks du diff de la demande pour un fichier de `files`. */
+  'forge.pullFile': { params: { root: string; number: number; path: string; refresh?: boolean }; result: FileDiff }
+  /** Demande ouverte dont la tête est cette branche, ou `null`. */
+  'forge.pullForBranch': { params: { root: string; branch: string; refresh?: boolean }; result: Pull | null }
+  /**
+   * Publie une revue sur la forge (seule écriture). Appelée **uniquement**
+   * depuis le bouton « Publier » du dialogue de confirmation (ADR 0006, point 5).
+   */
+  'forge.submitReview': { params: { root: string } & ForgeReviewPayload; result: { url: string | null } }
 }
 
 /** Méthodes de la forge : le processus principal y ajoute `enabled` (réglage global). */
-export const FORGE_METHODS: readonly MethodName[] = ['forge.status', 'forge.issues', 'forge.issue']
+export const FORGE_METHODS: readonly MethodName[] = [
+  'forge.status',
+  'forge.issues',
+  'forge.issue',
+  'forge.pulls',
+  'forge.pull',
+  'forge.pullFile',
+  'forge.pullForBranch',
+  'forge.submitReview',
+]
 
 export type MethodName = keyof Methods
 
@@ -955,6 +1101,11 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'forge.status',
   'forge.issues',
   'forge.issue',
+  'forge.pulls',
+  'forge.pull',
+  'forge.pullFile',
+  'forge.pullForBranch',
+  'forge.submitReview',
 ]
 
 /** Codes d'erreur JSON-RPC du démon (protocole § 3). */
@@ -976,6 +1127,8 @@ export const ErrorCode = {
   FileChanged: -32021,
   /** `forge.*` : forge indisponible (`gh` absent ou non connecté, dépôt non GitHub, désactivé) ; `data: {reason}`. */
   ForgeUnavailable: -32022,
+  /** `forge.submitReview` : la tête de la demande a changé depuis sa lecture ; `data: {head_sha}`. */
+  PullChanged: -32023,
   /** Côté client : délai dépassé, connexion perdue (hors protocole). */
   Timeout: -1,
   Disconnected: -2,
