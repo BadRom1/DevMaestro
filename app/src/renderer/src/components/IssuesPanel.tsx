@@ -90,6 +90,8 @@ export interface EpicLaunchContext {
   locationLabel: string
   /** Le démon sait taper la consigne puis coller le contenu (`initial`). */
   initial: boolean
+  /** Modèle de la consigne `issue` du projet (Réglages → Consignes, lot 18). */
+  issueTemplate?: string
   /** Lance une session dans son worktree, avec son nom, son issue et son mode. */
   launch: (row: EpicRow, prefill: IssuePrefill, mode: EpicMode) => Promise<{ session: Session; warnings: string[] }>
   /** Session lancée (la liste de l'app est mise à jour, sans changer de vue). */
@@ -498,7 +500,7 @@ export function ForgePanel({
                   issue={current}
                   names={{ name: issueSessionName(current.number, current.title), branch: issueBranch(current.number, current.title, prefix) }}
                   onLink={onLink}
-                  onLaunch={() => onLaunchIssue(issuePrefill(current, prefix))}
+                  onLaunch={() => onLaunchIssue(issuePrefill(current, prefix, epic.issueTemplate))}
                   onEpic={() => setEpicOpen(true)}
                   onOpen={(n) => setSelected(n)}
                 />
@@ -657,6 +659,7 @@ function EpicLaunch({
         onRow: (number, p) => alive.current && setPrepared((m) => ({ ...m, [number]: p })),
         errorText,
         cancelled: () => !alive.current,
+        template: ctx.issueTemplate,
       })
     } finally {
       onBusy(false)

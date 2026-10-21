@@ -6,8 +6,11 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { promptDef, renderPrompt, resolvePrompt, type PromptSettings } from '../../../shared/prompts'
 import { ErrorCode, type DiffFile, type Session } from '../../../shared/protocol'
 import { CallError, call, errorCode, errorText } from '../api'
+import { usePromptScope } from '../promptScope'
+import { useOptionalSettings } from '../settings'
 import { awaitingAnswer } from '../state/status'
 import {
   MAX_COMMENTS,
@@ -21,6 +24,7 @@ import {
   isFileComment,
   parseRejection,
   rejectedId,
+  reviewPromptOf,
   commitCommentLabel,
   type CommitDraftComment,
   type FileDraftComment,
@@ -28,6 +32,9 @@ import {
   type ReviewDraft,
 } from '../state/review'
 import { ConfirmBar } from './ForgetConfirm'
+
+/** Sans réglages (composant rendu seul) : les consignes par défaut. */
+const NO_PROMPTS: PromptSettings = { global: {}, projects: {} }
 
 /** Boîte de commentaire (Entrée : ajouter, Maj+Entrée : nouvelle ligne, Échap : annuler). */
 export function CommentBox({
@@ -231,12 +238,25 @@ export function ReviewBar({
   const rejectedCommit: CommitDraftComment | null = rejectedComment && isCommitComment(rejectedComment) ? rejectedComment : null
   const [confirmClear, setConfirmClear] = useState(false)
   const built = useMemo(() => buildReview(draft, files), [draft, files])
+  const prompts = useOptionalSettings()?.settings.prompts ?? NO_PROMPTS
+  const scope = usePromptScope()
+  /** Consigne tapée devant la revue (Réglages → Consignes, lot 18), ou pourquoi elle est invalide. */
+  const instruction = useMemo(() => {
+    if (!built) return null
+    const { id, vars } = reviewPromptOf(built.comments)
+    const { template } = resolvePrompt(prompts, id, scope.projectKey)
+    try {
+      return { id, text: renderPrompt(id, template, { ...vars, branch: session.branch ?? null }) }
+    } catch (e) {
+      return { id, error: `Consigne « ${promptDef(id).label} » invalide : ${(e as Error).message} (à corriger dans Réglages → Consignes).` }
+    }
+  }, [built, prompts, scope.projectKey, session.branch])
   const count = activeComments(draft).length
   const waiting = awaitingAnswer(session)
   const full = count >= MAX_COMMENTS
 
   async function send() {
-    if (!built || !session.alive || waiting || sending || blockedReason) return
+    if (!built || !session.alive || waiting || sending || blockedReason || !instruction || !('text' in instruction)) return
     setSending(true)
     setSendError(null)
     setRejected(null)
@@ -245,6 +265,8 @@ export function ReviewBar({
         id: session.id,
         comments: built.comments,
         ...(built.general ? { general: built.general } : {}),
+        // Un démon ancien (sans `review_instruction`) ignore le champ et tape sa consigne fixe.
+        instruction: instruction.text,
       })
       // Seuls les commentaires envoyés partent ; les autres restent avec leur avertissement.
       review({ type: 'sent', ids: built.ids, general: !!built.general })
@@ -305,10 +327,26 @@ export function ReviewBar({
       <span className="hint" id="review-send-hint">
         <kbd>Ctrl</kbd>+<kbd>Entrée</kbd> pour envoyer
       </span>
+      {instruction && 'text' in instruction && (
+        <span className="hint review-instr" title="Consigne tapée devant la revue collée (Réglages → Consignes)">
+          {scope.reviewInstruction === false ? (
+            <>Démon ancien : la consigne par défaut du démon sera tapée (redémarrer orchd pour la tienne).</>
+          ) : (
+            <>
+              Consigne : <span className="mono">{instruction.text}</span>
+            </>
+          )}
+        </span>
+      )}
+      {instruction && 'error' in instruction && (
+        <span className="inline-err" role="alert">
+          {instruction.error}
+        </span>
+      )}
       <button
         type="button"
         className="btn pri"
-        disabled={!built || !session.alive || waiting || sending || !!blockedReason}
+        disabled={!built || !session.alive || waiting || sending || !!blockedReason || !instruction || !('text' in instruction)}
         onClick={() => void send()}
         title={
           blockedReason

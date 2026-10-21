@@ -1063,13 +1063,16 @@ fieldset.ifilters { border: 0; margin: 0; padding: 0; min-width: 0 }
 .ci-excerpt { margin: 4px 0; padding: 8px 10px; max-height: 340px; overflow: auto; background: var(--sunk); border: 1px solid var(--line-2); border-radius: var(--r); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; color: var(--fg) }
 .ci-jobs { margin: 2px 0 6px; padding-left: 18px; font-size: 13px }
 .kdeliv { display: inline-flex; flex-wrap: wrap; gap: 4px }
-.tplrow { display: grid; grid-template-columns: 180px minmax(0, 1fr); column-gap: 10px; row-gap: 2px; align-items: center; font-size: 13px }
-.tplrow input { height: var(--ctl-h); line-height: 18px; padding-block: 0 }
-.tplrow > .hint, .tplrow > .inline-err { grid-column: 2 }
-.tplrow > .hint:empty { display: none }
 .deliv-proj { display: grid; gap: 4px }
-.deliv-proj details { padding-left: 12px }
-.deliv-proj summary { cursor: pointer }
+/* Réglages → Consignes (lot 18). */
+.prompt-ed { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 4px; min-width: 0; font-size: 13px }
+.prompt-ed-h { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap }
+.prompt-ed-h h3 { margin: 0; font-size: 13.5px }
+.prompt-ed textarea { background: var(--sunk); border: 1px solid var(--line-2); border-radius: var(--r); padding: 5px 8px; width: 100%; min-width: 0; font-family: var(--f-mono); font-size: 12.5px; resize: vertical }
+.prompt-ed > .hint, .prompt-ed > .inline-err { min-width: 0; overflow-wrap: anywhere }
+.prompt-ed > .hint:empty { display: none }
+.prompt-origin { margin-left: auto }
+.review-instr { min-width: 0; max-width: 48ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 
 /* Changer de compte (v0.3, lot 15 ter) */
 .sh-asw { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 2px 0 4px; font-size: 12.5px }

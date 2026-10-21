@@ -204,6 +204,27 @@ describe('livraison d’une session', () => {
     expect(sends()[0]!.params.text).toBeUndefined()
   })
 
+  it('échec de CI : consigne du projet (Réglages → Consignes, lot 18), pas celle du démon', async () => {
+    const SESSION_B = { ...SESSION, branch: 'feat/x' }
+    await render(SESSION_B, { ...defaultSettings(), prompts: { global: {}, projects: { '/w/projet': { ciFailure: 'Exécution {execution} de {branche} en échec, répare :' } } } })
+    await act(async () => button('Voir l’échec').click())
+    await flush()
+    expect(document.querySelector('.deliv-prompt')!.textContent).toBe('Exécution 72 de feat/x en échec, répare :')
+    await act(async () => button('Envoyer l’échec à Claude').click())
+    await flush()
+    expect(sends()).toEqual([{ method: 'sessions.sendPrompt', params: { id: ID, instruction: 'Exécution 72 de feat/x en échec, répare :', pasted: EXCERPT } }])
+  })
+
+  it('livraison : consigne globale personnalisée tapée', async () => {
+    ci = { ...sessionCi(), delivery: 'none', pull: null }
+    await render(SESSION, { ...defaultSettings(), prompts: { global: { deliveryPr: 'PR de {branche} vers {base}.' }, projects: {} } })
+    await act(async () => button('Ouvrir une demande de fusion').click())
+    expect(document.body.textContent).toContain('Modèle : réglage global')
+    await act(async () => button('Envoyer à Claude').click())
+    await flush()
+    expect(sends()[0]!.params.text).toMatch(/^PR de .+ vers .+\.$/)
+  })
+
   it('rien n’est envoyable pendant une demande en attente', async () => {
     ci = { ...sessionCi(), delivery: 'none', pull: null }
     const waiting = { ...SESSION, status: { state: 'waiting', wait: 'permission' } } as unknown as Session

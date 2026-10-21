@@ -1181,7 +1181,11 @@ export interface Methods {
   }
   'sessions.diff': { params: { id: string }; result: DiffSummary }
   'sessions.diffFile': { params: { id: string; path: string }; result: FileDiff }
-  'sessions.sendReview': { params: { id: string; comments: AnyReviewComment[]; general?: string }; result: unknown }
+  'sessions.sendReview': {
+    /** `instruction` (lot 18) : consigne tapée personnalisée ; absente, celle du démon. */
+    params: { id: string; comments: AnyReviewComment[]; general?: string; instruction?: string }
+    result: unknown
+  }
   /** Commits de la session (`range` absent : choix automatique du démon). */
   'sessions.commits': { params: { id: string; limit?: number; range?: CommitRange }; result: CommitsList }
   'sessions.commitDiff': { params: { id: string; sha: string }; result: CommitDiff }

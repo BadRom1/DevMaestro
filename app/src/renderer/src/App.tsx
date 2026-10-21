@@ -52,6 +52,7 @@ import {
 import { resolveScheme } from './state/themeTokens'
 import { forgetComposerMemory } from './components/ConversationView'
 import { applyTheme, systemPrefersLight, terminalTheme, type ThemeMode } from './theme'
+import { resolvePrompt } from '../../shared/prompts'
 
 /** État gardé des onglets Diff, Fichiers, Commits et Conversation d'une session oubliée : libéré. */
 function forgetViewMemory(id: string): void {
@@ -716,6 +717,7 @@ export function App() {
     return {
       worktrees: worktreesSupported === true,
       initial: initialSupported,
+      issueTemplate: resolvePrompt(settings.prompts, 'issue', choice?.profileKey ?? issues.root).template,
       takenBranches: taken,
       profileLabel: profileLabelOf(profile).long,
       locationLabel: LOCATION_LABELS[location],
@@ -741,7 +743,7 @@ export function App() {
       },
       onLaunched: (s) => dispatch({ type: 'session.updated', session: s }),
     }
-  }, [issues, projectChoices, state.profiles, settings.projectProfiles, settings.worktrees, worktreeLists, worktreesSupported, initialSupported, profileLabelOf, termSize])
+  }, [issues, projectChoices, state.profiles, settings.projectProfiles, settings.worktrees, settings.prompts, worktreeLists, worktreesSupported, initialSupported, profileLabelOf, termSize])
 
   // Clic sur une notification desktop : afficher la session.
   const showRef = useRef(show)
@@ -825,6 +827,7 @@ export function App() {
       openAgents={openAgents}
       runnersSupported={runners.supported}
       slashCommands={state.connection.state === 'connected' ? state.connection.capabilities?.slash_commands === true : null}
+      reviewInstruction={state.connection.state === 'connected' ? state.connection.capabilities?.review_instruction === true : null}
       runnersRunning={selected ? (runners.counts[selected.id] ?? 0) : 0}
       onRunnersRunning={runners.noteRunning}
       onRunnersUnsupported={runners.markUnsupported}

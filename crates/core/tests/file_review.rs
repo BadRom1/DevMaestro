@@ -267,3 +267,93 @@ fn file_selection_outside_a_repository() {
         "# Revue de code\n\n### notes.md:3\n\n```markdown\n     3 | une idée\n```\n\nÀ développer\n"
     );
 }
+
+/// v0.3, lot 18 : consigne personnalisée (`instruction` de `sessions.sendReview`).
+#[test]
+fn custom_review_instruction() {
+    let env = Env::new();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::write(root.join("notes.md"), "# Notes\n\nune idée\n").unwrap();
+    let _daemon = env.start_daemon();
+    let mut c = Client::connect(&env);
+    let hello = c.call("hello", json!({}));
+    assert_eq!(hello["capabilities"]["review_instruction"], true);
+    let id = session(&mut c, &env, json!({"cwd": root}));
+    wait_idle(&mut c, id);
+    let comments = json!([file_comment("notes.md", 3, 3, "À développer")]);
+
+    // Refus, avant toute lecture : rien n'est envoyé.
+    for instruction in [
+        json!(42),
+        json!(["x"]),
+        json!({"text": "x"}),
+        json!("\u{200b} \n\t"),
+        json!("é".repeat(2001)),
+    ] {
+        assert_eq!(
+            c.call_err(
+                "sessions.sendReview",
+                json!({"id": id, "comments": comments, "instruction": instruction})
+            ),
+            -32602,
+            "{instruction}"
+        );
+    }
+    let message = |instruction: Value| {
+        let mut c = Client::connect(&env);
+        c.call("hello", json!({}));
+        c.call_raw(
+            "sessions.sendReview",
+            json!({"id": id, "comments": comments, "instruction": instruction}),
+        )["error"]["message"]
+            .clone()
+    };
+    assert_eq!(message(json!(42)), "« instruction » doit être un texte");
+    assert_eq!(message(json!("\u{200b} \n")), "« instruction » vide");
+    assert_eq!(
+        message(json!("é".repeat(2001))),
+        "« instruction » : 2001 caractères, 2000 au plus"
+    );
+    // Commentaire de fichier invalide mais consigne invalide : la consigne
+    // est refusée d'abord, sans lire le disque.
+    assert_eq!(
+        c.call_raw(
+            "sessions.sendReview",
+            json!({"id": id, "comments": [file_comment("absent.md", 1, 1, "x")],
+                   "instruction": ""}),
+        )["error"]["message"],
+        "« instruction » vide"
+    );
+    assert!(env.fake_events("pasted").is_empty(), "rien n'a été envoyé");
+
+    // Consigne personnalisée, ramenée à une ligne, suivie d'une espace.
+    let (typed, pasted) = send(
+        &mut c,
+        &env,
+        json!({"id": id, "comments": comments,
+               "instruction": "  Explique\u{200b} ce passage,\n\r\x1b[201~ sans rien modifier :\t"}),
+    );
+    assert_eq!(typed, "Explique ce passage, [201~ sans rien modifier : ");
+    assert_eq!(
+        pasted,
+        "# Revue de code\n\n### notes.md:3\n\n```markdown\n     3 | une idée\n```\n\nÀ développer\n"
+    );
+    // 2 000 caractères : acceptée telle quelle.
+    let (typed, _) = send(
+        &mut c,
+        &env,
+        json!({"id": id, "comments": comments, "instruction": "é".repeat(2000)}),
+    );
+    assert_eq!(typed, format!("{} ", "é".repeat(2000)));
+
+    // Absente ou `null` : consigne fixe inchangée.
+    let (typed, _) = send(&mut c, &env, json!({"id": id, "comments": comments}));
+    assert_eq!(typed, FILE_INSTRUCTION);
+    let (typed, _) = send(
+        &mut c,
+        &env,
+        json!({"id": id, "comments": comments, "instruction": null}),
+    );
+    assert_eq!(typed, FILE_INSTRUCTION);
+}

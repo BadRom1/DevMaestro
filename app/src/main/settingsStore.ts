@@ -9,7 +9,7 @@ import path from 'node:path'
 import {
   applyPatch,
   defaultSettings,
-  normalizeSettings,
+  readSettings,
   validatePatch,
   withRunnerConfirmed,
   type AppSettings,
@@ -39,7 +39,10 @@ export class SettingsStore {
   async load(): Promise<AppSettings> {
     try {
       const raw = await fs.readFile(this.file, 'utf8')
-      this.current = normalizeSettings(JSON.parse(raw))
+      const { settings, warnings } = readSettings(JSON.parse(raw))
+      // Modèle de consigne invalide (fichier modifié à la main, autre version) : retombé sur le niveau au-dessus.
+      for (const w of warnings) this.log(`réglages : ${w}`)
+      this.current = settings
       this.fresh = false
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code

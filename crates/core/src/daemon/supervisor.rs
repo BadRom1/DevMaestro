@@ -326,8 +326,9 @@ pub struct ReviewToSend {
     pub input: mpsc::Sender<Vec<u8>>,
     /// Verrou des écritures dans ce PTY.
     pub lock: PtyLock,
-    /// Consigne à taper.
-    pub instruction: &'static str,
+    /// Consigne à taper : consigne fixe, ou celle choisie par le client
+    /// (`instruction` de `sessions.sendReview`) suivie d'une espace.
+    pub instruction: String,
     /// Texte à coller (au plus [`crate::domain::diff::MAX_REVIEW_BYTES`]).
     pub text: String,
 }
@@ -1957,6 +1958,12 @@ impl Daemon {
             .with_data(json!({"index": index, "path": path, "line": line, "line_end": line_end}))
         }
         let id = session_id_param(params)?;
+        // Consigne personnalisée : validée avant les lectures coûteuses.
+        let custom_instruction = match params.get("instruction") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(forge::one_line_instruction(s, "instruction")?),
+            Some(_) => return Err(RpcError::params("« instruction » doit être un texte")),
+        };
         let text_param = |v: &Value, what: &str| -> Result<String, RpcError> {
             let t = v
                 .as_str()
@@ -2222,7 +2229,12 @@ impl Daemon {
             id,
             input,
             lock,
-            instruction: review_instruction(has_diff || has_commit, has_file),
+            // Une espace sépare la consigne du collage, comme les consignes
+            // fixes qui finissent par « : ».
+            instruction: match custom_instruction {
+                Some(i) => format!("{i} "),
+                None => review_instruction(has_diff || has_commit, has_file).to_owned(),
+            },
             text,
         })
     }

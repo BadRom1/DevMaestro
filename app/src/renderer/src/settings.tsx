@@ -121,3 +121,8 @@ export function useSettings(): SettingsApi {
   if (!v) throw new Error('useSettings hors de SettingsProvider')
   return v
 }
+
+/** Réglages s'il y a un `SettingsProvider` au-dessus, sinon `null` (composants rendus seuls, dans les tests). */
+export function useOptionalSettings(): SettingsApi | null {
+  return useContext(Ctx)
+}

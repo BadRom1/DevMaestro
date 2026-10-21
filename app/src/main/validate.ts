@@ -654,6 +654,8 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       optional(o, out, 'general', (x, k) => str(x, k, MAX_REVIEW_TEXT, { codePoints: true }))
       const general = typeof out.general === 'string' ? out.general.trim() : ''
       if ((out.comments as unknown[]).length === 0 && !general) throw new ValidationError('revue vide : aucun commentaire')
+      // Consigne tapée personnalisée (lot 18) : une ligne, comme `initial.instruction` ; ignorée d'un démon ancien.
+      if (present(o, 'instruction')) out.instruction = twoStep({ instruction: o.instruction }).instruction
       return out
     }
     case 'quotas.get':

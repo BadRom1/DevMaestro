@@ -72,6 +72,24 @@ pub(super) fn initial_param(params: &Value) -> Result<Option<InitialPrompt>, Rpc
     two_step_prompt(instruction, o.get("pasted"), "initial.").map(Some)
 }
 
+/// Consigne tapée (prompt en deux temps, consigne de revue) : ramenée à une
+/// ligne (contrôles et invisibles retirés, blancs réduits), non vide,
+/// [`MAX_INITIAL_INSTRUCTION_CHARS`] au plus. `field` : nom du champ dans les
+/// messages d'erreur.
+pub(super) fn one_line_instruction(instruction: &str, field: &str) -> Result<String, RpcError> {
+    let instruction = crate::domain::forge::one_line(instruction);
+    if instruction.is_empty() {
+        return Err(RpcError::params(format!("« {field} » vide")));
+    }
+    let n = instruction.chars().count();
+    if n > MAX_INITIAL_INSTRUCTION_CHARS {
+        return Err(RpcError::params(format!(
+            "« {field} » : {n} caractères, {MAX_INITIAL_INSTRUCTION_CHARS} au plus"
+        )));
+    }
+    Ok(instruction)
+}
+
 /// Prompt en deux temps (`initial` de `sessions.launch`, `{instruction,
 /// pasted}` de `sessions.sendPrompt`) : consigne ramenée à une ligne
 /// (contrôles et invisibles retirés), non vide,
@@ -93,16 +111,7 @@ pub(super) fn two_step_prompt(
             )));
         }
     };
-    let instruction = crate::domain::forge::one_line(instruction);
-    if instruction.is_empty() {
-        return Err(RpcError::params(format!("« {prefix}instruction » vide")));
-    }
-    let n = instruction.chars().count();
-    if n > MAX_INITIAL_INSTRUCTION_CHARS {
-        return Err(RpcError::params(format!(
-            "« {prefix}instruction » : {n} caractères, {MAX_INITIAL_INSTRUCTION_CHARS} au plus"
-        )));
-    }
+    let instruction = one_line_instruction(instruction, &format!("{prefix}instruction"))?;
     let pasted = crate::domain::forge::clean_text(pasted).trim().to_owned();
     if pasted.len() > super::MAX_PROMPT_BYTES {
         return Err(RpcError::params(format!(

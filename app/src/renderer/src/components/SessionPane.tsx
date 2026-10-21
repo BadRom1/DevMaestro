@@ -31,6 +31,7 @@ import { IssueChip } from './IssueChip'
 import { PullChip, useBranchPull } from './PullChip'
 import { DeliveryBar } from './DeliveryBar'
 import { profileKeyOf } from '../state/newSession'
+import { PromptScopeContext } from '../promptScope'
 import type { ITheme } from '@xterm/xterm'
 
 import { TerminalView } from '../terminal/TerminalView'
@@ -436,6 +437,7 @@ export function SessionPane({
   openAgents,
   runnersSupported,
   slashCommands = null,
+  reviewInstruction = null,
   runnersRunning,
   onRunnersRunning,
   onRunnersUnsupported,
@@ -450,6 +452,8 @@ export function SessionPane({
   runnersSupported: boolean | null
   /** Le démon connaît `commands.list` (lot 17, capacité `slash_commands`) ; sinon liste intégrée seule. */
   slashCommands?: boolean | null
+  /** Le démon tape la consigne de revue personnalisée (lot 18, capacité `review_instruction`). */
+  reviewInstruction?: boolean | null
   /** Exécutions en cours de la session affichée (badge de l'onglet). */
   runnersRunning: number
   onRunnersRunning: (sessionId: string, running: RunnerProc[]) => void
@@ -801,7 +805,12 @@ export function SessionPane({
         )
     }
   }
+  const promptScope = useMemo(
+    () => ({ projectKey: session && project ? profileKeyOf(session.cwd, project) : null, reviewInstruction }),
+    [session, project, reviewInstruction],
+  )
   return (
+    <PromptScopeContext.Provider value={promptScope}>
     <section className="panel sess" aria-label={session ? `Session ${sessionDisplayName(session)}` : 'Aucune session'}>
       {session ? (
         <Header
@@ -848,5 +857,6 @@ export function SessionPane({
         />
       </div>
     </section>
+    </PromptScopeContext.Provider>
   )
 }

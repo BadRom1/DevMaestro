@@ -8,7 +8,7 @@
  * - `applyPatch` : réglages + modification validée.
  */
 
-import { DEFAULT_MERGE_TEMPLATE, DEFAULT_PR_TEMPLATE, templateProblem } from './delivery'
+import { MAX_STORED_TEMPLATE, PROMPT_IDS, defaultPrompt, isPromptId, overridesFrom, promptDef, promptProblem, type PromptId, type PromptSettings } from './prompts'
 import { DELIVERY_MODES, type DeliveryMode } from './protocol'
 import { DEFAULT_WORKTREE_LOCATIONS, branchPrefixProblem, type DefaultWorktreeLocation } from './worktrees'
 
@@ -71,47 +71,39 @@ export interface AppSettings {
   runners: RunnerSettings
   /** Livraison et CI (v0.3, lot 14b). */
   delivery: DeliverySettings
+  /** Consignes tapées personnalisées (v0.3, lot 18), globales et par projet. */
+  prompts: PromptSettings
 }
 
-/** Livraison d'un projet : mode (bouton principal, CI suivie) et modèles propres (vides : ceux par défaut). */
+/**
+ * Livraison d'un projet : mode (bouton principal, CI suivie). Ses consignes
+ * sont dans `prompts` (lot 18 ; avant : `prTemplate` / `mergeTemplate` ici).
+ */
 export interface ProjectDelivery {
   mode: DeliveryMode
-  prTemplate?: string
-  mergeTemplate?: string
 }
 
 export interface DeliverySettings {
   /** Notification du bureau « CI en échec sur <session> ». */
   notifyCiFailure: boolean
-  /** Modèle de « Ouvrir une demande de fusion » (variables {branche}, {base}, {issue}). */
-  prTemplate: string
-  /** Modèle de « Fusionner dans <branche par défaut> ». */
-  mergeTemplate: string
   /** Par projet (même clé que `projectProfiles`). */
   projects: Record<string, ProjectDelivery>
 }
 
 /** Livraison effective d'un projet : ses réglages, sinon ceux par défaut (mode « PR »). */
-export function projectDelivery(s: DeliverySettings, projectKey: string | null): Required<ProjectDelivery> {
+export function projectDelivery(s: DeliverySettings, projectKey: string | null): ProjectDelivery {
   const p = projectKey && Object.prototype.hasOwnProperty.call(s.projects, projectKey) ? s.projects[projectKey] : undefined
-  return {
-    mode: p?.mode ?? 'pr',
-    prTemplate: p?.prTemplate || s.prTemplate,
-    mergeTemplate: p?.mergeTemplate || s.mergeTemplate,
-  }
+  return { mode: p?.mode ?? 'pr' }
 }
 
 function isDeliveryMode(v: unknown): v is DeliveryMode {
   return (DELIVERY_MODES as readonly unknown[]).includes(v)
 }
 
-/** Livraison d'un projet lue d'un fichier : `null` si illisible ; modèles invalides ignorés. */
+/** Livraison d'un projet lue d'un fichier : `null` si illisible (ses anciens modèles sont repris par `promptsFrom`). */
 function projectDeliveryFrom(v: unknown): ProjectDelivery | null {
   if (!isObj(v) || !isDeliveryMode(v.mode)) return null
-  const out: ProjectDelivery = { mode: v.mode }
-  if (typeof v.prTemplate === 'string' && templateProblem(v.prTemplate) === null) out.prTemplate = v.prTemplate
-  if (typeof v.mergeTemplate === 'string' && templateProblem(v.mergeTemplate) === null) out.mergeTemplate = v.mergeTemplate
-  return out
+  return { mode: v.mode }
 }
 
 function deliveryFrom(v: unknown): DeliverySettings {
@@ -125,30 +117,128 @@ function deliveryFrom(v: unknown): DeliverySettings {
       if (isProjectKey(k) && pd) projects[k] = pd
     }
   }
-  const template = (t: unknown, def: string) => (typeof t === 'string' && templateProblem(t) === null ? t : def)
   return {
     notifyCiFailure: typeof v.notifyCiFailure === 'boolean' ? v.notifyCiFailure : d.notifyCiFailure,
-    prTemplate: template(v.prTemplate, d.prTemplate),
-    mergeTemplate: template(v.mergeTemplate, d.mergeTemplate),
     projects,
   }
+}
+
+/** Anciens champs de modèle de la livraison (lot 14b) → consignes du registre (lot 18). */
+const LEGACY_DELIVERY_TEMPLATES = { prTemplate: 'deliveryPr', mergeTemplate: 'deliveryMerge' } as const satisfies Record<string, PromptId>
+
+/**
+ * Consignes lues d'un fichier. Migration du lot 14b : les modèles de
+ * livraison (`delivery.prTemplate`, `mergeTemplate`, et ceux de
+ * `delivery.projects`) deviennent des surcharges `deliveryPr` /
+ * `deliveryMerge` s'ils sont valides et différents du défaut, sauf si
+ * `prompts` en a déjà une (il l'emporte). Modèle invalide : ignoré, avec un
+ * avertissement (le niveau au-dessus s'applique).
+ */
+function promptsFrom(raw: Record<string, unknown>, warnings: string[]): PromptSettings {
+  const p = isObj(raw.prompts) ? raw.prompts : {}
+  if (raw.prompts !== undefined && !isObj(raw.prompts)) warnings.push('consignes illisibles : textes par défaut')
+  const global = overridesFrom(p.global, null, warnings)
+  const projects: Record<string, PromptSettings['projects'][string]> = {}
+  if (isObj(p.projects)) {
+    for (const [k, o] of Object.entries(p.projects)) {
+      if (Object.keys(projects).length >= MAX_PROJECT_PROFILES) break
+      if (!isProjectKey(k)) continue
+      const ov = overridesFrom(o, k, warnings)
+      if (Object.keys(ov).length) projects[k] = ov
+    }
+  }
+  const legacy = (src: Record<string, unknown>, into: PromptSettings['global'], where: string) => {
+    for (const [field, id] of Object.entries(LEGACY_DELIVERY_TEMPLATES)) {
+      const t = src[field]
+      if (t === undefined || t === '' || Object.prototype.hasOwnProperty.call(into, id)) continue
+      if (typeof t !== 'string' || t.length > MAX_STORED_TEMPLATE) {
+        warnings.push(`ancien modèle « ${promptDef(id).label} » ${where} illisible ou trop long : retiré`)
+        continue
+      }
+      const problem = promptProblem(id, t)
+      // Invalide : gardé (montré dans Réglages → Consignes pour être corrigé), jamais utilisé.
+      if (problem) warnings.push(`ancien modèle « ${promptDef(id).label} » ${where} invalide (${problem}) : gardé pour correction, non utilisé`)
+      if (t !== defaultPrompt(id)) into[id] = t
+    }
+  }
+  const d = raw.delivery
+  if (isObj(d)) {
+    legacy(d, global, 'global')
+    if (isObj(d.projects)) {
+      for (const [k, pd] of Object.entries(d.projects)) {
+        if (!isProjectKey(k) || !isObj(pd)) continue
+        if (!projects[k] && Object.keys(projects).length >= MAX_PROJECT_PROFILES) break
+        const ov = { ...(projects[k] ?? {}) }
+        legacy(pd, ov, `du projet ${k}`)
+        if (Object.keys(ov).length) projects[k] = ov
+      }
+    }
+  }
+  return { global, projects }
+}
+
+type PromptsPatch = NonNullable<SettingsPatch['prompts']>
+type OverridesPatch = Partial<Record<PromptId, string | null>>
+
+function overridesPatch(v: unknown, where: string): OverridesPatch {
+  if (!isObj(v)) throw new SettingsError(`« ${where} » doit être un objet`)
+  const out: OverridesPatch = {}
+  for (const [k, t] of Object.entries(v)) {
+    if (!isPromptId(k)) throw new SettingsError(`consigne inconnue : ${where}.${k}`)
+    if (t === null) {
+      out[k] = null
+      continue
+    }
+    const problem = promptProblem(k, t)
+    if (problem) throw new SettingsError(`consigne « ${promptDef(k).label} » : ${problem}`)
+    out[k] = t as string
+  }
+  return out
+}
+
+function promptsPatch(v: unknown): PromptsPatch {
+  if (!isObj(v)) throw new SettingsError('« prompts » doit être un objet')
+  for (const k of Object.keys(v)) {
+    if (k !== 'global' && k !== 'projects') throw new SettingsError(`réglage inconnu : prompts.${k}`)
+  }
+  const out: PromptsPatch = {}
+  if (v.global !== undefined) out.global = overridesPatch(v.global, 'prompts.global')
+  if (v.projects !== undefined) {
+    if (!isObj(v.projects)) throw new SettingsError('« prompts.projects » doit être un objet')
+    const entries = Object.entries(v.projects)
+    if (entries.length > MAX_PROJECT_PROFILES) throw new SettingsError('trop de projets')
+    const pp: Record<string, OverridesPatch | null> = {}
+    for (const [k, o] of entries) {
+      if (!isProjectKey(k)) throw new SettingsError('projet : chemin absolu attendu')
+      pp[k] = o === null ? null : overridesPatch(o, 'prompts.projects')
+    }
+    out.projects = pp
+  }
+  return out
+}
+
+function applyOverrides<T extends Partial<Record<PromptId, string>>>(base: T, patch: OverridesPatch): T {
+  const next = { ...base } as Record<string, string>
+  for (const [k, t] of Object.entries(patch)) {
+    if (t === null || t === undefined) delete next[k]
+    else next[k] = t
+  }
+  return next as T
 }
 
 function deliveryPatch(v: unknown): NonNullable<SettingsPatch['delivery']> {
   if (!isObj(v)) throw new SettingsError('« delivery » doit être un objet')
   const out: NonNullable<SettingsPatch['delivery']> = {}
   for (const k of Object.keys(v)) {
-    if (!['notifyCiFailure', 'prTemplate', 'mergeTemplate', 'projects'].includes(k)) throw new SettingsError(`réglage inconnu : delivery.${k}`)
+    if (!['notifyCiFailure', 'projects'].includes(k)) {
+      throw new SettingsError(
+        k === 'prTemplate' || k === 'mergeTemplate' ? `« delivery.${k} » : les consignes se règlent dans « prompts »` : `réglage inconnu : delivery.${k}`,
+      )
+    }
   }
   if (v.notifyCiFailure !== undefined) {
     if (typeof v.notifyCiFailure !== 'boolean') throw new SettingsError('« delivery.notifyCiFailure » doit être un booléen')
     out.notifyCiFailure = v.notifyCiFailure
-  }
-  for (const k of ['prTemplate', 'mergeTemplate'] as const) {
-    if (v[k] === undefined) continue
-    const problem = templateProblem(v[k])
-    if (problem) throw new SettingsError(`« delivery.${k} » : ${problem}`)
-    out[k] = v[k] as string
   }
   if (v.projects !== undefined) {
     if (!isObj(v.projects)) throw new SettingsError('« delivery.projects » doit être un objet')
@@ -163,18 +253,10 @@ function deliveryPatch(v: unknown): NonNullable<SettingsPatch['delivery']> {
       }
       if (!isObj(p)) throw new SettingsError(`livraison invalide pour ${k}`)
       for (const f of Object.keys(p)) {
-        if (!['mode', 'prTemplate', 'mergeTemplate'].includes(f)) throw new SettingsError(`réglage inconnu : delivery.projects.${f}`)
+        if (f !== 'mode') throw new SettingsError(`réglage inconnu : delivery.projects.${f}`)
       }
       if (!isDeliveryMode(p.mode)) throw new SettingsError(`« mode » doit valoir ${DELIVERY_MODES.join(' ou ')} pour ${k}`)
-      const pd: ProjectDelivery = { mode: p.mode }
-      for (const t of ['prTemplate', 'mergeTemplate'] as const) {
-        // Vide : modèle par défaut.
-        if (p[t] === undefined || p[t] === '') continue
-        const problem = templateProblem(p[t])
-        if (problem) throw new SettingsError(`modèle du projet ${k} : ${problem}`)
-        pd[t] = p[t] as string
-      }
-      pp[k] = pd
+      pp[k] = { mode: p.mode }
     }
     out.projects = pp
   }
@@ -294,9 +376,16 @@ export interface SettingsPatch {
   /** Champs fournis seulement ; `projects` fusionné (`null` retire l'entrée, une entrée remplace celle du projet). */
   delivery?: {
     notifyCiFailure?: boolean
-    prTemplate?: string
-    mergeTemplate?: string
     projects?: Record<string, ProjectDelivery | null>
+  }
+  /**
+   * Consignes (lot 18), fusionnées consigne par consigne : un modèle remplace
+   * la surcharge, `null` la retire (le niveau au-dessus s'applique) ; un
+   * projet à `null` perd toutes ses surcharges.
+   */
+  prompts?: {
+    global?: Partial<Record<PromptId, string | null>>
+    projects?: Record<string, Partial<Record<PromptId, string | null>> | null>
   }
 }
 
@@ -321,7 +410,8 @@ export function defaultSettings(): AppSettings {
     ui: { zoom: DEFAULT_ZOOM, sessionTab: DEFAULT_SESSION_TAB },
     forges: { enabled: true },
     runners: { confirmed: {} },
-    delivery: { notifyCiFailure: true, prTemplate: DEFAULT_PR_TEMPLATE, mergeTemplate: DEFAULT_MERGE_TEMPLATE, projects: {} },
+    delivery: { notifyCiFailure: true, projects: {} },
+    prompts: { global: {}, projects: {} },
   }
 }
 
@@ -542,8 +632,17 @@ export class SettingsError extends Error {
 
 /** Lecture tolérante (fichier de réglages, éventuellement d'une autre version). */
 export function normalizeSettings(raw: unknown): AppSettings {
+  return readSettings(raw).settings
+}
+
+/**
+ * Lecture tolérante, avec les avertissements à journaliser (aujourd'hui :
+ * consignes invalides ignorées, lot 18).
+ */
+export function readSettings(raw: unknown): { settings: AppSettings; warnings: string[] } {
   const d = defaultSettings()
-  if (!isObj(raw)) return d
+  if (!isObj(raw)) return { settings: d, warnings: [] }
+  const warnings: string[] = []
   const profiles: Record<string, string> = {}
   if (isObj(raw.projectProfiles)) {
     for (const [k, v] of Object.entries(raw.projectProfiles)) {
@@ -551,7 +650,7 @@ export function normalizeSettings(raw: unknown): AppSettings {
       if (isProjectKey(k) && isProfileName(v)) profiles[k] = v
     }
   }
-  return {
+  const settings: AppSettings = {
     version: 1,
     theme: themeFrom(raw.theme),
     notifications: {
@@ -571,7 +670,9 @@ export function normalizeSettings(raw: unknown): AppSettings {
     },
     runners: runnersFrom(raw.runners),
     delivery: deliveryFrom(raw.delivery),
+    prompts: promptsFrom(raw, warnings),
   }
+  return { settings, warnings }
 }
 
 /** Réglages des runners lus d'un fichier : entrées invalides ignorées. */
@@ -623,7 +724,7 @@ export function validatePatch(raw: unknown): SettingsPatch {
   if (!isObj(raw)) throw new SettingsError('modification des réglages : objet attendu')
   const out: SettingsPatch = {}
   for (const k of Object.keys(raw)) {
-    if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view', 'worktrees', 'ui', 'forges', 'delivery'].includes(k)) {
+    if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view', 'worktrees', 'ui', 'forges', 'delivery', 'prompts'].includes(k)) {
       throw new SettingsError(k === 'runners' ? 'les commandes acceptées ne se modifient pas depuis la page' : `réglage inconnu : ${k}`)
     }
   }
@@ -678,6 +779,7 @@ export function validatePatch(raw: unknown): SettingsPatch {
     out.forges = { enabled: raw.forges.enabled }
   }
   if (raw.delivery !== undefined) out.delivery = deliveryPatch(raw.delivery)
+  if (raw.prompts !== undefined) out.prompts = promptsPatch(raw.prompts)
   return out
 }
 
@@ -788,6 +890,18 @@ export function applyPatch(s: AppSettings, p: SettingsPatch): AppSettings {
     }
     next.delivery = d
   }
+  if (p.prompts) {
+    const global = p.prompts.global ? applyOverrides(s.prompts.global, p.prompts.global) : s.prompts.global
+    const projects = { ...s.prompts.projects }
+    for (const [k, o] of Object.entries(p.prompts.projects ?? {})) {
+      const ov = o === null ? {} : applyOverrides(projects[k] ?? {}, o)
+      delete projects[k]
+      if (Object.keys(ov).length) projects[k] = ov
+    }
+    const keys = Object.keys(projects)
+    for (const k of keys.slice(0, Math.max(0, keys.length - MAX_PROJECT_PROFILES))) delete projects[k]
+    next.prompts = { global, projects }
+  }
   return next
 }
 
@@ -801,6 +915,20 @@ export function mergePatches(a: SettingsPatch, b: SettingsPatch): SettingsPatch 
   if (a.delivery && b.delivery) {
     out.delivery = { ...a.delivery, ...b.delivery }
     if (a.delivery.projects && b.delivery.projects) out.delivery.projects = { ...a.delivery.projects, ...b.delivery.projects }
+  }
+  if (a.prompts && b.prompts) {
+    const projects: Record<string, OverridesPatch | null> = { ...a.prompts.projects }
+    for (const [k, o] of Object.entries(b.prompts.projects ?? {})) {
+      const prev = projects[k]
+      if (o === null || prev === undefined) projects[k] = o
+      // Projet vidé puis modifié : toutes ses surcharges retirées, sauf celles de la seconde.
+      else if (prev === null) projects[k] = { ...Object.fromEntries(PROMPT_IDS.map((id) => [id, null])), ...o }
+      else projects[k] = { ...prev, ...o }
+    }
+    out.prompts = {
+      ...(a.prompts.global || b.prompts.global ? { global: { ...a.prompts.global, ...b.prompts.global } } : {}),
+      ...(a.prompts.projects || b.prompts.projects ? { projects } : {}),
+    }
   }
   if (a.worktrees && b.worktrees) {
     out.worktrees = { ...a.worktrees, ...b.worktrees }

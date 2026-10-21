@@ -328,7 +328,7 @@ impl Connection {
                 "protocol": PROTOCOL_VERSION,
                 "pid": std::process::id(),
                 // Fonctions du démon détectables par le client (lot 13a).
-                "capabilities": {"initial_prompt": true, "runners": true, "send_prompt_paste": true, "ci": true, "slash_commands": true},
+                "capabilities": {"initial_prompt": true, "runners": true, "send_prompt_paste": true, "ci": true, "slash_commands": true, "review_instruction": true},
             }),
             "profiles.list" => d.profiles()?,
             "projects.resolve" => {

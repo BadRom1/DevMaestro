@@ -3,7 +3,8 @@
  * (jamais la couleur seule : symbole et texte), boutons de livraison
  * disponibles, exécutions en échec. Calculs purs, testables sans DOM.
  */
-import { actionLabel, primaryAction, renderDeliveryPrompt, type DeliveryAction } from '../../../shared/delivery'
+import { actionLabel, primaryAction, type DeliveryAction } from '../../../shared/delivery'
+import { renderPrompt, type PromptId } from '../../../shared/prompts'
 import type { ChecksState, DeliveryMode, DeliveryState, Run, Session, SessionCi, SessionDelivery } from '../../../shared/protocol'
 import { ErrorCode } from '../../../shared/protocol'
 import type { Badge } from './forgePulls'
@@ -76,16 +77,22 @@ export function deliveryBlocker(
   return null
 }
 
+/** Consigne (registre du lot 18) d'un bouton de livraison. */
+export function deliveryPromptId(action: DeliveryAction): PromptId {
+  return action === 'pr' ? 'deliveryPr' : 'deliveryMerge'
+}
+
 /** Consigne d'un bouton de livraison, ou le message d'erreur (modèle invalide). */
 export function deliveryPrompt(
+  action: DeliveryAction,
   template: string,
   session: Pick<Session, 'branch' | 'issue'>,
   base: string | null,
 ): { text: string } | { error: string } {
   try {
-    return { text: renderDeliveryPrompt(template, { branch: session.branch ?? null, base, issue: session.issue?.number ?? null }) }
+    return { text: renderPrompt(deliveryPromptId(action), template, { branch: session.branch ?? null, base, issue: session.issue?.number ?? null }) }
   } catch (e) {
-    return { error: `Modèle de consigne invalide : ${(e as Error).message} (à corriger dans les réglages).` }
+    return { error: `Modèle de consigne invalide : ${(e as Error).message} (à corriger dans Réglages → Consignes).` }
   }
 }
 

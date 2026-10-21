@@ -16,6 +16,7 @@
  * session, le démon le refuse et la barre de revue le désigne.
  */
 import type { AnyReviewComment, DiffFile, ReviewSide } from '../../../shared/protocol'
+import type { PromptVars } from '../../../shared/prompts'
 import type { DiffRow, LineAnchor } from './diff'
 
 /** Limites du démon (`sessions.sendReview`). */
@@ -352,4 +353,16 @@ export function rejectedId(built: Pick<BuiltReview, 'comments' | 'ids'>, r: Reje
     if (i >= 0) return built.ids[i] ?? null
   }
   return null
+}
+
+/**
+ * Consigne tapée devant une revue (lot 18), choisie comme le démon le fait :
+ * celle des extraits de fichiers si la revue n'a que des commentaires de
+ * fichier, sinon celle de la revue (au moins un commentaire de diff ou de
+ * commit, ou seulement la remarque générale).
+ */
+export function reviewPromptOf(comments: readonly AnyReviewComment[]): { id: 'review' | 'fileExcerpts'; vars: PromptVars } {
+  const files = comments.filter((c) => 'kind' in c && c.kind === 'file').length
+  if (files > 0 && files === comments.length) return { id: 'fileExcerpts', vars: { excerpts: files } }
+  return { id: 'review', vars: { comments: comments.length } }
 }

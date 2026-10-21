@@ -1,7 +1,8 @@
 /**
  * Fenêtre « Réglages » (maquette) : Apparence (mode, puis palette, couleurs et
  * aperçu propres au mode clair et au mode sombre) et Général (notifications, confirmations, libellés des
- * profils, profil par défaut par projet). Les modifications s'appliquent tout
+ * profils, profil par défaut par projet) et Consignes (textes tapés dans les
+ * sessions, lot 18). Les modifications s'appliquent tout
  * de suite et sont enregistrées par le processus principal.
  */
 import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react'
@@ -35,7 +36,6 @@ import {
   branchPrefixProblem,
   type DefaultWorktreeLocation,
 } from '../../../shared/worktrees'
-import { DEFAULT_MERGE_TEMPLATE, DEFAULT_PR_TEMPLATE, MAX_DELIVERY_TEMPLATE, templateProblem } from '../../../shared/delivery'
 import type { DeliveryMode } from '../../../shared/protocol'
 import type { ProjectDelivery } from '../../../shared/settings'
 import { api } from '../api'
@@ -46,9 +46,10 @@ import { tildify } from '../state/format'
 import { Meter, ProfileBadge, StatusGlyph } from './common'
 import { ConfirmBar } from './ForgetConfirm'
 import { Modal } from './Modal'
+import { PromptSettings } from './PromptSettings'
 import { AUTO_TITLE, THEMES } from './TopBar'
 
-type Tab = 'apparence' | 'general'
+type Tab = 'apparence' | 'general' | 'consignes'
 
 const PREVIEW_GLYPHS = [
   { kind: 'waiting', label: 'À répondre' },
@@ -691,51 +692,6 @@ function Worktrees({ projects, home }: { projects: ProjectChoice[]; home: string
 
 const MODE_LABELS: Record<DeliveryMode, string> = { pr: 'Demande de fusion (PR)', trunk: 'Trunk-based (fusion sur la branche par défaut)' }
 
-/** Champ d'un modèle de consigne : enregistré seulement s'il est valide (vide : celui par défaut, si `allowEmpty`). */
-function TemplateField({
-  label,
-  value,
-  placeholder,
-  allowEmpty,
-  onSave,
-}: {
-  label: string
-  value: string
-  placeholder?: string
-  allowEmpty: boolean
-  onSave: (v: string) => void
-}) {
-  const [text, setText] = useState(value)
-  const [error, setError] = useState<string | null>(null)
-  const id = useId()
-  useEffect(() => {
-    setText(value)
-  }, [value])
-  return (
-    <label className="tplrow">
-      <span>{label}</span>
-      <input
-        value={text}
-        maxLength={MAX_DELIVERY_TEMPLATE}
-        placeholder={placeholder}
-        spellCheck={false}
-        aria-invalid={error ? true : undefined}
-        aria-describedby={`${id}-e`}
-        onChange={(e) => {
-          const v = e.target.value
-          setText(v)
-          const problem = allowEmpty && v === '' ? null : templateProblem(v)
-          setError(problem)
-          if (!problem) onSave(v)
-        }}
-      />
-      <span id={`${id}-e`} className={error ? 'inline-err' : 'hint'} role={error ? 'alert' : undefined}>
-        {error ?? ''}
-      </span>
-    </label>
-  )
-}
-
 function Delivery({ projects, home }: { projects: ProjectChoice[]; home: string | null }) {
   const { settings, update } = useSettings()
   const d = settings.delivery
@@ -746,31 +702,8 @@ function Delivery({ projects, home }: { projects: ProjectChoice[]; home: string 
       <span className="lbl">Livraison</span>
       <span className="hint">
         Boutons « Ouvrir une demande de fusion » et « Fusionner dans … » d’une session : la consigne est montrée, puis tapée dans la
-        session ; Claude livre lui-même. Variables : {'{branche}'}, {'{base}'} (branche par défaut), {'{issue}'} (numéro de l’issue
-        liée, jamais son texte).
+        session ; Claude livre lui-même. Leurs textes se modifient dans l’onglet « Consignes » (globalement ou par projet).
       </span>
-      <TemplateField
-        label="Demande de fusion"
-        value={d.prTemplate}
-        allowEmpty={false}
-        onSave={(v) => update({ delivery: { prTemplate: v } })}
-      />
-      <TemplateField
-        label="Fusion directe"
-        value={d.mergeTemplate}
-        allowEmpty={false}
-        onSave={(v) => update({ delivery: { mergeTemplate: v } })}
-      />
-      {(d.prTemplate !== DEFAULT_PR_TEMPLATE || d.mergeTemplate !== DEFAULT_MERGE_TEMPLATE) && (
-        <button
-          type="button"
-          className="btn sm ghost"
-          style={{ justifySelf: 'start' }}
-          onClick={() => update({ delivery: { prTemplate: DEFAULT_PR_TEMPLATE, mergeTemplate: DEFAULT_MERGE_TEMPLATE } })}
-        >
-          Rétablir les modèles par défaut
-        </button>
-      )}
       <label className="optrow">
         <input
           type="checkbox"
@@ -786,7 +719,7 @@ function Delivery({ projects, home }: { projects: ProjectChoice[]; home: string 
       </label>
       {repos.length > 0 && (
         <>
-          <span className="hint">Par projet : mode (choisit le bouton principal et la CI suivie) et modèles propres (vides : ceux ci-dessus).</span>
+          <span className="hint">Par projet : mode (choisit le bouton principal et la CI suivie).</span>
           <div className="pprofiles">
             {repos.map((c) => {
               const p: ProjectDelivery = d.projects[c.profileKey] ?? { mode: 'pr' }
@@ -808,23 +741,6 @@ function Delivery({ projects, home }: { projects: ProjectChoice[]; home: string 
                       ))}
                     </select>
                   </label>
-                  <details>
-                    <summary className="hint">Modèles du projet</summary>
-                    <TemplateField
-                      label="Demande de fusion"
-                      value={p.prTemplate ?? ''}
-                      placeholder="modèle par défaut"
-                      allowEmpty
-                      onSave={(v) => setProject(c.profileKey, { ...p, prTemplate: v || undefined })}
-                    />
-                    <TemplateField
-                      label="Fusion directe"
-                      value={p.mergeTemplate ?? ''}
-                      placeholder="modèle par défaut"
-                      allowEmpty
-                      onSave={(v) => setProject(c.profileKey, { ...p, mergeTemplate: v || undefined })}
-                    />
-                  </details>
                 </div>
               )
             })}
@@ -948,6 +864,7 @@ export function SettingsDialog({
   const tabs: [Tab, string][] = [
     ['apparence', 'Apparence'],
     ['general', 'Général'],
+    ['consignes', 'Consignes'],
   ]
   return (
     <Modal title="Réglages" onClose={onClose} width={780}>
@@ -963,9 +880,12 @@ export function SettingsDialog({
             tabIndex={tab === k ? 0 : -1}
             onClick={() => setTab(k)}
             onKeyDown={(e) => {
-              if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+              if (['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) {
                 e.preventDefault()
-                const next: Tab = tab === 'apparence' ? 'general' : 'apparence'
+                const i = tabs.findIndex(([t]) => t === tab)
+                const j =
+                  e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length
+                const next: Tab = tabs[j]![0]
                 setTab(next)
                 document.getElementById(`${id}-${next}`)?.focus()
               }
@@ -981,7 +901,13 @@ export function SettingsDialog({
             {saveError}
           </p>
         )}
-        {tab === 'apparence' ? <Appearance scheme={scheme} /> : <General profiles={profiles} projects={projects} home={home} />}
+        {tab === 'apparence' ? (
+          <Appearance scheme={scheme} />
+        ) : tab === 'general' ? (
+          <General profiles={profiles} projects={projects} home={home} />
+        ) : (
+          <PromptSettings projects={projects} home={home} />
+        )}
       </div>
     </Modal>
   )

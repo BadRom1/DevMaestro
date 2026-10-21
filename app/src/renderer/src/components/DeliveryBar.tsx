@@ -11,13 +11,14 @@
  *   (`forge.sessionCi`, relue toutes les 60 s tant que la session est
  *   affichée, et à chaque `forge.ci_changed`).
  * - « Voir l'échec » : jobs en échec et extrait des journaux ; « Envoyer
- *   l'échec à Claude » tape une consigne fixe et **colle** l'extrait comme
- *   donnée (`sessions.sendPrompt {instruction, pasted}`), jamais comme
- *   consigne.
+ *   l'échec à Claude » tape la consigne `ciFailure` des réglages (lot 18 ;
+ *   plus celle du démon) et **colle** l'extrait comme donnée
+ *   (`sessions.sendPrompt {instruction, pasted}`), jamais comme consigne.
  */
 import { useEffect, useId, useState } from 'react'
 
 import type { Session, SessionCi } from '../../../shared/protocol'
+import { ORIGIN_LABELS, renderPrompt, resolvePrompt, type PromptOrigin } from '../../../shared/prompts'
 import { projectDelivery } from '../../../shared/settings'
 import { api, call, errorCode, errorText } from '../api'
 import {
@@ -28,6 +29,7 @@ import {
   deliveryBlocker,
   deliveryOf,
   deliveryPrompt,
+  deliveryPromptId,
   failedRuns,
   primaryAction,
   runLabel,
@@ -163,13 +165,21 @@ export function DeliveryBar({
         <DeliveryConfirm
           session={session}
           action={confirm}
-          template={confirm === 'pr' ? pd.prTemplate : pd.mergeTemplate}
+          prompt={resolvePrompt(settings.prompts, deliveryPromptId(confirm), projectKey)}
           base={base}
           onClose={() => setConfirm(null)}
           onSent={reload}
         />
       )}
-      {failure && <CiFailureDialog session={session} root={root} runs={failed} onClose={() => setFailure(false)} />}
+      {failure && (
+        <CiFailureDialog
+          session={session}
+          root={root}
+          runs={failed}
+          template={resolvePrompt(settings.prompts, 'ciFailure', projectKey).template}
+          onClose={() => setFailure(false)}
+        />
+      )}
     </div>
   )
 }
@@ -177,14 +187,15 @@ export function DeliveryBar({
 function DeliveryConfirm({
   session,
   action,
-  template,
+  prompt: { template, origin },
   base,
   onClose,
   onSent,
 }: {
   session: Session
   action: DeliveryAction
-  template: string
+  /** Modèle effectif du projet et son origine (Réglages → Consignes). */
+  prompt: { template: string; origin: PromptOrigin }
   base: string | null
   onClose: () => void
   onSent: () => void
@@ -192,7 +203,7 @@ function DeliveryConfirm({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const id = useId()
-  const prompt = deliveryPrompt(template, session, base)
+  const prompt = deliveryPrompt(action, template, session, base)
   async function send() {
     if (!('text' in prompt)) return
     setBusy(true)
@@ -222,7 +233,7 @@ function DeliveryConfirm({
             <pre className="deliv-prompt mono" aria-labelledby={`${id}-l`}>
               {prompt.text}
             </pre>
-            <span className="hint">Modèle modifiable dans Réglages → Général → Livraison (par projet).</span>
+            <span className="hint">Modèle : {ORIGIN_LABELS[origin]} ; modifiable dans Réglages → Consignes (globalement ou par projet).</span>
           </>
         ) : (
           <p className="inline-err" role="alert">
@@ -255,11 +266,14 @@ function CiFailureDialog({
   session,
   root,
   runs,
+  template,
   onClose,
 }: {
   session: Session
   root: string
   runs: SessionCi['ci']['runs']
+  /** Modèle de la consigne `ciFailure` du projet (lot 18). */
+  template: string
   onClose: () => void
 }) {
   const [runId, setRunId] = useState(runs[0]!.id)
@@ -284,12 +298,19 @@ function CiFailureDialog({
     : session.status.state === 'waiting' || session.pending.length > 0
       ? 'Réponds d’abord à la demande en attente dans la session.'
       : null
+  /** Consigne tapée : le modèle des réglages, rendu (jamais l'`instruction` du démon, ni un texte de la forge). */
+  let instruction: { text: string } | { error: string }
+  try {
+    instruction = { text: renderPrompt('ciFailure', template, { branch: session.branch ?? null, run: runId }) }
+  } catch (e) {
+    instruction = { error: `Modèle de consigne invalide : ${(e as Error).message} (à corriger dans Réglages → Consignes).` }
+  }
   async function send(f: RunFailure) {
-    if (!f.excerpt) return
+    if (!f.excerpt || !('text' in instruction)) return
     setBusy(true)
     setSendError(null)
     try {
-      await call('sessions.sendPrompt', { id: session.id, instruction: f.instruction, pasted: f.excerpt })
+      await call('sessions.sendPrompt', { id: session.id, instruction: instruction.text, pasted: f.excerpt })
       onClose()
     } catch (e) {
       setSendError(`Envoi impossible : ${errorText(e)}`)
@@ -354,7 +375,13 @@ function CiFailureDialog({
                   </ul>
                 )}
                 <span className="lbl">Consigne tapée</span>
-                <pre className="deliv-prompt mono">{f.instruction}</pre>
+                {'text' in instruction ? (
+                  <pre className="deliv-prompt mono">{instruction.text}</pre>
+                ) : (
+                  <p className="inline-err" role="alert">
+                    {instruction.error}
+                  </p>
+                )}
                 <span className="lbl" id={`${id}-x`}>
                   Extrait collé à Claude, comme donnée (contenu de la forge, non fiable)
                 </span>
@@ -384,7 +411,7 @@ function CiFailureDialog({
         </button>
         <button
           className="btn pri"
-          disabled={busy || !f || !f.excerpt || blocker !== null}
+          disabled={busy || !f || !f.excerpt || blocker !== null || !('text' in instruction)}
           title={blocker ?? undefined}
           onClick={() => f && void send(f)}
         >

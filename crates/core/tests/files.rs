@@ -441,15 +441,45 @@ fn files_write() {
     // Conflit : le fichier a changé entre la lecture et l'écriture.
     std::fs::write(root.join("a.txt"), "changé par Claude\n").unwrap();
     // Un refus n'ouvre jamais le fichier en écriture (surveillants).
-    let watch =
-        nix::sys::inotify::Inotify::init(nix::sys::inotify::InitFlags::IN_NONBLOCK).unwrap();
-    watch
-        .add_watch(
+    // Plus d'instance inotify disponible (limite `max_user_instances` atteinte
+    // par les autres programmes de la machine) : repli sur l'inode, les dates
+    // (mtime, ctime) et le contenu, comparés avant et après le refus. En CI
+    // (`CI` définie), inotify doit être là : le test échoue sinon.
+    let watch = match nix::sys::inotify::Inotify::init(nix::sys::inotify::InitFlags::IN_NONBLOCK) {
+        Ok(w) => Some(w),
+        Err(nix::errno::Errno::EMFILE) => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "inotify indisponible (EMFILE) en CI : surveillance impossible"
+            );
+            eprintln!("inotify indisponible (EMFILE) : repli sur inode, dates et contenu");
+            None
+        }
+        Err(e) => panic!("inotify : {e}"),
+    };
+    let stamp = |p: &std::path::Path| {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(p).unwrap();
+        (
+            m.ino(),
+            m.mtime(),
+            m.mtime_nsec(),
+            m.ctime(),
+            m.ctime_nsec(),
+            std::fs::read(p).unwrap(),
+        )
+    };
+    let before = stamp(&root.join("a.txt"));
+    // Une écriture après cette pause changerait mtime/ctime de façon visible.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    if let Some(w) = &watch {
+        w.add_watch(
             &root.join("a.txt"),
             nix::sys::inotify::AddWatchFlags::IN_CLOSE_WRITE
                 | nix::sys::inotify::AddWatchFlags::IN_MODIFY,
         )
         .unwrap();
+    }
     let e = c.call_raw(
         "files.write",
         json!({"id": id, "path": "a.txt", "content": "le mien",
@@ -461,10 +491,18 @@ fn files_write() {
         "le fichier a été modifié depuis son ouverture"
     );
     let cur = e["error"]["data"]["version"].clone();
-    match watch.read_events() {
-        Err(nix::errno::Errno::EAGAIN) => {}
-        other => panic!("ouverture en écriture parasite : {other:?}"),
+    if let Some(w) = &watch {
+        match w.read_events() {
+            Err(nix::errno::Errno::EAGAIN) => {}
+            other => panic!("ouverture en écriture parasite : {other:?}"),
+        }
     }
+    // Toujours vérifié (seule preuve sans inotify) : ni remplacé, ni touché.
+    assert_eq!(
+        stamp(&root.join("a.txt")),
+        before,
+        "le refus n'a ni remplacé ni modifié le fichier"
+    );
     assert_eq!(cur["sha256"], sha256_hex("changé par Claude\n".as_bytes()));
     assert_eq!(cur["size"], "changé par Claude\n".len());
     assert_eq!(

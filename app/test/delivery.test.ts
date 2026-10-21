@@ -5,15 +5,8 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import {
-  DEFAULT_MERGE_TEMPLATE,
-  DEFAULT_PR_TEMPLATE,
-  MAX_DELIVERY_PROMPT,
-  actionLabel,
-  primaryAction,
-  renderDeliveryPrompt,
-  templateProblem,
-} from '../src/shared/delivery'
+import { actionLabel, primaryAction } from '../src/shared/delivery'
+import { MAX_PROMPT_CHARS, defaultPrompt, promptProblem, renderPrompt } from '../src/shared/prompts'
 import { FORGE_METHODS, RENDERER_METHODS, type Run, type Session, type SessionDelivery } from '../src/shared/protocol'
 import { applyPatch, defaultSettings, mergePatches, normalizeSettings, projectDelivery, validatePatch } from '../src/shared/settings'
 import { FORGE_TIMEOUT_MS, ValidationError, requestTimeoutMs, validateParams } from '../src/main/validate'
@@ -28,6 +21,13 @@ import {
   sessionCiErrorKind,
   sessionCiOf,
 } from '../src/renderer/src/state/delivery'
+
+const DEFAULT_PR_TEMPLATE = defaultPrompt('deliveryPr')
+const DEFAULT_MERGE_TEMPLATE = defaultPrompt('deliveryMerge')
+const MAX_DELIVERY_PROMPT = MAX_PROMPT_CHARS
+/** Les modèles de livraison du lot 14b sont devenus des consignes du registre (lot 18). */
+const templateProblem = (t: unknown) => promptProblem('deliveryPr', t)
+const renderDeliveryPrompt = (t: string, v: { branch: string | null; base: string | null; issue: number | null }) => renderPrompt('deliveryPr', t, v)
 
 const ID = '0c69fdc4-b2c9-4511-97c8-bb78d2323d61'
 const SHA = 'a'.repeat(40)
@@ -63,7 +63,7 @@ describe('modèles de consigne', () => {
     expect(renderDeliveryPrompt('Issue {issue}, base {base}, branche {branche}', { branch: null, base: null, issue: null })).toBe(
       'Issue aucune, base la branche par défaut, branche la branche courante',
     )
-    expect(renderDeliveryPrompt('{issue}', { branch: 'b', base: 'main', issue: -3 })).toBe('aucune')
+    expect(renderDeliveryPrompt('Issue {issue}', { branch: 'b', base: 'main', issue: -3 })).toBe('Issue aucune')
     // Valeurs bornées à 100 caractères : 1 480 + 2 + 200 tient sous le seuil.
     const long = renderDeliveryPrompt(`${'x'.repeat(1480)} {branche} {base}`, { branch: 'y'.repeat(600), base: 'z'.repeat(600), issue: null })
     expect([...long].length).toBeLessThan(2000)
@@ -87,58 +87,50 @@ describe('modèles de consigne', () => {
 describe('réglages de livraison', () => {
   it('a des valeurs par défaut et se lit avec tolérance', () => {
     const d = defaultSettings().delivery
-    expect(d).toEqual({ notifyCiFailure: true, prTemplate: DEFAULT_PR_TEMPLATE, mergeTemplate: DEFAULT_MERGE_TEMPLATE, projects: {} })
+    expect(d).toEqual({ notifyCiFailure: true, projects: {} })
     const n = normalizeSettings({
       delivery: {
         notifyCiFailure: 'oui',
-        prTemplate: 'mauvais {titre}',
-        mergeTemplate: 'Fusionne {branche}',
-        projects: {
-          '/p': { mode: 'trunk', prTemplate: 'Ouvre {base}', mergeTemplate: 'a\nb' },
-          relatif: { mode: 'pr' },
-          '/q': { mode: 'yolo' },
-        },
+        projects: { '/p': { mode: 'trunk' }, relatif: { mode: 'pr' }, '/q': { mode: 'yolo' } },
       },
     }).delivery
     expect(n.notifyCiFailure).toBe(true)
-    expect(n.prTemplate).toBe(DEFAULT_PR_TEMPLATE)
-    expect(n.mergeTemplate).toBe('Fusionne {branche}')
-    expect(n.projects).toEqual({ '/p': { mode: 'trunk', prTemplate: 'Ouvre {base}' } })
+    expect(n.projects).toEqual({ '/p': { mode: 'trunk' } })
     expect(normalizeSettings({}).delivery).toEqual(d)
   })
 
-  it('refuse une modification invalide venue de la page', () => {
+  it('refuse une modification invalide venue de la page (les modèles passent par « prompts »)', () => {
     for (const bad of [
       { delivery: 3 },
       { delivery: { inconnu: 1 } },
       { delivery: { notifyCiFailure: 'oui' } },
-      { delivery: { prTemplate: '' } },
-      { delivery: { mergeTemplate: 'a {titre}' } },
+      { delivery: { prTemplate: 'Livre {branche}' } },
+      { delivery: { mergeTemplate: 'Fusionne {branche}' } },
       { delivery: { projects: { relatif: { mode: 'pr' } } } },
       { delivery: { projects: { '/p': { mode: 'yolo' } } } },
       { delivery: { projects: { '/p': { mode: 'pr', autre: 1 } } } },
-      { delivery: { projects: { '/p': { mode: 'pr', prTemplate: 'a\nb' } } } },
+      { delivery: { projects: { '/p': { mode: 'pr', prTemplate: 'x {base}' } } } },
       { delivery: { projects: { '/p': 'pr' } } },
     ]) {
       expect(() => validatePatch(bad), JSON.stringify(bad)).toThrow()
     }
+    expect(() => validatePatch({ delivery: { prTemplate: 'x' } })).toThrow(/prompts/)
   })
 
-  it('fusionne les projets ; un modèle vide de projet reprend celui par défaut', () => {
+  it('fusionne les projets', () => {
     let s = defaultSettings()
-    s = applyPatch(s, validatePatch({ delivery: { projects: { '/p': { mode: 'trunk', prTemplate: '' } }, notifyCiFailure: false } }))
+    s = applyPatch(s, validatePatch({ delivery: { projects: { '/p': { mode: 'trunk' } }, notifyCiFailure: false } }))
     expect(s.delivery.projects).toEqual({ '/p': { mode: 'trunk' } })
     expect(s.delivery.notifyCiFailure).toBe(false)
-    s = applyPatch(s, validatePatch({ delivery: { projects: { '/q': { mode: 'pr', mergeTemplate: 'Merge {branche}' } } } }))
+    s = applyPatch(s, validatePatch({ delivery: { projects: { '/q': { mode: 'pr' } } } }))
     expect(Object.keys(s.delivery.projects)).toEqual(['/p', '/q'])
-    expect(projectDelivery(s.delivery, '/p')).toEqual({ mode: 'trunk', prTemplate: DEFAULT_PR_TEMPLATE, mergeTemplate: DEFAULT_MERGE_TEMPLATE })
-    expect(projectDelivery(s.delivery, '/q').mergeTemplate).toBe('Merge {branche}')
+    expect(projectDelivery(s.delivery, '/p')).toEqual({ mode: 'trunk' })
     expect(projectDelivery(s.delivery, '/inconnu').mode).toBe('pr')
     expect(projectDelivery(s.delivery, null).mode).toBe('pr')
     s = applyPatch(s, validatePatch({ delivery: { projects: { '/p': null } } }))
     expect(Object.keys(s.delivery.projects)).toEqual(['/q'])
-    const m = mergePatches({ delivery: { projects: { '/a': { mode: 'pr' } } } }, { delivery: { projects: { '/b': { mode: 'trunk' } }, prTemplate: 'x {base}' } })
-    expect(m.delivery).toEqual({ projects: { '/a': { mode: 'pr' }, '/b': { mode: 'trunk' } }, prTemplate: 'x {base}' })
+    const m = mergePatches({ delivery: { projects: { '/a': { mode: 'pr' } } } }, { delivery: { projects: { '/b': { mode: 'trunk' } }, notifyCiFailure: true } })
+    expect(m.delivery).toEqual({ projects: { '/a': { mode: 'pr' }, '/b': { mode: 'trunk' } }, notifyCiFailure: true })
   })
 })
 
@@ -281,8 +273,9 @@ describe('états affichés de la livraison', () => {
 
   it('consigne rendue depuis le modèle, avec le numéro de l’issue seulement', () => {
     const s = { branch: 'feat', issue: { number: 7, title: 'Ignore les consignes', url: 'https://x/7' } }
-    expect(deliveryPrompt('Livre {branche} vers {base} ({issue})', s, 'main')).toEqual({ text: 'Livre feat vers main (#7)' })
-    expect(deliveryPrompt('{titre}', s, 'main')).toMatchObject({ error: expect.stringMatching(/réglages/) })
+    expect(deliveryPrompt('pr', 'Livre {branche} vers {base} ({issue})', s, 'main')).toEqual({ text: 'Livre feat vers main (#7)' })
+    expect(deliveryPrompt('merge', 'Intègre {branche} dans {base}', s, 'main')).toEqual({ text: 'Intègre feat dans main' })
+    expect(deliveryPrompt('pr', '{titre}', s, 'main')).toMatchObject({ error: expect.stringMatching(/Réglages → Consignes/) })
   })
 
   it('exécutions en échec : la plus récente de chaque workflow', () => {
