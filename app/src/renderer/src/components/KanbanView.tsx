@@ -28,6 +28,8 @@ import { glyphFor } from '../state/status'
 import { runningCount, runningLabel } from '../state/subagents'
 import { ProfileBadge, StatusGlyph } from './common'
 import { ColorBar } from './SessionIdentity'
+import { IssueChip } from './IssueChip'
+import { sessionIssue } from '../state/forge'
 
 const NO_STALE: readonly number[] = []
 
@@ -98,8 +100,10 @@ function Card({
   stale,
   selected,
   onOpen,
+  onOpenIssue,
 }: {
   session: Session
+  onOpenIssue?: (s: Session) => void
   /** Carte de la session affichée dans le volet. */
   selected: boolean
   /** Liste connue, ou `undefined` (le compteur de la session sert alors de repli). */
@@ -116,6 +120,7 @@ function Card({
   const perm = req ? permissionParts(req.pending) : null
   const m = session.metrics
   const agentsRunning = runningLabel(runningCount(session, agents))
+  const iss = sessionIssue(session)
   // Clic ailleurs que sur un bouton de la carte : ouvre la session (au clavier : le bouton du nom).
   const onCardClick = (e: MouseEvent<HTMLLIElement>) => {
     if ((e.target as Element).closest('button, a, input, select, textarea')) return
@@ -141,6 +146,7 @@ function Card({
       <div className="kwhere mono">
         {projectName} <span>/</span> {session.branch ?? 'sans branche'}
       </div>
+      {iss && <IssueChip issue={iss} onOpen={onOpenIssue ? () => onOpenIssue(session) : undefined} />}
       {req && (
         <p className="kask" title={demandSummary(req.pending, 1000)}>
           <b>{req.pending.kind === 'question' ? 'Question' : 'Permission'} :</b>{' '}
@@ -207,8 +213,11 @@ export function KanbanView({
   pane,
   onOpen,
   onClose,
+  onOpenIssue,
 }: {
   sessions: Session[]
+  /** Ouvre le détail de l’issue liée à une session (absent : forge masquée ou désactivée). */
+  onOpenIssue?: (s: Session) => void
   /** Groupes de la barre latérale (`groupByProject`) : choix du filtre par projet. */
   groups: readonly ProjectGroup[]
   /** Sous-agents connus, par session. */
@@ -312,6 +321,7 @@ export function KanbanView({
                       profiles={profiles}
                       stale={stale[s.id] ?? NO_STALE}
                       onOpen={() => onOpen(s.id)}
+                      onOpenIssue={onOpenIssue}
                     />
                   ))}
                 </ul>

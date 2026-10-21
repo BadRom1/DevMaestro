@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
+use crate::domain::forge::SessionIssue;
 use crate::domain::subagents::{MAX_SUBAGENTS, Subagent, SubagentStatus};
 use crate::ports::{SessionRecord, SessionStore, WorktreeRecord};
 
@@ -95,6 +96,13 @@ const MIGRATIONS: &[&str] = &[
         start_sha         TEXT,
         created_at        TEXT NOT NULL
     );
+    ",
+    // v6 → v7 (v0.3, lot 13a) : issue de la forge liée au lancement d'une
+    // session (lien seulement : jamais le contenu de l'issue).
+    "
+    ALTER TABLE sessions ADD COLUMN issue_number INTEGER;
+    ALTER TABLE sessions ADD COLUMN issue_title TEXT;
+    ALTER TABLE sessions ADD COLUMN issue_url TEXT;
     ",
 ];
 
@@ -282,7 +290,19 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
         project_common_dir: row
             .get::<_, Option<String>>("project_common_dir")?
             .map(PathBuf::from),
+        issue: issue_from_row(row)?,
     }))
+}
+
+/// Issue liée relue ; une ligne incomplète ou invalide vaut `None`.
+fn issue_from_row(row: &Row<'_>) -> rusqlite::Result<Option<SessionIssue>> {
+    let number: Option<i64> = row.get("issue_number")?;
+    let title: Option<String> = row.get("issue_title")?;
+    let url: Option<String> = row.get("issue_url")?;
+    Ok(match (number, title, url) {
+        (Some(n), Some(t), Some(u)) if n > 0 => SessionIssue::new(n as u64, &t, &u).ok(),
+        _ => None,
+    })
 }
 
 fn subagent_from_row(row: &Row<'_>) -> rusqlite::Result<Option<Subagent>> {
@@ -321,9 +341,9 @@ impl SessionStore for SqliteStore {
             "INSERT INTO sessions (id, claude_session_id, profile, cwd, project_root, branch,
                 model, mode, status, status_reason, created_at, updated_at, last_activity, pid,
                 pid_start, scope_unit, title, color, first_prompt, session_name,
-                project_common_dir)
+                project_common_dir, issue_number, issue_title, issue_url)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20, ?21)
+                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
              ON CONFLICT(id) DO UPDATE SET
                 claude_session_id = excluded.claude_session_id,
                 profile = excluded.profile, cwd = excluded.cwd,
@@ -334,7 +354,9 @@ impl SessionStore for SqliteStore {
                 pid_start = excluded.pid_start, scope_unit = excluded.scope_unit,
                 title = excluded.title, color = excluded.color,
                 first_prompt = excluded.first_prompt, session_name = excluded.session_name,
-                project_common_dir = excluded.project_common_dir",
+                project_common_dir = excluded.project_common_dir,
+                issue_number = excluded.issue_number, issue_title = excluded.issue_title,
+                issue_url = excluded.issue_url",
             params![
                 r.id.to_string(),
                 r.claude_session_id,
@@ -359,6 +381,9 @@ impl SessionStore for SqliteStore {
                 r.project_common_dir
                     .as_ref()
                     .map(|p| p.to_string_lossy().into_owned()),
+                r.issue.as_ref().map(|i| i.number as i64),
+                r.issue.as_ref().map(|i| i.title.as_str()),
+                r.issue.as_ref().map(|i| i.url.as_str()),
             ],
         )
         .map_err(other)?;
@@ -594,6 +619,10 @@ mod tests {
             first_prompt: Some("Corrige le test".into()),
             session_name: Some("Correction".into()),
             project_common_dir: Some("/p/.git".into()),
+            issue: Some(
+                SessionIssue::new(42, "Corriger le relais", "https://github.com/o/r/issues/42")
+                    .unwrap(),
+            ),
         }
     }
 
@@ -892,6 +921,55 @@ mod tests {
         store.delete_worktree(Path::new("/autre")).unwrap();
         store.delete_worktree(&w.path).unwrap();
         assert!(store.load_worktrees().unwrap().is_empty());
+    }
+
+    #[test]
+    fn migrates_a_v6_database_keeping_its_rows_then_records_the_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for m in &MIGRATIONS[..6] {
+                conn.execute_batch(m).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 6).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, claude_session_id, profile, cwd, project_root,
+                    status, created_at, updated_at, project_common_dir)
+                 VALUES (?1, 'c', 'default', '/p', '/p', 'idle', ?2, ?2, '/p/.git')",
+                params![
+                    Uuid::from_u128(9).to_string(),
+                    fmt_time(OffsetDateTime::UNIX_EPOCH)
+                ],
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let all = store.load_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(
+            all[0].project_common_dir.as_deref(),
+            Some(Path::new("/p/.git"))
+        );
+        assert_eq!(all[0].issue, None);
+        let mut r = all[0].clone();
+        r.issue = Some(SessionIssue::new(7, "Titre", "https://github.com/o/r/issues/7").unwrap());
+        store.upsert(&r).unwrap();
+        assert_eq!(store.load_all().unwrap()[0], r);
+        r.issue = None;
+        store.upsert(&r).unwrap();
+        assert_eq!(store.load_all().unwrap()[0].issue, None);
+        // Une ligne invalide (écrite à la main) est relue sans issue.
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET issue_number = 3, issue_title = 'x', issue_url = 'ftp://x'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.load_all().unwrap()[0].issue, None);
     }
 
     #[test]

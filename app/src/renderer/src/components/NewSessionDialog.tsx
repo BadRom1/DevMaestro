@@ -6,7 +6,7 @@
  */
 import { useEffect, useId, useMemo, useState } from 'react'
 
-import { MAX_TITLE, SETTABLE_MODES, type ProjectInfo, type Profile, type Session, type WorktreeRequest } from '../../../shared/protocol'
+import { MAX_TITLE, SETTABLE_MODES, type IssueRef, type ProjectInfo, type Profile, type Session, type WorktreeRequest } from '../../../shared/protocol'
 import { projectWorktreeLocation } from '../../../shared/settings'
 import {
   LOCATION_LABELS,
@@ -31,6 +31,7 @@ import {
   type ProjectChoice,
   type ResumeCandidate,
 } from '../state/newSession'
+import { FORGE_CONTENT_WARNING, initialOf, invisibleNote, type IssuePrefill } from '../state/forge'
 import type { PastEntry } from '../state/projects'
 import { folderName } from '../state/projects'
 import type { WorktreeLists } from '../state/worktrees'
@@ -63,6 +64,9 @@ export function NewSessionDialog({
   managedDir,
   onClose,
   onLaunched,
+  prefill,
+  initialSupported = false,
+  onOpenIssues,
 }: {
   profiles: Profile[]
   sessions: Session[]
@@ -84,6 +88,12 @@ export function NewSessionDialog({
   managedDir: string | null
   onClose: () => void
   onLaunched: (s: Session, warnings: string[]) => void
+  /** Lancement depuis une issue (lot 13a) : nom, prompt, worktree et branche préremplis, modifiables. */
+  prefill?: IssuePrefill | null
+  /** Le démon sait taper la consigne puis coller le contenu (`initial`) ; sinon, pas de lancement depuis une issue. */
+  initialSupported?: boolean
+  /** « Depuis une issue… » : ouvre les issues du projet choisi (absent : forge masquée). */
+  onOpenIssues?: (project: { root: string; name: string; key: string }) => void
 }) {
   const known = useMemo(() => buildProjectChoices({ sessions, past, projects, home }), [sessions, past, projects, home])
   /** Dossiers choisis par « Autre dossier… » (fusionnés dans leur projet s'il est connu). */
@@ -113,19 +123,26 @@ export function NewSessionDialog({
   const [mode, setMode] = useState('')
   const [tab, setTab] = useState<Tab>('prompt')
   const [prompt, setPrompt] = useState('')
+  /** Depuis une issue : consigne tapée et contenu collé, séparés (le contenu vient de la forge, non fiable). */
+  const fromIssue = !!prefill
+  const [instruction, setInstruction] = useState(prefill?.instruction ?? '')
+  const [pasted, setPasted] = useState(prefill?.pasted ?? '')
+  /** Issue liée à la session (gardée tant que l'utilisateur ne la retire pas). */
+  const [issue, setIssue] = useState<IssueRef | null>(prefill?.issue ?? null)
   const [resumeKey, setResumeKey] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [picking, setPicking] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const tabsId = useId()
-  const [name, setName] = useState('')
+  const [name, setName] = useState(prefill?.name ?? '')
 
   /* ----- Worktree (lot 6) ----- */
   const repoRoot = project?.isGit ? project.root : null
   const wtList = repoRoot ? worktreeLists[repoRoot] : undefined
-  const [useWt, setUseWt] = useState(false)
-  const [branch, setBranch] = useState('')
-  const [branchTouched, setBranchTouched] = useState(false)
+  const [useWt, setUseWt] = useState(!!prefill)
+  // Branche d'une issue : `<préfixe><n>-<slug>`, gardée telle quelle (pas recalculée depuis le nom).
+  const [branch, setBranch] = useState(prefill?.branch ?? '')
+  const [branchTouched, setBranchTouched] = useState(!!prefill?.branch)
   /** Base choisie (`null` : branche de référence du dépôt). */
   const [base, setBase] = useState<string | null>(null)
   /** Emplacement choisi ici (`null` : réglage du projet). */
@@ -261,7 +278,15 @@ export function NewSessionDialog({
     }
   }
 
-  const canGo = !busy && (tab === 'prompt' ? dir.startsWith('/') && !wtProblem : !!chosen)
+  const issueProblem =
+    fromIssue && tab === 'prompt'
+      ? !initialSupported
+        ? 'Le démon ne sait pas encore taper la consigne puis coller le contenu de l’issue : mets orchd à jour pour lancer depuis une issue.'
+        : instruction.trim() === ''
+          ? 'La consigne est vide.'
+          : null
+      : null
+  const canGo = !busy && (tab === 'prompt' ? dir.startsWith('/') && !wtProblem && !issueProblem : !!chosen)
 
   async function go() {
     if (!canGo) return
@@ -270,9 +295,10 @@ export function NewSessionDialog({
     const common = {
       ...(mode ? { mode } : {}),
       ...(model ? { model } : {}),
-      ...(prompt.trim() ? { prompt: prompt.trim() } : {}),
       ...(termSize ?? {}),
     }
+    const first =
+      tab === 'prompt' && fromIssue ? { initial: initialOf({ instruction, pasted }) } : prompt.trim() ? { prompt: prompt.trim() } : {}
     try {
       if (tab === 'prompt') {
         const worktree: WorktreeRequest | undefined = wtOn
@@ -283,7 +309,14 @@ export function NewSessionDialog({
               ...(effLocation === 'custom' && wtPath ? { path: wtPath } : {}),
             }
           : undefined
-        const r = await call('sessions.launch', { cwd: dir, profile: effectiveProfile, ...common, ...(worktree ? { worktree } : {}) })
+        const r = await call('sessions.launch', {
+          cwd: dir,
+          profile: effectiveProfile,
+          ...common,
+          ...first,
+          ...(worktree ? { worktree } : {}),
+          ...(issue ? { issue } : {}),
+        })
         const warnings = [...(r.warnings ?? [])]
         // Démon trop ancien : il ignore la demande et lance dans le dossier choisi.
         if (worktree && !r.worktree) {
@@ -299,7 +332,7 @@ export function NewSessionDialog({
         }
         onLaunched(session, warnings)
       } else if (chosen?.kind === 'session') {
-        const r = await call('sessions.resume', { id: chosen.session.id, ...common })
+        const r = await call('sessions.resume', { id: chosen.session.id, ...common, ...first })
         onLaunched(r.session, r.warnings ?? [])
       } else if (chosen?.kind === 'past') {
         const r = await call('sessions.resume', {
@@ -307,6 +340,7 @@ export function NewSessionDialog({
           ...(chosen.past.cwd ? { cwd: chosen.past.cwd } : {}),
           profile: chosen.past.profile,
           ...common,
+          ...first,
         })
         onLaunched(r.session, r.warnings ?? [])
       }
@@ -370,6 +404,17 @@ export function NewSessionDialog({
                 <option value={OTHER}>Autre dossier…</option>
               </select>
               <span className="hint mono">{project ? tildify(project.root, home) : 'Choisis un projet ou un dossier.'}</span>
+              {onOpenIssues && project?.isGit && (
+                <span className="hint">
+                  <button
+                    type="button"
+                    className="linkish"
+                    onClick={() => onOpenIssues({ root: project.root, name: project.name, key: project.key })}
+                  >
+                    Depuis une issue…
+                  </button>
+                </span>
+              )}
             </label>
             <label className="field">
               <span className="lbl">Dossier</span>
@@ -480,6 +525,14 @@ export function NewSessionDialog({
                 ))}
               </fieldset>
             )}
+            {tab === 'prompt' && issue && (
+              <p className="callout issue-linked">
+                Issue liée : <span className="mono">#{issue.number}</span> {issue.title}{' '}
+                <button type="button" className="linkish" onClick={() => setIssue(null)}>
+                  Retirer le lien
+                </button>
+              </p>
+            )}
             {tab === 'prompt' && (
               <label className="field">
                 <span className="lbl">Nom de la session (facultatif)</span>
@@ -581,6 +634,35 @@ export function NewSessionDialog({
                 )}
               </fieldset>
             )}
+            {tab === 'prompt' && fromIssue && (
+              <>
+                <label className="field">
+                  <span className="lbl">Consigne (tapée)</span>
+                  <input value={instruction} maxLength={2000} onChange={(e) => setInstruction(e.target.value.replace(/[\r\n]+/g, ' '))} />
+                  <span className="hint">Tapée dans la session, puis le contenu de l’issue est collé à part.</span>
+                </label>
+                <p className="forge-warn" role="note">
+                  <span aria-hidden="true">⚠ </span>
+                  {FORGE_CONTENT_WARNING}
+                </p>
+                <details className="forge-pasted">
+                  <summary>
+                    Contenu de l’issue, collé après la consigne ({pasted.trim() ? `${[...pasted].length} caractères` : 'vide : rien n’est collé'})
+                    {invisibleNote(prefill?.invisible ?? 0) && <span className="chip pend">{invisibleNote(prefill?.invisible ?? 0)}</span>}
+                  </summary>
+                  <label className="field">
+                    <span className="sr-only">Contenu collé</span>
+                    <textarea value={pasted} onChange={(e) => setPasted(e.target.value)} spellCheck={false} />
+                  </label>
+                </details>
+                {issueProblem && (
+                  <p className="inline-err" role="alert">
+                    {issueProblem}
+                  </p>
+                )}
+              </>
+            )}
+            {!(tab === 'prompt' && fromIssue) && (
             <label className="field">
               <span className="lbl">{tab === 'prompt' ? 'Prompt initial' : 'Message à la reprise (facultatif)'}</span>
               <textarea
@@ -589,6 +671,7 @@ export function NewSessionDialog({
                 placeholder={tab === 'prompt' ? 'Décris la tâche… (facultatif)' : 'Où en étions-nous ?'}
               />
             </label>
+            )}
           </div>
         </div>
         <div className="mf">

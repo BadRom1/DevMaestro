@@ -2,8 +2,9 @@
 //!
 //! Lot 1 : l'horloge et la découverte des profils et des anciennes sessions.
 //! Lot 2 : PTY ([`PtySpawner`]), git ([`Vcs`]) et persistance des sessions
-//! ([`SessionStore`]). Les autres ports de l'architecture (§ 16 : `Forge`,
-//! `QuotaSource`, `Notifier`) arrivent avec les lots qui en ont besoin.
+//! ([`SessionStore`]). v0.3, lot 13a : forges ([`Forge`], ADR 0006). Les
+//! autres ports de l'architecture (§ 16 : `Notifier`…) arrivent avec les
+//! lots qui en ont besoin.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -452,6 +453,46 @@ pub struct SessionRecord {
     /// Dossier commun git du projet (identité du projet), relevé au lancement
     /// (schéma v6) ; `None` hors dépôt ou pas encore relevé.
     pub project_common_dir: Option<PathBuf>,
+    /// Issue liée au lancement (schéma v7, lot 13a).
+    pub issue: Option<crate::domain::forge::SessionIssue>,
+}
+
+/// Échec d'un appel à la forge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForgeError {
+    /// Forge indisponible (CLI absente, non connectée…) : raison en français.
+    Unavailable(String),
+    /// Issue introuvable (ou qui n'est pas une issue) : message en français.
+    NotFound(String),
+    /// La CLI a échoué, n'a pas répondu à temps ou a répondu trop ou mal
+    /// (message nettoyé, sans chemin ni jeton).
+    Failed(String),
+}
+
+/// Accès à une forge (ADR 0006) par la CLI de l'utilisateur. Bloquant : à
+/// appeler hors du runtime, jamais sous le verrou du registre. Aucun
+/// contenu n'est journalisé ni enregistré par l'adaptateur.
+pub trait Forge: Send + Sync {
+    /// Accès à la forge du dépôt qui contient `root` : remote `origin`,
+    /// genre, CLI présente et connectée.
+    fn status(&self, root: &Path) -> crate::domain::forge::ForgeStatus;
+    /// Fonctions prises en charge.
+    fn capabilities(&self) -> crate::domain::forge::Capabilities;
+    /// Issues du dépôt (`remote`, rendu par [`Forge::status`]), sans corps
+    /// ni sous-issues ; `true` s'il y en avait plus que `filter.limit`.
+    fn issues(
+        &self,
+        root: &Path,
+        remote: &crate::domain::forge::RemoteRepo,
+        filter: &crate::domain::forge::IssueFilter,
+    ) -> Result<(Vec<crate::domain::forge::Issue>, bool), ForgeError>;
+    /// Une issue complète : corps (borné), parente, sous-issues.
+    fn issue(
+        &self,
+        root: &Path,
+        remote: &crate::domain::forge::RemoteRepo,
+        number: u64,
+    ) -> Result<crate::domain::forge::Issue, ForgeError>;
 }
 
 /// Persistance des sessions.

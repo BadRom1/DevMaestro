@@ -760,3 +760,61 @@ tr.cm td { padding: 6px 12px 8px 60px; white-space: normal }
 .cv-input textarea { flex: 1; resize: none; min-height: 34px; max-height: 30vh; padding: 6px 10px; border-radius: var(--r); border: 1px solid var(--line-2); background: var(--sunk); line-height: 1.45 }
 .cv-input textarea[aria-disabled="true"] { opacity: .6; cursor: not-allowed }
 .cv-composer > .hint { margin: 0 }
+
+/* ---------- Forge : issues et epics (v0.3, lot 13a) ---------- */
+/* État en texte et glyphe (jamais par la seule couleur) ; étiquettes : texte, pastille, contraste ≥ 4,5:1 calculé. */
+.modal .issues-mb { min-height: min(560px, 70vh) }
+.issues { display: grid; grid-template-columns: minmax(280px, 2fr) minmax(0, 3fr); gap: 14px; min-height: 0 }
+@media (max-width: 760px) { .issues { grid-template-columns: minmax(0, 1fr) } }
+.ilist { display: grid; gap: 8px; align-content: start; min-width: 0 }
+.idetail { display: grid; gap: 8px; align-content: start; min-width: 0; border-left: 1px solid var(--line); padding-left: 14px }
+.ifilters { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end }
+.ifilters .field { width: auto; min-width: 110px }
+.ifilters .field.grow { flex: 1 1 160px }
+.ifilters .imine { grid-template-columns: 16px auto; padding-bottom: 4px }
+.irows { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; max-height: 52vh; overflow: auto }
+.irow { display: grid; gap: 3px; width: 100%; text-align: left; border: 1px solid transparent; background: transparent; border-radius: var(--r); padding: 6px 8px; color: var(--fg) }
+.irow:hover { background: var(--panel-2) }
+.irow[aria-current="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--panel)) }
+.irow-1 { display: flex; gap: 6px; min-width: 0 }
+.irow-1 .ititle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.irow-2 { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; font-size: 11.5px }
+.irow-2 .iago { margin-left: auto }
+.inum { color: var(--muted); flex: none; font-variant-numeric: tabular-nums }
+.istate { display: inline-flex; gap: 3px; align-items: center; font-size: 11.5px; border: 1px solid currentColor; border-radius: 99px; padding: 0 6px; line-height: 1.5 }
+.istate.open { color: var(--run-ink) }
+.istate.closed { color: var(--muted) }
+.ilabels { display: inline-flex; flex-wrap: wrap; gap: 4px }
+.ilabel { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line-2); border-radius: 99px; padding: 0 7px; font-size: 11.5px; line-height: 1.5; color: var(--fg); background: var(--panel-2); max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+/* Étiquette colorée : fond de la forge, texte noir ou blanc choisi pour le contraste ; liseré du thème pour rester visible sur le fond. */
+.ilabel.colored { box-shadow: 0 0 0 1px var(--line-2) }
+.ilabel .ldot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor }
+.iprog { font-variant-numeric: tabular-nums }
+.iissue { display: grid; gap: 10px; min-width: 0 }
+.iissue .ih, .iepic .ih { margin: 0; font-size: 15px; overflow-wrap: anywhere }
+.imeta { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 12px }
+.iacts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center }
+.isubs ul { margin: 4px 0 0; padding-left: 0; list-style: none; display: grid; gap: 3px; font-size: 12.5px }
+.issue-md { max-height: 46vh; overflow: auto; border-top: 1px solid var(--line); padding-top: 8px; overflow-wrap: anywhere }
+.forge-off { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--line-2); border-left: 3px solid var(--wait); border-radius: var(--r); background: var(--panel-2) }
+.forge-off p { margin: 0 }
+.forge-cmd { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
+.forge-cmd code { padding: 2px 8px; border: 1px solid var(--line-2); border-radius: 4px; background: var(--sunk); user-select: all; font-variant-ligatures: none }
+.iepic { display: grid; gap: 10px }
+.iepic-list { border: 0; margin: 0; padding: 0; min-width: 0 }
+.iepic-list ul { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 6px }
+.issue-linked { overflow-wrap: anywhere }
+.issue-chip { font-size: 11.5px; color: var(--link); border-color: color-mix(in srgb, var(--link) 45%, var(--line)); background: transparent; flex: none }
+button.issue-chip { cursor: pointer }
+button.issue-chip:hover, button.issue-chip:focus-visible { border-color: var(--link); text-decoration: underline }
+.kcard .issue-chip { justify-self: start }
+.srow-issue { display: block; width: calc(100% - 46px); margin: -2px 0 2px 46px; padding: 0 4px; border: 0; background: transparent; text-align: left; font-size: 11px; color: var(--link); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 4px }
+span.srow-issue { color: var(--muted) }
+button.srow-issue:hover, button.srow-issue:focus-visible { text-decoration: underline }
+.forge-warn { margin: 0; padding: 6px 10px; border: 1px solid var(--wait); border-radius: var(--r); background: color-mix(in srgb, var(--wait) 8%, var(--panel)); color: var(--fg); font-size: 12.5px }
+.forge-pasted { border: 1px solid var(--line-2); border-radius: var(--r); padding: 4px 10px; min-width: 0 }
+.forge-pasted > summary { cursor: pointer; font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center }
+.forge-pasted textarea { min-height: 160px }
+.forge-pre { margin: 4px 0; max-height: 30vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--f-mono); font-size: 12px; background: var(--sunk); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font-variant-ligatures: none }
+.iepic-opts { display: grid; gap: 6px }
+.iepic-opts .field { max-width: 360px }

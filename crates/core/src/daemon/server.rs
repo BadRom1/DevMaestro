@@ -324,6 +324,8 @@ impl Connection {
                 "version": env!("CARGO_PKG_VERSION"),
                 "protocol": PROTOCOL_VERSION,
                 "pid": std::process::id(),
+                // Fonctions du démon détectables par le client (lot 13a).
+                "capabilities": {"initial_prompt": true},
             }),
             "profiles.list" => d.profiles()?,
             "projects.resolve" => {
@@ -440,6 +442,17 @@ impl Connection {
                 tokio::task::spawn_blocking(move || d2.forget(&sid))
                     .await
                     .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
+            }
+            "forge.status" | "forge.issues" | "forge.issue" => {
+                // `git` et `gh` : hors du runtime.
+                let (d2, params, m) = (d.clone(), params.clone(), method.to_owned());
+                tokio::task::spawn_blocking(move || match m.as_str() {
+                    "forge.status" => d2.forge_status(&params),
+                    "forge.issues" => d2.forge_issues(&params),
+                    _ => d2.forge_issue(&params),
+                })
+                .await
+                .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, e.to_string()))??
             }
             "files.list" | "files.read" | "files.write" => {
                 // Système de fichiers et `git` : hors du runtime.
@@ -644,6 +657,111 @@ async fn send_prompt(d: &Arc<Daemon>, p: &PromptToSend) -> Result<(), RpcError> 
     p.input.send(bytes).await.map_err(gone)?;
     tokio::time::sleep(REVIEW_STEP).await;
     enter_if_still_free(d, &p.id, &p.input).await
+}
+
+/// Attente entre deux examens de l'état de la session, pour le prompt initial.
+const INITIAL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+/// La session doit être restée prête (inactive, sans demande) ce temps-là
+/// avant que le prompt initial ne parte : la TUI a fini de s'afficher.
+const INITIAL_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Envoie le prompt initial d'une session lancée avec `initial` (lot 13a) :
+/// attend que la TUI soit prête (`SessionStart` ou `idle_prompt` reçu,
+/// session inactive sans demande, depuis [`INITIAL_SETTLE`]), puis, verrou
+/// des écritures pris et état revérifié, **tape** la consigne, **colle** le
+/// contenu en *bracketed paste* et envoie Entrée (même règle que
+/// `sessions.sendReview` et `sessions.sendPrompt`). Une demande ouverte fait
+/// attendre : avant d'écrire, rien n'est écrit ; après, seule l'Entrée est
+/// renvoyée plus tard. Abandon au bout du délai, ou si la session s'arrête :
+/// effet `initial_prompt_failed {reason}` ; sinon `initial_prompt_sent`.
+pub(crate) async fn deliver_initial(
+    d: Arc<Daemon>,
+    id: Uuid,
+    input: mpsc::Sender<Vec<u8>>,
+    lock: super::supervisor::PtyLock,
+    initial: super::supervisor::forge::InitialPrompt,
+) {
+    let deadline = tokio::time::Instant::now() + d.initial_prompt_timeout();
+    let result = deliver_initial_until(&d, &id, &input, &lock, &initial, deadline).await;
+    d.initial_prompt_done(id, result);
+}
+
+async fn deliver_initial_until(
+    d: &Arc<Daemon>,
+    id: &Uuid,
+    input: &mpsc::Sender<Vec<u8>>,
+    lock: &super::supervisor::PtyLock,
+    initial: &super::supervisor::forge::InitialPrompt,
+    deadline: tokio::time::Instant,
+) -> Result<(), String> {
+    use super::supervisor::forge::InitialReadiness;
+    let gone = || "prompt initial abandonné : la session s'est arrêtée avant son envoi".to_owned();
+    let mut typed = false;
+    let mut ready_since: Option<tokio::time::Instant> = None;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(format!(
+                "prompt initial abandonné : la session n'était pas prête (ou une demande \
+                 attendait une réponse) au bout de {} s{}",
+                d.initial_prompt_timeout().as_secs(),
+                if typed {
+                    " ; le texte est resté dans le champ de saisie"
+                } else {
+                    ""
+                }
+            ));
+        }
+        match d.initial_readiness(id, input) {
+            InitialReadiness::Gone => return Err(gone()),
+            InitialReadiness::Wait => {
+                ready_since = None;
+                tokio::time::sleep(INITIAL_POLL).await;
+                continue;
+            }
+            InitialReadiness::Ready => {}
+        }
+        if now.duration_since(*ready_since.get_or_insert(now)) < INITIAL_SETTLE {
+            tokio::time::sleep(INITIAL_POLL).await;
+            continue;
+        }
+        let guard = lock.lock().await;
+        // Revérifié verrou pris : une demande apparue entre-temps fait attendre.
+        if d.recheck_input(id, input).is_err() {
+            drop(guard);
+            ready_since = None;
+            tokio::time::sleep(INITIAL_POLL).await;
+            continue;
+        }
+        if !typed {
+            let text = &initial.instruction;
+            // Seule, une consigne qui finit par `\` passerait à la ligne :
+            // collée comme `sessions.sendPrompt` le ferait.
+            let bytes = if initial.pasted.is_empty() && text.ends_with('\\') {
+                bracketed_paste(text)
+            } else {
+                text.as_bytes().to_vec()
+            };
+            input.send(bytes).await.map_err(|_| gone())?;
+            if !initial.pasted.is_empty() {
+                tokio::time::sleep(REVIEW_STEP).await;
+                input
+                    .send(bracketed_paste(&initial.pasted))
+                    .await
+                    .map_err(|_| gone())?;
+            }
+            typed = true;
+            tokio::time::sleep(REVIEW_STEP).await;
+            // Demande ouverte pendant l'écriture : l'Entrée attendra.
+            if d.recheck_input(id, input).is_err() {
+                drop(guard);
+                ready_since = None;
+                continue;
+            }
+        }
+        input.send(b"\r".to_vec()).await.map_err(|_| gone())?;
+        return Ok(());
+    }
 }
 
 /// Écrit les Shift+Tab d'un `sessions.setMode` accepté. Si l'écriture

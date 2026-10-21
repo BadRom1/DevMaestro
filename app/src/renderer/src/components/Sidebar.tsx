@@ -15,6 +15,7 @@ import {
   tildify,
 } from '../state/format'
 import { RESOLVING_GROUP, pastFolderMissing, type PastEntry, type PastGroup, type ProjectGroup } from '../state/projects'
+import { sessionIssue } from '../state/forge'
 import { glyphFor } from '../state/status'
 import { candidate, cleanupCount, worktreeOf, type WorktreeLists } from '../state/worktrees'
 import { PathLabel, ProfileBadge, StatusGlyph } from './common'
@@ -119,6 +120,10 @@ export function Sidebar(props: {
   worktreesEnabled?: boolean
   /** Ouvre « Nettoyer les worktrees » d'un dépôt (`focus` : worktree visé). */
   onCleanup?: (root: string, name: string, focus: string | null) => void
+  /** Ouvre « Issues du projet » d'un dépôt (absent : forge masquée ou désactivée). */
+  onOpenIssues?: (project: { root: string; name: string; key: string }) => void
+  /** Ouvre le détail de l'issue liée à une session (absent : « #n » affiché sans lien). */
+  onOpenIssue?: (s: Session) => void
 }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -163,6 +168,7 @@ export function Sidebar(props: {
     const color = sessionColor(s)
     const forgettable = !s.alive
     const missing = folderMissing(s, props.projects[s.cwd])
+    const iss = sessionIssue(s)
     return (
       <li key={s.id} className="srow-wrap">
         <div className="srow-line">
@@ -224,6 +230,21 @@ export function Sidebar(props: {
           </button>
         )}
         </div>
+        {iss &&
+          (props.onOpenIssue ? (
+            <button
+              className="srow-issue"
+              title={`Issue #${iss.number}${iss.title ? ` : ${iss.title}` : ''} (voir le détail)`}
+              aria-label={`Issue #${iss.number} de « ${name} »${iss.title ? ` : ${iss.title}` : ''}, voir le détail`}
+              onClick={() => props.onOpenIssue!(s)}
+            >
+              <span className="mono">#{iss.number}</span> {iss.title}
+            </button>
+          ) : (
+            <span className="srow-issue" title={`Issue #${iss.number}${iss.title ? ` : ${iss.title}` : ''}`}>
+              <span className="mono">#{iss.number}</span> {iss.title}
+            </span>
+          ))}
         <SidebarAgents
           session={s}
           agents={props.subagents[s.id] ?? NO_AGENTS}
@@ -327,6 +348,7 @@ export function Sidebar(props: {
         const key = `proj:${g.key}`
         const canClean = !!props.worktreesEnabled && g.isGit && !g.missing && !!props.onCleanup
         const toClean = canClean ? cleanupCount(props.worktrees?.[g.root], props.worktreesWorked) : 0
+        const canIssues = g.isGit && !g.missing && !!props.onOpenIssues
         return (
           <Group
             key={g.key}
@@ -336,7 +358,19 @@ export function Sidebar(props: {
             open={!isCollapsed(key)}
             onToggle={() => toggle(key)}
             action={
-              canClean ? (
+              canClean || canIssues ? (
+                <>
+                {canIssues && (
+                  <button
+                    className="proj-act"
+                    aria-label={`Issues de ${g.name}…`}
+                    title="Issues du projet…"
+                    onClick={() => props.onOpenIssues!({ root: g.root, name: g.name, key: g.key })}
+                  >
+                    <span aria-hidden="true">◎</span>
+                  </button>
+                )}
+                {canClean && (
                 <button
                   className={`proj-act${toClean > 0 ? ' has' : ''}`}
                   aria-label={`Nettoyer les worktrees de ${g.name}${toClean > 0 ? ` (${toClean} intégré${toClean > 1 ? 's' : ''})` : ''}…`}
@@ -350,6 +384,8 @@ export function Sidebar(props: {
                     </span>
                   )}
                 </button>
+                )}
+                </>
               ) : undefined
             }
             extra={

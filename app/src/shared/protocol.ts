@@ -148,6 +148,94 @@ export interface Session {
    * sous-agents, compaction. Absent avec un démon plus ancien.
    */
   activity?: SessionActivity | null
+  /** Issue liée au lancement (v0.3, lot 13a) ; absent avec un démon plus ancien. */
+  issue?: IssueRef | null
+}
+
+/* ---------- Forge (v0.3, lot 13a, ADR 0006) ---------- */
+
+export type ForgeKind = 'github'
+
+/** Premier message d'une session lancée depuis une issue : consigne tapée, contenu collé. */
+export interface InitialMessage {
+  instruction: string
+  pasted?: string
+}
+
+/** Lien session ↔ issue, enregistré par le démon (`sessions.launch`, `Session.issue`). */
+export interface IssueRef {
+  number: number
+  title: string
+  url: string
+}
+
+/** État de la forge d'un projet (`forge.status`). */
+export interface ForgeStatus {
+  available: boolean
+  kind: ForgeKind | null
+  host: string | null
+  /** « propriétaire/dépôt ». */
+  repo: string | null
+  /** Pourquoi la forge est indisponible, en français. */
+  reason: string | null
+  /** Capacités de la forge et du démon ; absentes avec un démon plus ancien. */
+  capabilities?: ForgeCapabilities | null
+}
+
+export interface ForgeCapabilities {
+  sub_issues?: boolean
+  epics?: boolean
+  review_comments?: boolean
+  checks?: boolean
+  /** Le démon sait taper une consigne puis coller un contenu au lancement (`sessions.launch` avec `initial`). */
+  initial_prompt?: boolean
+}
+
+export type IssueState = 'open' | 'closed'
+export const ISSUE_STATES: readonly IssueState[] = ['open', 'closed']
+/** Filtre d'état de `forge.issues`. */
+export type IssueStateFilter = IssueState | 'all'
+export const ISSUE_STATE_FILTERS: readonly IssueStateFilter[] = ['open', 'closed', 'all']
+
+export interface IssueLabel {
+  name: string
+  /** Couleur de la forge (« d73a4a », sans « # ») : non fiable, validée avant usage. */
+  color: string | null
+}
+
+export interface SubIssue {
+  number: number
+  title: string
+  state: IssueState
+}
+
+/** Issue telle que la forge la donne : contenu **non fiable** (Markdown rendu sûr, liens par confirmation). */
+export interface Issue {
+  number: number
+  title: string
+  state: IssueState
+  url: string
+  author: string | null
+  labels: IssueLabel[]
+  assignees: string[]
+  updated_at: string | null
+  /** Markdown, 64 Kio au plus ; absent dans `forge.issues`. */
+  body?: string | null
+  /** Corps coupé par le démon. */
+  truncated?: boolean | null
+  /** Epic parent. */
+  parent?: number | null
+  sub_issues?: SubIssue[] | null
+  sub_issues_summary?: { total: number; completed: number } | null
+}
+
+/** Filtres de `forge.issues`. */
+export interface IssueFilter {
+  state?: IssueStateFilter
+  search?: string
+  assignee?: '@me' | null
+  label?: string
+  limit?: number
 }
 
 export type ActivityKind = 'idle' | 'prompt' | 'tool' | 'subagents' | 'compacting' | 'waiting'
@@ -237,6 +325,10 @@ export type Effect =
     }
   | { type: 'clear_waiting' }
   | { type: 'possibly_stale'; request_ids: number[] }
+  /** Premier message en deux temps (`initial`) tapé puis collé (lot 13a). */
+  | { type: 'initial_prompt_sent' }
+  /** Échec de l'envoi du premier message : la session tourne sans lui. */
+  | { type: 'initial_prompt_failed'; reason?: string | null }
 
 export interface Snapshot {
   cols: number
@@ -716,6 +808,14 @@ export interface Methods {
       rows?: number
       /** Créer un worktree puis lancer la session dedans (lot 6 ; ignoré par un démon plus ancien). */
       worktree?: WorktreeRequest
+      /** Issue d'origine (lot 13a ; ignorée par un démon plus ancien). */
+      issue?: IssueRef
+      /**
+       * Premier message en deux temps (lot 13a), exclusif avec `prompt` : le
+       * démon lance claude sans prompt puis, la TUI prête, **tape**
+       * `instruction` et **colle** `pasted` en *bracketed paste* (architecture § 9).
+       */
+      initial?: InitialMessage
     }
     /** `warnings` : messages du démon en français (mode dangereux remplacé…). */
     result: { session: Session; warnings?: string[]; worktree?: CreatedWorktree | null }
@@ -799,7 +899,19 @@ export interface Methods {
     params: { root: string; path: string; delete_branch: boolean; force: boolean }
     result: WorktreeRemoved
   }
+  /**
+   * Forge du projet (lot 13a). `enabled` (réglage « Accès aux forges ») est
+   * ajouté par le processus principal, jamais pris de la page.
+   */
+  'forge.status': { params: { root: string; refresh?: boolean }; result: ForgeStatus }
+  /** Issues du projet, sans corps ; `limit` 50 par défaut, 200 au plus. */
+  'forge.issues': { params: { root: string; refresh?: boolean } & IssueFilter; result: { issues: Issue[]; truncated: boolean } }
+  /** Une issue complète, sous-issues comprises. */
+  'forge.issue': { params: { root: string; number: number; refresh?: boolean }; result: Issue }
 }
+
+/** Méthodes de la forge : le processus principal y ajoute `enabled` (réglage global). */
+export const FORGE_METHODS: readonly MethodName[] = ['forge.status', 'forge.issues', 'forge.issue']
 
 export type MethodName = keyof Methods
 
@@ -840,6 +952,9 @@ export const RENDERER_METHODS: readonly MethodName[] = [
   'conversation.subagent',
   'conversation.full',
   'sessions.sendPrompt',
+  'forge.status',
+  'forge.issues',
+  'forge.issue',
 ]
 
 /** Codes d'erreur JSON-RPC du démon (protocole § 3). */
@@ -859,6 +974,8 @@ export const ErrorCode = {
   WorktreeDirty: -32020,
   /** `files.write` : le fichier a changé depuis son ouverture (`data` : `{version}` actuelle). */
   FileChanged: -32021,
+  /** `forge.*` : forge indisponible (`gh` absent ou non connecté, dépôt non GitHub, désactivé) ; `data: {reason}`. */
+  ForgeUnavailable: -32022,
   /** Côté client : délai dépassé, connexion perdue (hors protocole). */
   Timeout: -1,
   Disconnected: -2,

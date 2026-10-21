@@ -4,7 +4,15 @@
  * minimal (identifiants UUID, entiers bornés, énumérations, chaînes de
  * longueur bornée). Les champs inconnus sont retirés. Messages en français.
  */
-import { COMMIT_RANGES, FULL_PARTS, MAX_FILE_WRITE_BYTES, MAX_TITLE, SESSION_COLORS, type MethodName } from '../shared/protocol'
+import {
+  COMMIT_RANGES,
+  FULL_PARTS,
+  ISSUE_STATE_FILTERS,
+  MAX_FILE_WRITE_BYTES,
+  MAX_TITLE,
+  SESSION_COLORS,
+  type MethodName,
+} from '../shared/protocol'
 import { ZOOM_DIRECTIONS, type ZoomDirection } from '../shared/settings'
 import { WORKTREE_LOCATIONS, branchNameProblem } from '../shared/worktrees'
 
@@ -267,8 +275,89 @@ function worktreeRequest(o: Obj, k: string): Obj {
   return out
 }
 
+/** Limites des paramètres de la forge (lot 13a). */
+export const MAX_ISSUE_SEARCH = 256
+export const MAX_ISSUE_LABEL = 128
+export const MAX_ISSUE_TITLE = 512
+export const MAX_ISSUE_LIMIT = 200
+
+/** Texte court d'un filtre (recherche, étiquette) : borné en caractères, sans caractère de contrôle. */
+function filterText(max: number) {
+  return (o: Obj, k: string): string => {
+    const v = str(o, k, max, { codePoints: true })
+    if (/\p{Cc}/u.test(v)) throw new ValidationError(`« ${k} » contient un caractère de contrôle`)
+    return v
+  }
+}
+
+/** Numéro d'issue : entier strictement positif. */
+function issueNumber(o: Obj, k: string): number {
+  return int(o, k, 1, Number.MAX_SAFE_INTEGER)
+}
+
+/** Lien https d'une issue (pas d'autre schéma, pas d'identifiants dans l'URL). */
+function httpsUrl(o: Obj, k: string): string {
+  const v = str(o, k, 2048, { nonEmpty: true })
+  let u: URL
+  try {
+    u = new URL(v)
+  } catch {
+    throw new ValidationError(`« ${k} » doit être un lien https`)
+  }
+  if (u.protocol !== 'https:' || u.username || u.password) throw new ValidationError(`« ${k} » doit être un lien https`)
+  return u.toString()
+}
+
+/** Issue liée à une session lancée : `{number, title, url}` (titre de 512 caractères au plus, lien https). */
+function issueRef(o: Obj, k: string): Obj {
+  const v = o[k]
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new ValidationError(`« ${k} » doit être un objet`)
+  const w = v as Obj
+  try {
+    const title = str(w, 'title', MAX_ISSUE_TITLE * 2, { nonEmpty: true })
+    if ([...title].length > MAX_ISSUE_TITLE) throw new ValidationError(`« title » est trop long (${MAX_ISSUE_TITLE} caractères au plus)`)
+    return { number: issueNumber(w, 'number'), title, url: httpsUrl(w, 'url') }
+  } catch (e) {
+    throw new ValidationError(`${k} : ${(e as Error).message}`)
+  }
+}
+
+/** Consigne tapée d'un premier message (`initial.instruction`) : une ligne. */
+export const MAX_INSTRUCTION_CHARS = 2000
+
+/**
+ * Premier message en deux temps : `instruction` d'une ligne, non vide, sans
+ * caractère de contrôle (elle est tapée) ; `pasted` facultatif, 256 Kio
+ * d'UTF-8 au plus, sans caractère nul.
+ */
+function initialMessage(o: Obj, k: string): Obj {
+  const v = o[k]
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new ValidationError(`« ${k} » doit être un objet`)
+  const w = v as Obj
+  try {
+    const instruction = str(w, 'instruction', MAX_INSTRUCTION_CHARS, { nonEmpty: true, codePoints: true })
+    if (/[\p{Cc}\u2028\u2029]/u.test(instruction)) throw new ValidationError('« instruction » doit tenir sur une ligne, sans caractère de contrôle')
+    const out: Obj = { instruction }
+    if (present(w, 'pasted')) {
+      const pasted = w.pasted
+      if (typeof pasted !== 'string') throw new ValidationError('« pasted » doit être une chaîne')
+      if (pasted.length > MAX_PROMPT_BYTES || new TextEncoder().encode(pasted).length > MAX_PROMPT_BYTES) {
+        throw new ValidationError('« pasted » est trop long (256 Kio au plus)')
+      }
+      if (pasted.includes('\0')) throw new ValidationError('« pasted » contient un caractère nul')
+      if (pasted.trim() !== '') out.pasted = pasted
+    }
+    return out
+  } catch (e) {
+    throw new ValidationError(`${k} : ${(e as Error).message}`)
+  }
+}
+
 /** Délai des opérations git longues du démon (création, liste, suppression de worktrees). */
 export const WORKTREE_TIMEOUT_MS = 120_000
+
+/** Délai des méthodes de la forge (lot 13a) : plusieurs appels de `gh` de 15 s au plus. */
+export const FORGE_TIMEOUT_MS = 90_000
 
 /**
  * Délai d'attente d'une méthode relayée : 120 s pour `worktrees.*` et pour
@@ -278,6 +367,8 @@ export const WORKTREE_TIMEOUT_MS = 120_000
 export function requestTimeoutMs(method: MethodName, clean: Obj): number | undefined {
   if (method === 'worktrees.list' || method === 'worktrees.remove') return WORKTREE_TIMEOUT_MS
   if (method === 'sessions.launch' && clean.worktree !== undefined) return WORKTREE_TIMEOUT_MS
+  // `gh` a 15 s par appel côté démon, et `forge.issue` en enchaîne plusieurs (issue, sous-issues).
+  if (method === 'forge.status' || method === 'forge.issues' || method === 'forge.issue') return FORGE_TIMEOUT_MS
   return undefined
 }
 
@@ -310,6 +401,9 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       optional(o, out, 'prompt', (x, k) => str(x, k, MAX_TEXT))
       size(o, out)
       optional(o, out, 'worktree', worktreeRequest)
+      optional(o, out, 'issue', issueRef)
+      optional(o, out, 'initial', initialMessage)
+      if (out.initial !== undefined && out.prompt !== undefined) throw new ValidationError('« prompt » et « initial » ne vont pas ensemble')
       return out
     case 'sessions.resume':
       if (present(o, 'id')) {
@@ -482,6 +576,24 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       out.path = absPath(o, 'path')
       out.delete_branch = bool(o, 'delete_branch')
       out.force = bool(o, 'force')
+      return out
+    case 'forge.status':
+      out.root = absPath(o, 'root')
+      optional(o, out, 'refresh', bool)
+      return out
+    case 'forge.issues':
+      out.root = absPath(o, 'root')
+      optional(o, out, 'state', (x, k) => oneOf(x, k, ISSUE_STATE_FILTERS))
+      optional(o, out, 'search', filterText(MAX_ISSUE_SEARCH))
+      nullable(o, out, 'assignee', (x, k) => oneOf(x, k, ['@me'] as const))
+      optional(o, out, 'label', filterText(MAX_ISSUE_LABEL))
+      optional(o, out, 'limit', (x, k) => int(x, k, 1, MAX_ISSUE_LIMIT))
+      optional(o, out, 'refresh', bool)
+      return out
+    case 'forge.issue':
+      out.root = absPath(o, 'root')
+      out.number = issueNumber(o, 'number')
+      optional(o, out, 'refresh', bool)
       return out
   }
 }

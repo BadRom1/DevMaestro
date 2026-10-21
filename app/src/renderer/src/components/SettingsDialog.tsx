@@ -715,6 +715,22 @@ function General({ profiles, projects, home }: { profiles: Profile[]; projects: 
           </label>
         </div>
         <div className="field">
+          <span className="lbl">Accès aux forges</span>
+          <label className="optrow">
+            <input
+              type="checkbox"
+              checked={settings.forges.enabled}
+              onChange={(e) => update({ forges: { enabled: e.target.checked } })}
+            />
+            <span>
+              Lire les issues des projets (GitHub, par la CLI « gh » de ta machine)
+              <span className="hint optaide">
+                Rien n’est demandé à la forge tant que tu n’ouvres pas les issues d’un projet ; l’app ne garde aucun jeton.
+              </span>
+            </span>
+          </label>
+        </div>
+        <div className="field">
           <span className="lbl">Profils</span>
           <span className="hint">
             Libellé long (affiché partout) et court (badge de 1 à 3 caractères). Le nom technique reste dans les infobulles.

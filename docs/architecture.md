@@ -16,7 +16,7 @@ Hors périmètre v1 : sessions SSH (prévues, voir § 4.4), GitLab, suivi mobile
 
 1. **Ne jamais casser la configuration de l'utilisateur.** Les hooks, la statusline et les réglages existants (peon-ping par exemple) continuent de fonctionner dans les sessions lancées par l'app.
 2. **Le vrai Claude Code, pas une imitation.** Le terminal affiche la TUI d'origine ; slash commands, plan mode et raccourcis restent disponibles.
-3. **Local d'abord.** Aucun port réseau ouvert, aucun compte, aucune télémétrie. L'audio de la dictée ne quitte pas la machine. Seule exception : le démon interroge l'endpoint d'usage d'Anthropic avec le jeton OAuth de chaque profil pour afficher les quotas (§ 11), désactivable.
+3. **Local d'abord.** Aucun port réseau ouvert, aucun compte, aucune télémétrie. L'audio de la dictée ne quitte pas la machine. Seule exception : le démon interroge l'endpoint d'usage d'Anthropic avec le jeton OAuth de chaque profil pour afficher les quotas (§ 11), désactivable. Les forges (GitHub, GitLab…) passent par la CLI de l'utilisateur (`gh`, `glab`), lancée par le démon à sa demande, sans jeton tenu par l'app ([ADR 0006](adr/0006-port-forge.md)) ; désactivable.
 4. **Se dégrader proprement.** Une source de données absente (quotas, transcript) donne un état « inconnu », jamais une erreur bloquante.
 5. **Petit périmètre, un seul domaine.** Des modules dans un bounded context, pas une multiplication de crates.
 

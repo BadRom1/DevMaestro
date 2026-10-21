@@ -63,6 +63,8 @@ export interface AppSettings {
   worktrees: WorktreeSettings
   /** Interface (v0.3, lot 8). */
   ui: UiSettings
+  /** « Accès aux forges » (v0.3, lot 13a, ADR 0006) : désactivé, aucune CLI de forge n'est lancée. */
+  forges: { enabled: boolean }
 }
 
 export interface UiSettings {
@@ -152,6 +154,7 @@ export interface SettingsPatch {
     notifyIntegrated?: boolean
   }
   ui?: { zoom?: number; sessionTab?: SessionTab }
+  forges?: { enabled: boolean }
 }
 
 export const MAX_PROJECT_PROFILES = 500
@@ -173,6 +176,7 @@ export function defaultSettings(): AppSettings {
     view: 'projet',
     worktrees: { location: 'sibling', projectLocations: {}, branchPrefix: '', notifyIntegrated: true },
     ui: { zoom: DEFAULT_ZOOM, sessionTab: DEFAULT_SESSION_TAB },
+    forges: { enabled: true },
   }
 }
 
@@ -417,6 +421,9 @@ export function normalizeSettings(raw: unknown): AppSettings {
       zoom: isObj(raw.ui) ? snapZoom(raw.ui.zoom) : DEFAULT_ZOOM,
       sessionTab: isObj(raw.ui) && isSessionTab(raw.ui.sessionTab) ? raw.ui.sessionTab : DEFAULT_SESSION_TAB,
     },
+    forges: {
+      enabled: isObj(raw.forges) && typeof raw.forges.enabled === 'boolean' ? raw.forges.enabled : d.forges.enabled,
+    },
   }
 }
 
@@ -436,7 +443,7 @@ export function validatePatch(raw: unknown): SettingsPatch {
   if (!isObj(raw)) throw new SettingsError('modification des réglages : objet attendu')
   const out: SettingsPatch = {}
   for (const k of Object.keys(raw)) {
-    if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view', 'worktrees', 'ui'].includes(k)) {
+    if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view', 'worktrees', 'ui', 'forges'].includes(k)) {
       throw new SettingsError(`réglage inconnu : ${k}`)
     }
   }
@@ -484,6 +491,12 @@ export function validatePatch(raw: unknown): SettingsPatch {
   }
   if (raw.worktrees !== undefined) out.worktrees = worktreesPatch(raw.worktrees)
   if (raw.ui !== undefined) out.ui = uiPatch(raw.ui)
+  if (raw.forges !== undefined) {
+    if (!isObj(raw.forges) || Object.keys(raw.forges).some((k) => k !== 'enabled') || typeof raw.forges.enabled !== 'boolean') {
+      throw new SettingsError('« forges.enabled » doit être un booléen')
+    }
+    out.forges = { enabled: raw.forges.enabled }
+  }
   return out
 }
 
@@ -580,6 +593,7 @@ export function applyPatch(s: AppSettings, p: SettingsPatch): AppSettings {
     next.worktrees = w
   }
   if (p.ui) next.ui = { ...s.ui, ...p.ui }
+  if (p.forges) next.forges = { ...p.forges }
   return next
 }
 

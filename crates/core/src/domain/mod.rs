@@ -6,6 +6,7 @@ pub mod conversation;
 pub mod decision;
 pub mod diff;
 pub mod files;
+pub mod forge;
 pub mod hooks;
 pub mod metrics;
 pub mod profile;

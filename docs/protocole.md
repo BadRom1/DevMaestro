@@ -88,19 +88,20 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `-32019` | `worktrees.remove` refusé : « une session tourne dans ce worktree » (session vivante du démon dont le `cwd` est dans ce worktree) ; aussi `sessions.launch` / `sessions.resume` dans un worktree en cours de suppression (« ce worktree est en cours de suppression ») |
 | `-32020` | `worktrees.remove` refusé sans `force` : le worktree a des modifications non commitées ou des fichiers non suivis non ignorés ; `data: {files: [chemins], total}` (au plus 20 chemins, relatifs au worktree) |
 | `-32021` | `files.write` refusé : « le fichier a été modifié depuis son ouverture » ; `data: {version}` (version actuelle, `null` si le fichier n'existe plus) ; rien n'est écrit |
+| `-32022` | forge indisponible (`forge.issues`, `forge.issue`) : accès désactivé, dépôt hors GitHub, `gh` absent ou non connecté ; message « forge indisponible : <raison> », `data: {reason}` (la raison seule, en français) |
 
-Une erreur peut porter un champ `data` (objet) avec des détails structurés, en plus de `code` et `message` ; il n'est présent que là où ce document le décrit (aujourd'hui : commentaires de fichier de `sessions.sendReview`, `{index, path, line, line_end}` ; `-32020` de `worktrees.remove`, `{files, total}` ; `-32021` de `files.write`, `{version}`). Un client doit ignorer un `data` qu'il ne connaît pas.
+Une erreur peut porter un champ `data` (objet) avec des détails structurés, en plus de `code` et `message` ; il n'est présent que là où ce document le décrit (aujourd'hui : commentaires de fichier de `sessions.sendReview`, `{index, path, line, line_end}` ; `-32020` de `worktrees.remove`, `{files, total}` ; `-32021` de `files.write`, `{version}` ; `-32022` des méthodes `forge.*`, `{reason}`). Un client doit ignorer un `data` qu'il ne connaît pas.
 
 ## 4. Méthodes
 
 | Méthode | Paramètres | Résultat |
 |---|---|---|
-| `hello` | `{client?}` | `{server: "orchd", version, protocol: 1, pid}` |
+| `hello` | `{client?}` | `{server: "orchd", version, protocol: 1, pid, capabilities: {initial_prompt: true}}` (`capabilities` : fonctions détectables par le client ; absent d'un démon plus ancien) |
 | `profiles.list` | — | `{profiles: [Profil]}` |
 | `projects.resolve` | `{path}` | `{path, exists, inferred, is_git, root, worktree_root, common_dir, branch, name}` (voir ci-dessous) |
 | `sessions.list` | — | `{sessions: [Session]}`, de la plus récente à la plus ancienne |
 | `sessions.get` | `{id}` | `{session: Session}` |
-| `sessions.launch` | `{cwd, profile?, model?, mode?, prompt?, cols?, rows?, worktree?: {branch, base?, location?, path?}}` | `{session: Session, warnings: [texte], worktree?: {path, branch, base}}` (voir « Worktrees ») |
+| `sessions.launch` | `{cwd, profile?, model?, mode?, prompt?, cols?, rows?, worktree?: {branch, base?, location?, path?}, issue?: {number, title, url}, initial?: {instruction, pasted?}}` | `{session: Session, warnings: [texte], worktree?: {path, branch, base}}` (voir « Worktrees ») |
 | `sessions.resume` | `{id}` ou `{claude_session_id, cwd?, profile?}`, plus `{mode?, model?, prompt?, cols?, rows?}` | `{session: Session, warnings: [texte]}` |
 | `sessions.subscribe` | `{id, history?}` | `{id, snapshot: Écran, history?}` puis le flux (§ 6) |
 | `sessions.unsubscribe` | `{id}` | `{unsubscribed: bool}` |
@@ -133,6 +134,9 @@ Une erreur peut porter un champ `data` (objet) avec des détails structurés, en
 | `sessions.sendPrompt` | `{id, text}` | `{sent: true}` (voir « Vue conversation ») |
 | `worktrees.list` | `{root}` | `{root, common_dir, default_branch, reference, worktrees: [Worktree]}` (voir « Worktrees ») |
 | `worktrees.remove` | `{root, path, delete_branch?, force?}` | `{removed: true, path, branch, branch_deleted, branch_error}` |
+| `forge.status` | `{root, enabled?, refresh?}` | `{available, kind, host, repo, reason, capabilities}` (voir « Forge ») |
+| `forge.issues` | `{root, enabled?, refresh?, state?, search?, assignee?, label?, limit?}` | `{issues: [Issue sans corps], truncated}` |
+| `forge.issue` | `{root, number, enabled?, refresh?}` | `Issue` complète, sous-issues comprises |
 
 Détails :
 
@@ -458,6 +462,80 @@ Limites : `"squashed"` ne reconnaît que l'intégration **au contenu identique**
 
 **Identité du projet** : chaque session porte `project_common_dir` (§ 7), relevé au lancement et à la reprise (s'il manquait), et, au démarrage du démon, pour les sessions d'avant le schéma v6 dont le dossier existe encore (sinon d'un worktree enregistré qui le contient). Le front regroupe par ce champ avant toute déduction.
 
+### Forge : issues et epics (v0.3, lot 13a, ADR 0006)
+
+Le démon lit les issues du dépôt d'un projet par la **CLI `gh` de l'utilisateur** : il ne tient aucun jeton, n'ouvre aucune connexion lui-même et n'écrit aucune configuration ; l'authentification, le mandataire et l'hôte (github.com ou GitHub Enterprise) sont ceux de `gh`. Rien n'est appelé tant qu'un client n'appelle pas une méthode `forge.*` (en pratique : l'utilisateur ouvre l'onglet « Issues »). Lecture seule dans ce lot : aucune écriture vers la forge.
+
+**Paramètres communs** : `root` (chemin absolu d'un dossier existant, résolu ; en pratique la racine rendue par `projects.resolve` ; sinon `-32602`) ; `enabled` (booléen, `true` par défaut) : le réglage global « Accès aux forges » de l'app, envoyé à **chaque** appel (le démon ne garde aucun réglage) ; `false` : `available: false`, raison « désactivé dans les réglages », ni `git` ni `gh` ne sont lancés ; `refresh` (booléen, `false` par défaut) : ignorer le cache. Un autre type que booléen : `-32602`.
+
+**Détection** (`forge.status`) : `git remote get-url origin` dans `root` (lanceur durci de `git`, § « Diff et relecture »), puis l'URL est lue : `https://[user@]hôte[:port]/propriétaire/dépôt[.git]`, `ssh://[user@]hôte[:port]/propriétaire/dépôt[.git]`, ou `[user@]hôte:propriétaire/dépôt[.git]` ; exactement deux composants (pas de sous-groupes GitLab), noms limités à `[A-Za-z0-9._-]`. L'URL n'est jamais renvoyée ni journalisée (elle peut porter des identifiants). Puis `gh auth status --json hosts --hostname <hôte>` (sort en 0 même sans compte : `hosts` vide ; un `gh` sans `--json` est interrogé par le code de sortie de `gh auth status --hostname <hôte>`) :
+
+| Cas | `available` | `kind` | `reason` |
+|---|---|---|---|
+| dossier hors dépôt | `false` | `null` | « le dossier n'est pas dans un dépôt git » |
+| pas de remote `origin` | `false` | `null` | « le dépôt n'a pas de remote « origin » » |
+| URL non reconnue (chemin local, `file://`…) | `false` | `null` | « l'URL du remote « origin » n'est pas celle d'un dépôt reconnu (…) » |
+| `github.com`, `gh` absent | `false` | `"github"` | « la CLI gh est introuvable : installez-la (https://cli.github.com) puis lancez « gh auth login » » |
+| `github.com`, aucun compte | `false` | `"github"` | « gh n'est pas connecté à github.com : lancez « gh auth login » » |
+| compte actif en échec (`state` autre que `success`) | `false` | `"github"` | « la connexion de gh à <hôte> est en échec : lancez « gh auth status » puis « gh auth login » » ; `timeout` : « <hôte> injoignable : réessayez plus tard » |
+| autre hôte, connu de `gh` et connecté (GitHub Enterprise) | `true` | `"github"` | `null` |
+| autre hôte inconnu de `gh` (GitLab, Gitea…) ou `gh` absent | `false` | `null` | « forge non reconnue pour <hôte> : seuls GitHub et les GitHub Enterprise déclarés à gh sont pris en charge (…) » |
+| connecté | `true` | `"github"` | `null` |
+
+La commande à lancer est affichée par l'app, **jamais exécutée** par elle ni par le démon. Un alias d'hôte SSH (`Host perso` dans `~/.ssh/config`, `git@perso:o/r`) n'est pas résolu : l'hôte lu est `perso`, inconnu de `gh`.
+
+```json
+{"available": true, "kind": "github" | null, "host": "github.com" | null,
+ "repo": "BadRom1/DevMaestro" | null,      // « propriétaire/dépôt »
+ "reason": null | "texte en français",
+ "capabilities": {"sub_issues": true, "epics": true, "review_comments": false, "checks": false,
+                  "initial_prompt": true} | null}
+```
+
+`host` et `repo` sont donnés dès que l'URL est lue, même indisponible. `capabilities` (`null` sans forge reconnue) : ce que l'adaptateur sait faire **dans cette version** (revue ligne à ligne et CI viendront avec leurs lots) ; `initial_prompt: true` : `sessions.launch` accepte `initial` (voir plus bas ; aussi annoncé par `hello`, même sans forge).
+
+**`forge.issues`** : `state` `"open"` (défaut) | `"closed"` | `"all"` ; `search` : texte dans la syntaxe de recherche de GitHub (blancs de bord retirés, vide = absent, sans caractère de contrôle, 256 caractères au plus ; la combinaison de `state` et de qualificatifs écrits dans `search`, `is:closed` par exemple, est celle de `gh`, non vérifiée) ; `assignee` : `"@me"` ou `null` (autre valeur : `-32602`) ; `label` : un nom d'étiquette (100 caractères au plus) ; `limit` : entier de 1 à **200**, **50** par défaut. Lancé : `gh issue list --repo <hôte>/<propriétaire>/<dépôt> --json number,title,state,url,author,labels,assignees,updatedAt --limit=<limit+1> --state=<state> [--search=<texte>] [--assignee=@me] [--label=<étiquette>]` (champs vérifiés avec gh 2.87.2 ; valeurs de l'utilisateur toujours sous la forme `--option=valeur`, jamais lues comme une option ; les demandes de fusion n'y sont pas). `truncated` : il y en avait plus que `limit`. Ordre : celui rendu par `gh` (sans `search` : les plus récentes d'abord ; avec `search` : celui de la recherche de GitHub), non retouché. Chaque issue a la forme ci-dessous **sans** `body` ni `truncated` ; `parent` vaut `null`, `sub_issues` `[]` et `sub_issues_summary` `null` (`gh issue list` ne donne ni parente ni sous-issues : connues seulement par `forge.issue`).
+
+**`forge.issue {number}`** (entier de 1 à 2³¹ − 1) : `gh api --hostname <hôte> repos/<propriétaire>/<dépôt>/issues/<n>` (API REST : `gh issue view --json` n'a ni parente ni avancement des sous-issues), puis, si `sub_issues_summary.total` > 0, `gh api --hostname <hôte> repos/<propriétaire>/<dépôt>/issues/<n>/sub_issues?per_page=100` (une seule page : d'après la documentation de GitHub, une issue a au plus 100 sous-issues, et `per_page` va jusqu'à 100 ; une forme `?per_page=` dans le chemin vérifiée avec gh 2.87.2). Issue inconnue (HTTP 404 ou 410) : `-32602` « issue #n introuvable » ; une demande de fusion (champ `pull_request`) : `-32602` « #n est une demande de fusion, pas une issue ».
+
+Issue :
+
+```json
+{"number": 12, "title": "Epic : forge, issues et epics", "state": "open" | "closed",
+ "url": "https://github.com/BadRom1/DevMaestro/issues/12",   // page de l'issue (jamais l'URL de l'API)
+ "author": "BadRom1" | null,
+ "labels": [{"name": "epic", "color": "5319e7" | null}],     // couleur de la forge, sans « # »
+ "assignees": ["BadRom1"],
+ "updated_at": "2026-10-21T08:12:00Z" | null,                // telle que donnée par la forge
+ "body": "## Objectif…",          // forge.issue seulement : Markdown, 64 Kio au plus (coupé sur un caractère entier)
+ "truncated": false,              // forge.issue seulement : le corps a été coupé
+ "parent": 3 | null,              // issue parente, seulement si elle est du même dépôt
+ "sub_issues": [{"number": 13, "title": "…", "state": "open", "url": "https://github.com/…/issues/13" | null}],
+ "sub_issues_summary": {"total": 3, "completed": 1} | null}  // null : inconnu (liste, ou hôte sans sous-issues)
+```
+
+Le contenu des issues (titres, corps, étiquettes) est **non fiable** : à afficher comme du texte (Markdown rendu sûr), liens ouverts par la confirmation des liens externes. Le démon en retire les caractères **invisibles** (de quoi cacher du texte à l'utilisateur tout en le donnant à Claude) : U+00AD, U+061C, U+180E, U+200B–U+200F, U+2028–U+202E, U+2060–U+2064, U+2066–U+206F, U+FE00–U+FE0F et U+E0100–U+E01EF (sélecteurs de variation), U+FEFF, U+E0000–U+E007F (étiquettes) ; titres et noms d'étiquettes sont en plus ramenés à une ligne (contrôles retirés, blancs réduits) ; le corps garde ses sauts de ligne et tabulations (fins de ligne `\r\n` ramenées à `\n`, autres contrôles retirés). Conséquence assumée : un émoji composé (U+200D, U+FE0F) perd sa forme composée.
+
+**Cache** : clés encodées en JSON (`["issues", dépôt, état, recherche, @me, étiquette, limite]`…, sans ambiguïté possible) ; chaque réponse réussie (`forge.status` par `root`, `forge.issues` par dépôt et filtres, `forge.issue` par dépôt et numéro) est gardée **60 s** en mémoire (128 réponses au plus, les plus anciennes partent d'abord) ; `refresh: true` relance `gh` (et revérifie la connexion). Une erreur n'est pas gardée ; une forge devenue indisponible en cours de route oublie les états gardés. Rien n'est écrit en base ni au journal (ni contenu, ni message de `gh`).
+
+**Lanceur de `gh`** : `gh` est cherché **au démarrage du démon** dans les dossiers **absolus** de son `PATH` (un composant relatif ou vide est ignoré ; un `gh` installé ensuite demande de redémarrer le démon) et lancé par ce chemin absolu ; arguments séparés, jamais de shell, depuis un dossier neutre (`/` : `--repo` et `--hostname` sont toujours donnés, `gh` ne lit ni le dépôt ni sa configuration git), entrée fermée, dans son propre groupe de processus, tué en entier au bout du délai **et** après sa fin (aucun descendant ne survit ni ne garde les tubes ouverts ; la fin est constatée sans récolter le processus, son numéro de groupe ne peut donc pas avoir été réattribué) ; délai **15 s** par appel ; sortie lue au plus **8 Mio** (au-delà : `-32603` « gh : réponse trop volumineuse (plus de 8 Mio) », rien n'est lu en partie). Environnement : celui du démon, **moins** toutes les variables `GH_*` et `GITHUB_*` héritées sauf `GH_CONFIG_DIR` (dont `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GH_HOST`, `GH_REPO` : un jeton ou un hôte posé dans l'environnement de l'app changerait en silence le compte ou le dépôt visé ; `GH_DEBUG` écrirait les en-têtes sur la sortie d'erreur), `DEBUG`, `CLICOLOR_FORCE`, `ORCH_*` et `DEVMAESTRO_*` ; **plus** `GH_PROMPT_DISABLED=1`, `GH_NO_UPDATE_NOTIFIER=1`, `GH_NO_EXTENSION_UPDATE_NOTIFIER=1`, `GH_SPINNER_DISABLED=1`, `GH_PAGER=cat`, `NO_COLOR=1`, `CLICOLOR=0`, `GIT_TERMINAL_PROMPT=0`. `gh` utilise donc la connexion enregistrée par `gh auth login` (trousseau ou `hosts.yml`) : un utilisateur qui ne s'authentifie que par `GH_TOKEN` apparaît non connecté. Les variables du trousseau (`DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`) et du mandataire (`HTTPS_PROXY`…) sont gardées. Le démon ne lit ni ne transmet jamais de jeton (`gh auth status` ne l'affiche pas sans `--show-token`, jamais passé).
+
+**Erreurs** : `-32022` forge indisponible (`data: {reason}` : mêmes raisons que `forge.status`, ou « gh n'est pas connecté à <hôte> : lancez « gh auth login » » quand `gh` sort avec le code 4, authentification requise) ; `-32602` paramètres ; `-32603` échec de `gh` : « gh n'a pas répondu à temps (délai de 15 s) », « gh : réponse trop volumineuse… », « gh : réponse illisible », ou « gh : <message> » (sortie d'erreur nettoyée : caractères de contrôle retirés, lignes jointes par « ; », jetons d'allure `gh[pousr]_…` / `github_pat_…` masqués, identifiants d'URL masqués (`https://user:secret@hôte/…` → `https://…@hôte/…`), chemins absolus — dont la racine du dépôt et le dossier personnel — remplacés par « … », 500 caractères au plus).
+
+**Lien session ↔ issue** : `sessions.launch` accepte `issue: {number, title, url}` (« Lancer une session » depuis une issue). Vérifié avec les autres paramètres, avant tout lancement ou création de worktree : `number` entier de 1 à 2³¹ − 1, `title` ramené à une ligne (contrôles et caractères invisibles de mise en forme retirés, blancs réduits), non vide, coupé à 256 caractères, `url` commençant par `https://`, sans blanc ni caractère de contrôle, 2 048 octets au plus ; sinon `-32602`. Le démon ne contacte pas la forge pour le vérifier. La session l'enregistre (schéma v7, § 9) et l'expose dans `Session.issue` ; il suit la session à la reprise et au redémarrage du démon. Seul ce lien est enregistré, jamais le contenu de l'issue.
+
+**Prompt initial en deux temps** (`sessions.launch` avec `initial: {instruction, pasted?}`, exclusif avec `prompt` : `-32602` si les deux sont donnés). Le corps d'une issue est un contenu **non fiable** (n'importe qui peut écrire une issue) : passé comme prompt (argument de `claude`), il aurait l'autorité d'une consigne de l'utilisateur (injection de prompt, ADR 0006). Le démon applique donc la règle de l'architecture § 9 au premier message :
+
+- validé avec les autres paramètres, avant tout lancement : `instruction` ramenée à une ligne (contrôles et invisibles retirés, blancs réduits), non vide, **2 000** caractères au plus ; `pasted` (facultatif, `null` ou absent = vide) nettoyé comme le corps d'une issue (fins de ligne, contrôles sauf `\n` et `\t`, invisibles), blancs de bord retirés, **256 Kio** au plus ; un autre type : `-32602` ;
+- `claude` est lancé **sans prompt** ; `first_prompt` vaut d'emblée l'instruction nettoyée ;
+- quand la TUI est prête — session inactive (`SessionStart` reçu, ou `Notification` `idle_prompt`), sans demande ouverte, depuis au moins 300 ms —, verrou des écritures du PTY pris et état revérifié (comme `sessions.sendPrompt`) : l'instruction est **tapée**, `pasted` est **collé** en *bracketed paste* (Claude Code l'encadre comme un contenu venu d'ailleurs ; ses caractères de contrôle ayant été retirés, il ne peut pas fermer l'encadrement), puis Entrée. Sans `pasted`, l'instruction seule est tapée (collée si elle finit par `\`) ;
+- une demande ouverte (ou un tour en cours) fait **attendre** : avant l'écriture, rien n'est écrit ; si elle s'ouvre pendant l'écriture, seule l'Entrée est envoyée plus tard ;
+- résultat annoncé par `session.effect` (§ 5) : `{"type": "initial_prompt_sent"}`, ou `{"type": "initial_prompt_failed", "reason": "…"}` si la session s'arrête avant (« prompt initial abandonné : la session s'est arrêtée avant son envoi ») ou si rien n'a pu partir au bout de **60 s** (« prompt initial abandonné : la session n'était pas prête (ou une demande attendait une réponse) au bout de 60 s », avec « ; le texte est resté dans le champ de saisie » si l'Entrée seule manquait). L'abandon est journalisé (jamais le contenu).
+
+La réponse de `sessions.launch` est inchangée (elle arrive avant l'envoi). Disponibilité : `hello.capabilities.initial_prompt` et `forge.status.capabilities.initial_prompt`.
+
+**Tests** : un binaire construit avec la fonctionnalité `test-support` lit `DEVMAESTRO_GH_BIN` (chemin absolu du faux `gh`), `DEVMAESTRO_GH_TIMEOUT_MS` (délai) et `DEVMAESTRO_INITIAL_PROMPT_TIMEOUT_MS` (délai du prompt initial) ; le binaire distribué les ignore et lance `gh` du `PATH`.
+
 ### Changer de mode (`sessions.setMode`)
 
 **Contournement** : Claude Code n'a pas d'API pour changer le mode d'une session en cours. Le démon écrit dans le PTY autant de Shift+Tab (`ESC [ Z`) qu'il en faut pour aller du mode courant connu (champ `mode` de la session : dernier `permission_mode` reçu dans un hook, ou dernier mode lu dans le pied de la TUI, voir plus bas) au mode visé, le long du cycle relevé avec **Claude Code 2.1.303** (prototype n° 1, Q9) : `default` (`manual`) → `acceptEdits` → `plan` → `auto` → `default`.
@@ -510,7 +588,11 @@ Pour un client lent, les `session.updated` en attente d'une même session sont *
 {"type": "clear_waiting"}
 {"type": "possibly_stale", "request_ids": [1, 2]}
 {"type": "dangerous_mode_detected", "mode": "bypassPermissions"}
+{"type": "initial_prompt_sent"}
+{"type": "initial_prompt_failed", "reason": "prompt initial abandonné : …"}
 ```
+
+`initial_prompt_sent` / `initial_prompt_failed` : envoi du prompt initial d'un `sessions.launch` avec `initial` (§ 4, « Forge »).
 
 `dangerous_mode_detected` : un hook rapporte `bypassPermissions` ou `dontAsk` alors que le démon ne les autorise pas (Shift+Tab dans la TUI, réglage hors de portée du démon…). Le démon ne peut pas l'empêcher : il le signale (une fois par passage dans ce mode) et le journalise.
 
@@ -557,6 +639,7 @@ Règles :
   "first_prompt": "Corrige le test…" | null,
   "profile": "default", "cwd": "/…", "project_root": "/…", "branch": "main",
   "project_common_dir": "/…/.git" | null,  // identité du projet (dossier commun git, lot 6) : reste valable après la suppression du worktree
+  "issue": {"number": 42, "title": "…", "url": "https://github.com/…/issues/42"} | null,  // issue liée au lancement (lot 13a, § 4 « Forge »)
   "model": "opus",                      // modèle demandé au lancement, ou null
   "mode": "default",                    // dernier mode connu (hooks, pied de la TUI), sinon celui demandé
   "status": {"state": "starting|running|waiting|idle|error|stopped",
@@ -747,7 +830,7 @@ Fichiers générés (au démarrage du démon et avant chaque lancement) :
 - **Scope systemd** : si `systemd-run --user --scope` fonctionne au démarrage du démon (gestionnaire systemd utilisateur joignable ; désactivable par `DEVMAESTRO_SYSTEMD_SCOPE=off`), chaque lancement devient `systemd-run --user --scope --quiet --collect --unit=devmaestro-session-<id8>-<alea8>.scope -- claude …` : `systemd-run` s'inscrit dans le scope puis exécute `claude` à sa place (même pid, même PTY, même environnement et dossier). Sinon, lancement direct. Le mode est écrit au journal au démarrage et dans `Session.scope`. Pour les tests seulement, `DEVMAESTRO_SYSTEMD_RUNTIME_DIR` donne à `systemd-run` le vrai `XDG_RUNTIME_DIR` quand celui du démon est temporaire.
 - Lancement : `claude (--session-id <uuid> | --resume <id>) [--permission-mode <mode>] [--model <m>] --plugin-dir <plugin> --settings <réglages du profil> [-- "<prompt>"]` dans un PTY, `cwd` = le dossier demandé, avec `TERM=xterm-256color`, `COLORTERM=truecolor`, les variables du § 8 (marqueurs de session Claude Code hérités retirés), et `CLAUDE_CONFIG_DIR` pour les profils autres que `default` (retiré de l'environnement hérité pour `default`). Le mode `default` s'écrit `manual` sur la ligne de commande. Le binaire vient de `DEVMAESTRO_CLAUDE_BIN`, sinon du `PATH` du démon. Le prompt suit `--` (fin des options façon commander.js, d'après `claude --help`) : un prompt comme `--dangerously-skip-permissions` ou `- liste` n'est pas lu comme une option. **À vérifier avec le vrai CLI** : que `--` est accepté et qu'un prompt égal au nom d'une sous-commande (`mcp`, `update`…) n'est pas lancé comme telle.
 - À la fin du processus `claude`, son groupe de processus reçoit `SIGHUP` (outils restés en arrière-plan), comme à la fermeture d'un terminal.
-- Les sessions sont enregistrées dans `$XDG_DATA_HOME/devmaestro/state.db` (SQLite, WAL, `synchronous=NORMAL`) : identifiants, profil, dossiers, branche, modèle, mode, statut, dates, pid, (schéma v2) date de démarrage du processus et scope systemd, (schéma v3) titre, couleur, premier prompt et dernier `session_name` de la statusline, (schéma v4) la table `hidden_transcripts (profile, claude_session_id, hidden_at)` des transcripts masqués, (schéma v6) la colonne `project_common_dir` des sessions et la table `worktrees (path, common_dir, project_root, branch, base, created_branch, start_sha, created_at)` des worktrees créés par le démon (ligne retirée par `worktrees.remove` ou à l'annulation d'une création), et (schéma v5) la table `subagents` (clé `(session, agent_id)`, ordre de lancement `seq`, champs de l'objet `Sous-agent` dont le rapport) : au plus les **100** derniers par session, écrits à chaque création ou changement de statut ou de champ ; les **compteurs d'outils** (`tool_count`, `current_tool`, `last_tool`) ne sont écrits qu'avec ces changements (après un plantage du démon, ils peuvent donc être en retard). Le plafond suit la même règle en mémoire et en base : les plus anciens finis partent d'abord, jamais un `running` ; un sous-agent oublié en mémoire est retiré de la base. Supprimés avec la session (`sessions.forget`). Au démarrage du démon, les sous-agents restés `running` sont relus `interrupted`, avec `ended_at` = dernière activité de la session (ou l'instant de la relecture). Au redémarrage après un plantage, les processus `claude` relus dont des processus vivent encore (eux-mêmes, ou d'autres dans leur groupe ou leur session) restent refusés au socket de contrôle (§ 10). Écriture à chaque changement de statut ou de champ ; une session qui ne change que par sa dernière activité est réécrite au plus toutes les 30 s. Le schéma est versionné (`PRAGMA user_version`, migrations pas à pas) : une base d'une version plus récente est refusée (le démon ne démarre pas, message en français) ; une base illisible ou corrompue est renommée `state.db.corrupt-<horodatage>` et remplacée par une base vide (avertissement au journal).
+- Les sessions sont enregistrées dans `$XDG_DATA_HOME/devmaestro/state.db` (SQLite, WAL, `synchronous=NORMAL`) : identifiants, profil, dossiers, branche, modèle, mode, statut, dates, pid, (schéma v2) date de démarrage du processus et scope systemd, (schéma v3) titre, couleur, premier prompt et dernier `session_name` de la statusline, (schéma v4) la table `hidden_transcripts (profile, claude_session_id, hidden_at)` des transcripts masqués, (schéma v6) la colonne `project_common_dir` des sessions et la table `worktrees (path, common_dir, project_root, branch, base, created_branch, start_sha, created_at)` des worktrees créés par le démon (ligne retirée par `worktrees.remove` ou à l'annulation d'une création), (schéma v7) les colonnes `issue_number`, `issue_title`, `issue_url` des sessions (issue liée au lancement, § 4 « Forge » ; une ligne incomplète ou invalide est relue sans issue), et (schéma v5) la table `subagents` (clé `(session, agent_id)`, ordre de lancement `seq`, champs de l'objet `Sous-agent` dont le rapport) : au plus les **100** derniers par session, écrits à chaque création ou changement de statut ou de champ ; les **compteurs d'outils** (`tool_count`, `current_tool`, `last_tool`) ne sont écrits qu'avec ces changements (après un plantage du démon, ils peuvent donc être en retard). Le plafond suit la même règle en mémoire et en base : les plus anciens finis partent d'abord, jamais un `running` ; un sous-agent oublié en mémoire est retiré de la base. Supprimés avec la session (`sessions.forget`). Au démarrage du démon, les sous-agents restés `running` sont relus `interrupted`, avec `ended_at` = dernière activité de la session (ou l'instant de la relecture). Au redémarrage après un plantage, les processus `claude` relus dont des processus vivent encore (eux-mêmes, ou d'autres dans leur groupe ou leur session) restent refusés au socket de contrôle (§ 10). Écriture à chaque changement de statut ou de champ ; une session qui ne change que par sa dernière activité est réécrite au plus toutes les 30 s. Le schéma est versionné (`PRAGMA user_version`, migrations pas à pas) : une base d'une version plus récente est refusée (le démon ne démarre pas, message en français) ; une base illisible ou corrompue est renommée `state.db.corrupt-<horodatage>` et remplacée par une base vide (avertissement au journal).
 - Droits : dossiers `$XDG_RUNTIME_DIR/devmaestro`, `$XDG_DATA_HOME/devmaestro` et `$XDG_STATE_HOME/devmaestro` en 0700 (refusés s'ils sont un lien symbolique ou appartiennent à un autre utilisateur), base, journal, plugin et réglages en 0600.
 - **Arrêter le démon termine les sessions** : `SIGTERM`, `SIGINT` ou `SIGHUP` → `SIGHUP` à chaque session (le socket reste ouvert pour recevoir les `SessionEnd`), `SIGKILL` au bout de 3 s, puis fin. Un second signal pendant cet arrêt envoie `SIGKILL` à toutes les sessions et sort aussitôt. Les sessions restent reprenables. Après un plantage du démon, les sessions qui étaient en démarrage, en cours, à répondre ou inactives sont relues arrêtées (`daemon_restart`) ; celles déjà arrêtées ou en erreur sont relues telles quelles (statut et date inchangés).
 - Journal : sortie d'erreur et `$XDG_STATE_HOME/devmaestro/orchd.log`.
@@ -807,7 +890,8 @@ Par profil, deux sources ; **chaque fenêtre** (`five_hour`, `seven_day`) garde 
 - **Transcripts** (vue conversation) : le démon ne lit que ceux des sessions qu'il connaît, résolus sous `<dossier du profil>/projects/` ; leur contenu ne va qu'aux clients du socket de contrôle et n'est jamais journalisé (§ 4, « Vue conversation »).
 - **Le relais n'autorise jamais rien par défaut** (délai, démon absent : sortie sans décision).
 
-- **Identifiants Claude Code et réseau** : le démon lit (jamais n'écrit) le jeton OAuth de chaque profil (`.credentials.json`) pour l'API d'usage ; il ne l'envoie qu'à `https://api.anthropic.com/api/oauth/usage` en HTTPS (TLS rustls, sans suivre de redirection ni passer par un mandataire), ne le journalise pas et ne le renvoie à aucun client. C'est la seule connexion sortante du démon ; elle se coupe par `[quotas] usage_api = false` (§ 9). Aucun port n'est ouvert.
+- **Forge (`gh`)** : le démon lance la CLI `gh` de l'utilisateur, à la demande d'un client (méthodes `forge.*`), en lecture seule ; c'est `gh` qui va sur le réseau, avec la connexion et le mandataire de l'utilisateur. Le démon ne lit, ne transmet ni ne journalise aucun jeton : les variables `GH_*` / `GITHUB_*` héritées (jetons, hôte, dépôt) sont retirées de l'environnement de `gh` (sauf `GH_CONFIG_DIR`), aucune option `--show-token` n'est passée, et les messages de `gh` sont nettoyés (jetons masqués, chemins retirés) avant d'aller au client. Le contenu des issues n'est ni journalisé ni écrit en base (§ 4, « Forge »). Désactivable par le réglage « Accès aux forges » de l'app.
+- **Identifiants Claude Code et réseau** : le démon lit (jamais n'écrit) le jeton OAuth de chaque profil (`.credentials.json`) pour l'API d'usage ; il ne l'envoie qu'à `https://api.anthropic.com/api/oauth/usage` en HTTPS (TLS rustls, sans suivre de redirection ni passer par un mandataire), ne le journalise pas et ne le renvoie à aucun client. C'est la seule connexion que le démon ouvre lui-même (`gh`, voir ci-dessus, ouvre les siennes) ; elle se coupe par `[quotas] usage_api = false` (§ 9). Aucun port n'est ouvert.
 
 ### Ce qui n'est pas protégé (atténuation, pas un bac à sable)
 

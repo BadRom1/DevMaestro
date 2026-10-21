@@ -26,6 +26,8 @@ import {
 } from '../state/format'
 import { displayedMode, idleMode, modeReducer, normalizeMode } from '../state/modeSwitch'
 import { glyphFor } from '../state/status'
+import { sessionIssue } from '../state/forge'
+import { IssueChip } from './IssueChip'
 import type { ITheme } from '@xterm/xterm'
 
 import { TerminalView } from '../terminal/TerminalView'
@@ -108,8 +110,10 @@ function Header({
   termSize,
   onSessionUpdated,
   onForget,
+  onOpenIssue,
 }: {
   session: Session
+  onOpenIssue?: (s: Session) => void
   agents: readonly Subagent[] | undefined
   project: ProjectInfo | undefined
   profiles: Profile[]
@@ -138,6 +142,7 @@ function Header({
   const naming = supportsNaming(session)
   const color = sessionColor(session)
   const agentsRunning = runningLabel(runningCount(session, agents))
+  const iss = sessionIssue(session)
 
   async function run(kind: 'stop' | 'resume', f: () => Promise<unknown>, what: string) {
     setBusy(kind)
@@ -196,6 +201,7 @@ function Header({
           <span className="where" title={`${project?.root ?? session.project_root ?? session.cwd} · ${branch}`}>
             {projectName} <span>/</span> {branch}
           </span>
+          {iss && <IssueChip issue={iss} onOpen={onOpenIssue ? () => onOpenIssue(session) : undefined} />}
         </div>
         <div className="sh-tags">
           <ProfileChip profile={session.profile} profiles={profiles} />
@@ -362,6 +368,7 @@ export function SessionPane({
   onLink,
   onSessionUpdated,
   onForget,
+  onOpenIssue,
   diffSeq,
   draft,
   review,
@@ -403,6 +410,8 @@ export function SessionPane({
   onLink: (url: string) => void
   onSessionUpdated: (s: Session) => void
   onForget: (id: string) => Promise<void>
+  /** Ouvre le détail de l’issue liée (absent : forge masquée ou désactivée). */
+  onOpenIssue?: (s: Session) => void
 }) {
   const pending = session?.pending ?? []
   const termHost = useRef<HTMLDivElement>(null)
@@ -501,6 +510,7 @@ export function SessionPane({
           termSize={termSize}
           onSessionUpdated={onSessionUpdated}
           onForget={onForget}
+          onOpenIssue={onOpenIssue}
         />
       ) : (
         <div className="sh">

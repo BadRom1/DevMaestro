@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 mod commits;
 mod conversation;
+pub mod forge;
 mod subagents;
 mod worktrees;
 
@@ -221,6 +222,9 @@ pub struct Config {
     /// `DEVMAESTRO_SYSTEMD_RUNTIME_DIR` : `XDG_RUNTIME_DIR` à donner à
     /// `systemd-run` (tests, dont le dossier runtime est temporaire).
     pub systemd_runtime_dir: Option<OsString>,
+    /// Délai laissé au prompt initial de `sessions.launch` (`initial`) pour
+    /// partir ([`forge::INITIAL_PROMPT_TIMEOUT`] ; plus court dans les tests).
+    pub initial_prompt_timeout: Duration,
 }
 
 /// Adaptateurs utilisés par le démon.
@@ -237,6 +241,8 @@ pub struct Deps {
     pub worktrees: Box<dyn crate::ports::WorktreeGit>,
     /// Suivi en direct des transcripts (vue conversation).
     pub follower: Box<dyn crate::ports::TranscriptFollower>,
+    /// Forge des dépôts (lot 13a, ADR 0006).
+    pub forge: Box<dyn crate::ports::Forge>,
 }
 
 /// Événement diffusé aux connexions. Léger : une connexion lente regroupe
@@ -569,6 +575,8 @@ pub struct Daemon {
     conv_wake: tokio::sync::Notify,
     /// Plus grande révision d'une conversation oubliée.
     conv_rev_floor: AtomicU64,
+    /// Réponses récentes de la forge (60 s).
+    forge_cache: Mutex<forge::ForgeCache>,
 }
 
 /// Liste des fichiers d'un dépôt, quand, pour quelle empreinte du diff et
@@ -760,6 +768,7 @@ impl Entry {
             first_prompt: self.session.first_prompt.clone(),
             session_name: self.session.metrics.session_name.clone(),
             project_common_dir: self.session.project_common_dir.clone(),
+            issue: self.session.issue.clone(),
         }
     }
 
@@ -791,6 +800,7 @@ impl Entry {
             "cwd": s.cwd,
             "project_root": s.project_root,
             "project_common_dir": s.project_common_dir,
+            "issue": s.issue.as_ref().map(|i| json!({"number": i.number, "title": i.title, "url": i.url})),
             "branch": s.branch,
             "model": self.model,
             "mode": s.state.permission_mode.as_ref().map(|m| m.as_str()),
@@ -920,6 +930,7 @@ impl Daemon {
             conv_actions: Mutex::new(HashMap::new()),
             conv_wake: tokio::sync::Notify::new(),
             conv_rev_floor: AtomicU64::new(0),
+            forge_cache: Mutex::new(forge::ForgeCache::default()),
         })
     }
 
@@ -1164,6 +1175,7 @@ impl Daemon {
             );
             session.branch = r.branch.clone();
             session.project_common_dir = r.project_common_dir.clone();
+            session.issue = r.issue.clone();
             session.title = r.title.clone();
             session.color = r.color.clone();
             session.first_prompt = r.first_prompt.clone();
@@ -2733,6 +2745,13 @@ impl Daemon {
             size: size_param(params, DEFAULT_SIZE)?,
         };
         self.check_mode_allowed(plan.mode.as_ref(), false)?;
+        let issue = forge::issue_param(params)?;
+        let initial = forge::initial_param(params)?;
+        if initial.is_some() && plan.prompt.is_some() {
+            return Err(RpcError::params(
+                "« prompt » et « initial » s'excluent : l'un ou l'autre",
+            ));
+        }
         let mut warnings = Vec::new();
         // Tout est validé : le worktree est créé, la session y sera lancée.
         let created = match &worktree {
@@ -2755,8 +2774,12 @@ impl Daemon {
         );
         session.project_common_dir = repo.as_ref().map(|r| r.common_dir.clone());
         session.branch = repo.and_then(|r| r.branch);
+        session.issue = issue;
         if let Some(p) = &plan.prompt {
             session.note_prompt(p);
+        }
+        if let Some(i) = &initial {
+            session.note_prompt(&i.instruction);
         }
         let mut entry = Entry::new(session, Terminal::new(plan.size), self.now());
 
@@ -2794,8 +2817,23 @@ impl Daemon {
         if let Some(c) = &created {
             result["worktree"] = c.json();
         }
+        // Prompt initial en deux temps : claude est lancé sans prompt, la
+        // consigne est tapée et le contenu collé quand la TUI est prête.
+        let delivery = initial.and_then(|i| {
+            let input = entry.run.as_ref()?.input.clone();
+            Some((input, entry.pty_lock.clone(), i))
+        });
         reg.sessions.insert(id, entry);
         drop(reg);
+        if let Some((input, lock, initial)) = delivery {
+            self.runtime.spawn(super::server::deliver_initial(
+                self.clone(),
+                id,
+                input,
+                lock,
+                initial,
+            ));
+        }
         if let Some(c) = &created {
             self.worktrees_touched(&c.common_dir, &c.project_root);
         }
@@ -4220,6 +4258,7 @@ mod tests {
             first_prompt: None,
             session_name: None,
             project_common_dir: None,
+            issue: None,
         };
         let mut later = r.clone();
         later.updated_at = OffsetDateTime::now_utc();

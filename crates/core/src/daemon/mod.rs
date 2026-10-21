@@ -34,7 +34,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::adapters::{
     FsFiles, FsProfileSource, FsTranscriptFollower, FsTranscriptSource, GitCli, GitDiff,
-    GitWorktrees, NativePty, SqliteStore, SystemClock, UsageApi,
+    GitWorktrees, GithubCli, NativePty, SqliteStore, SystemClock, UsageApi,
 };
 use crate::paths::{Paths, create_private_dir};
 use log::{error, info};
@@ -63,6 +63,7 @@ pub fn default_config(paths: Paths) -> Result<Config, String> {
         quota_min_interval: quota_min_interval(),
         systemd_run: detect_systemd_scope(),
         systemd_runtime_dir: std::env::var_os("DEVMAESTRO_SYSTEMD_RUNTIME_DIR"),
+        initial_prompt_timeout: initial_prompt_timeout(),
         paths,
     })
 }
@@ -79,6 +80,19 @@ fn quota_min_interval() -> Duration {
         return Duration::from_millis(ms);
     }
     supervisor::QUOTA_MIN_INTERVAL
+}
+
+/// Délai du prompt initial. Seul un binaire de test (`test-support`) lit
+/// `DEVMAESTRO_INITIAL_PROMPT_TIMEOUT_MS`.
+fn initial_prompt_timeout() -> Duration {
+    #[cfg(feature = "test-support")]
+    if let Some(ms) = std::env::var("DEVMAESTRO_INITIAL_PROMPT_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    supervisor::forge::INITIAL_PROMPT_TIMEOUT
 }
 
 /// `systemd-run`, si `DEVMAESTRO_SYSTEMD_SCOPE` ne vaut pas `off` et qu'un
@@ -220,6 +234,7 @@ async fn run(paths: Paths, scrubbed: Vec<String>) -> Result<(), String> {
         files: Box::new(FsFiles),
         worktrees: Box::new(GitWorktrees::default()),
         follower: Box::new(FsTranscriptFollower::default()),
+        forge: Box::new(GithubCli::from_env()),
     };
     if !config.usage_api {
         info!("[quotas] usage_api = false : quotas lus dans les statuslines seulement");

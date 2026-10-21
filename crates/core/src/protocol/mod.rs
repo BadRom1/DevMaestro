@@ -71,6 +71,9 @@ pub mod error_code {
     /// `files.write` refusé : le fichier a changé depuis sa lecture (version
     /// actuelle dans `data.version`, `null` s'il n'existe plus).
     pub const FILE_CONFLICT: i64 = -32021;
+    /// Forge indisponible (`forge.issues`, `forge.issue`) : accès désactivé,
+    /// dépôt hors GitHub, `gh` absent ou non connecté (raison dans `data.reason`).
+    pub const FORGE_UNAVAILABLE: i64 = -32022;
 }
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {

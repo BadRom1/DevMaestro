@@ -26,6 +26,7 @@ import { Ipc, type CallResult, type PortDown, type RpcFailure } from '../shared/
 import { validHome } from '../shared/home'
 import {
   ErrorCode,
+  FORGE_METHODS,
   RENDERER_METHODS,
   type Demand,
   type Effect,
@@ -486,6 +487,11 @@ function registerIpc(): void {
     }
     try {
       const clean = validateParams(method as MethodName, params)
+      // Réglage « Accès aux forges » : pris des réglages du processus principal, jamais de la page.
+      if (FORGE_METHODS.includes(method as MethodName)) {
+        await settingsLoaded
+        clean.enabled = settings.settings.forges.enabled
+      }
       const result = await client.request(method, clean, requestTimeoutMs(method as MethodName, clean))
       if (method === 'sessions.resize') relay.noteSize(clean.id as string, clean.cols as number, clean.rows as number)
       return { ok: true, result } as CallResult<MethodName>

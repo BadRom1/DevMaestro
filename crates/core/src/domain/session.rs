@@ -56,6 +56,8 @@ pub struct Session {
     /// Premier prompt tapé (`UserPromptSubmit`), tronqué à
     /// [`PROMPT_PREVIEW_CHARS`] ; les commandes (`/…`) ne comptent pas.
     pub first_prompt: Option<String>,
+    /// Issue de la forge liée au lancement (`sessions.launch`, lot 13a).
+    pub issue: Option<crate::domain::forge::SessionIssue>,
 }
 
 /// Palette des couleurs de session (noms de jetons, l'app choisit le rendu).
@@ -138,6 +140,7 @@ impl Session {
             title: None,
             color: None,
             first_prompt: None,
+            issue: None,
         }
     }
 

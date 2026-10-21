@@ -246,6 +246,10 @@ function applyEffect(state: AppState, id: string, effect: Effect): AppState {
     case 'notify_waiting':
       // Signal des notifications desktop (lot 5) ; l'état arrive par `session.updated`.
       return state
+    case 'initial_prompt_sent':
+    case 'initial_prompt_failed':
+      // Premier message depuis une issue (lot 13a) : l'échec est signalé par l'app, rien à garder ici.
+      return state
   }
 }
 

@@ -2,14 +2,15 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 
 import type { ConnectionState } from '../../shared/bridge'
 import { validHome } from '../../shared/home'
-import { ErrorCode, type Session } from '../../shared/protocol'
-import { CallError, api, call } from './api'
+import { ErrorCode, type ForgeStatus, type Session } from '../../shared/protocol'
+import { CallError, api, call, errorText } from './api'
 import { CleanupDialog } from './components/CleanupDialog'
 import { forgetDiffMemory } from './components/DiffView'
 import { forgetCommitsMemory } from './state/commits'
 import { forgetCommitDiffs } from './components/CommitsView'
 import { forgetFilesMemory } from './components/FilesView'
 import { LinkDialog } from './components/LinkDialog'
+import { IssuesPanel, type EpicLaunchContext } from './components/IssuesPanel'
 import { NewSessionDialog } from './components/NewSessionDialog'
 import { SessionPane } from './components/SessionPane'
 import { Sidebar } from './components/Sidebar'
@@ -25,7 +26,10 @@ import { loadPaneOpen, paneVisible, savePaneOpen } from './state/kanbanFilter'
 import { SettingsDialog } from './components/SettingsDialog'
 import { WheelZoom } from './state/wheelZoom'
 import { useSettings } from './settings'
-import { buildProjectChoices, sessionProjectKey } from './state/newSession'
+import { buildProjectChoices, resolveDefaultProfile, sessionProjectKey } from './state/newSession'
+import { initialOf, sessionIssue, supportsInitialPrompt, type IssuePrefill } from './state/forge'
+import { projectWorktreeLocation } from '../../shared/settings'
+import { LOCATION_LABELS } from '../../shared/worktrees'
 import { noteWork, type WorktreeLists } from './state/worktrees'
 import { rootFromCommonDir } from '../../shared/worktrees'
 import { emptyDraft, reviewReducer, type ReviewAction, type ReviewDraft } from './state/review'
@@ -98,7 +102,7 @@ const RESOLVE_RETRY_MS = 60_000
 
 export function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
-  const { settings, update: updateSettings } = useSettings()
+  const { settings, update: updateSettings, label: profileLabelOf } = useSettings()
   const themeMode: ThemeMode = settings.theme.mode
   // Seule source du mode affiché : le réglage, et la préférence du système pour « Auto ».
   const systemLight = useSystemPrefersLight()
@@ -110,12 +114,17 @@ export function App() {
   // Couleurs du terminal calculées des mêmes jetons (sans relire le CSS : aucun décalage).
   const termTheme = useMemo(() => terminalTheme(settings.theme, scheme), [settings.theme, scheme])
   const [dialog, setDialog] = useState(false)
+  /** « Nouvelle session » ouverte depuis une issue (lot 13a) : projet et préremplissage. */
+  const [dialogFrom, setDialogFrom] = useState<{ prefill: IssuePrefill; key: string; root: string; seq: number } | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const closeSettings = useCallback(() => setSettingsOpen(false), [])
   /** Avertissements du démon au lancement (mode dangereux remplacé…). */
   const [notices, setNotices] = useState<string[]>([])
   const [link, setLink] = useState<string | null>(null)
-  const closeDialog = useCallback(() => setDialog(false), [])
+  const closeDialog = useCallback(() => {
+    setDialog(false)
+    setDialogFrom(null)
+  }, [])
   const closeLink = useCallback(() => setLink(null), [])
   const [termSize, setTermSize] = useState<{ cols: number; rows: number } | null>(null)
   const resolving = useRef(new Set<string>())
@@ -148,7 +157,14 @@ export function App() {
     const offC = api.onConnection((s) => dispatch({ type: 'connection', state: s }))
     const offN = api.onNotification((n) => {
       if (n.method === 'session.updated') dispatch({ type: 'session.updated', session: n.params.session })
-      else if (n.method === 'session.effect') dispatch({ type: 'session.effect', id: n.params.id, effect: n.params.effect })
+      else if (n.method === 'session.effect') {
+        dispatch({ type: 'session.effect', id: n.params.id, effect: n.params.effect })
+        // Premier message depuis une issue non envoyé : la session tourne sans lui, l'utilisateur doit le savoir.
+        if (n.params.effect?.type === 'initial_prompt_failed') {
+          const reason = typeof n.params.effect.reason === 'string' ? n.params.effect.reason : 'raison inconnue'
+          setNotices((xs) => [...xs, `Le premier message (consigne et contenu de l’issue) n’a pas été envoyé à la session : ${reason}.`])
+        }
+      }
       else if (n.method === 'session.removed') {
         forgetViewMemory(n.params.id)
         dispatch({ type: 'session.removed', id: n.params.id })
@@ -571,9 +587,105 @@ export function App() {
       show(s.id)
       setNotices(warnings.filter((w) => typeof w === 'string' && w.trim() !== ''))
       setDialog(false)
+      setDialogFrom(null)
     },
     [show],
   )
+
+  /* ---------- Forge : issues et epics (lot 13a) ---------- */
+
+  /** Le démon connaît-il `forge.*` ? `null` : pas encore su (rien n'est appelé avant l'ouverture d'un panneau). */
+  const [forgeSupported, setForgeSupported] = useState<boolean | null>(null)
+  useEffect(() => {
+    if (state.connection.state !== 'connected') return
+    setForgeSupported(null)
+    setInitialSupported(false)
+  }, [state.connection])
+  const forgeOn = settings.forges.enabled && forgeSupported !== false
+  /** Panneau « Issues du projet » ouvert. */
+  const [issues, setIssues] = useState<{ root: string; name: string; key: string; number: number | null } | null>(null)
+  const closeIssues = useCallback(() => setIssues(null), [])
+  const forgeUnsupported = useCallback(() => setForgeSupported(false), [])
+  /**
+   * Premier message en deux temps (`initial`) : connu seulement si le démon
+   * l'annonce (`capabilities.initial_prompt` de `forge.status`) ; sinon, pas
+   * de lancement depuis une issue (« mets orchd à jour »).
+   */
+  const [initialSupported, setInitialSupported] = useState(false)
+  const forgeSupportedNow = useCallback((status: ForgeStatus) => {
+    setForgeSupported(true)
+    setInitialSupported(supportsInitialPrompt(status))
+  }, [])
+  const openIssues = useCallback(
+    (p: { root: string; name: string; key: string }, number: number | null = null) => {
+      setDialog(false)
+      setDialogFrom(null)
+      setIssues({ ...p, number })
+      loadWorktrees(p.root)
+    },
+    [loadWorktrees],
+  )
+  const openSessionIssue = useCallback(
+    (s: Session) => {
+      const iss = sessionIssue(s)
+      const g = groups.find((x) => x.sessions.some((y) => y.id === s.id))
+      if (iss && g) openIssues({ root: g.root, name: g.name, key: g.key }, iss.number)
+    },
+    [groups, openIssues],
+  )
+  const launchFromIssue = useCallback(
+    (prefill: IssuePrefill) => {
+      if (!issues) return
+      setDialogFrom((d) => ({ prefill, key: issues.key, root: issues.root, seq: (d?.seq ?? 0) + 1 }))
+      setIssues(null)
+      setDialog(true)
+    },
+    [issues],
+  )
+
+  /** Lancement d'un epic : profil et emplacement par défaut du projet, comme « Nouvelle session ». */
+  const epicContext = useMemo((): EpicLaunchContext | null => {
+    if (!issues) return null
+    const choice = projectChoices.find((c) => c.root === issues.root) ?? projectChoices.find((c) => c.key === issues.key)
+    const names = state.profiles.map((p) => p.name)
+    const { profile } = resolveDefaultProfile({
+      projectRoot: choice?.profileKey ?? issues.root,
+      projectProfiles: settings.projectProfiles,
+      profiles: names.length ? names : ['default'],
+      recent: choice?.recentProfile ?? null,
+    })
+    const location = projectWorktreeLocation(settings.worktrees, choice?.profileKey ?? issues.root)
+    const taken = new Set<string>()
+    for (const w of worktreeLists[issues.root]?.worktrees ?? []) if (w.branch) taken.add(w.branch)
+    return {
+      worktrees: worktreesSupported === true,
+      initial: initialSupported,
+      takenBranches: taken,
+      profileLabel: profileLabelOf(profile).long,
+      locationLabel: LOCATION_LABELS[location],
+      launch: async (row, prefill, mode) => {
+        const r = await call('sessions.launch', {
+          cwd: issues.root,
+          profile,
+          mode,
+          initial: initialOf(prefill),
+          ...(termSize ?? {}),
+          worktree: { branch: row.branch, location },
+          ...(prefill.issue ? { issue: prefill.issue } : {}),
+        })
+        const warnings = [...(r.warnings ?? [])]
+        if (!r.worktree) warnings.push(`pas de worktree créé (démon trop ancien ?) : la session tourne dans ${r.session.cwd}`)
+        let session = r.session
+        try {
+          session = (await call('sessions.update', { id: session.id, title: prefill.name })).session
+        } catch (e) {
+          warnings.push(`nom non enregistré : ${errorText(e)}`)
+        }
+        return { session, warnings }
+      },
+      onLaunched: (s) => dispatch({ type: 'session.updated', session: s }),
+    }
+  }, [issues, projectChoices, state.profiles, settings.projectProfiles, settings.worktrees, worktreeLists, worktreesSupported, initialSupported, profileLabelOf, termSize])
 
   // Clic sur une notification desktop : afficher la session.
   const showRef = useRef(show)
@@ -617,6 +729,7 @@ export function App() {
       agentId={(selected && agentSel[selected.id]) || null}
       onSelectAgent={selectAgent}
       openAgents={openAgents}
+      onOpenIssue={forgeOn ? openSessionIssue : undefined}
     />
   )
 
@@ -663,6 +776,7 @@ export function App() {
           pane={paneVisible(kanbanPane, selected, explicitSel) ? sessionPane : null}
           onOpen={openInKanban}
           onClose={closeKanbanPane}
+          onOpenIssue={forgeOn ? openSessionIssue : undefined}
         />
       ) : (
       <main className="viewA">
@@ -687,20 +801,28 @@ export function App() {
             setCleanup({ root, name, focus })
             loadWorktrees(root)
           }}
+          onOpenIssues={forgeOn ? openIssues : undefined}
+          onOpenIssue={forgeOn ? openSessionIssue : undefined}
         />
         {sessionPane}
       </main>
       )}
       {dialog && (
         <NewSessionDialog
+          key={dialogFrom ? `issue-${dialogFrom.seq}` : 'new'}
+          prefill={dialogFrom?.prefill ?? null}
+          initialSupported={initialSupported}
+          onOpenIssues={forgeOn ? openIssues : undefined}
           profiles={state.profiles}
           sessions={sessions}
           past={past}
           projects={state.projects}
           home={home}
           projectProfiles={settings.projectProfiles}
-          initialCwd={selected?.cwd ?? null}
-          initialProjectKey={selected ? sessionProjectKey(selected, state.projects[selected.cwd]) : null}
+          initialCwd={dialogFrom ? dialogFrom.root : (selected?.cwd ?? null)}
+          initialProjectKey={
+            dialogFrom ? dialogFrom.key : selected ? sessionProjectKey(selected, state.projects[selected.cwd]) : null
+          }
           termSize={termSize}
           worktreeLists={worktreeLists}
           worktreesSupported={worktreesSupported}
@@ -730,6 +852,20 @@ export function App() {
           home={home}
           scheme={scheme}
           onClose={closeSettings}
+        />
+      )}
+      {issues && epicContext && (
+        <IssuesPanel
+          key={`${issues.root}#${issues.number ?? ''}`}
+          root={issues.root}
+          name={issues.name}
+          initialNumber={issues.number}
+          epic={epicContext}
+          onClose={closeIssues}
+          onLink={setLink}
+          onLaunchIssue={launchFromIssue}
+          onUnsupported={forgeUnsupported}
+          onSupported={forgeSupportedNow}
         />
       )}
       {link && <LinkDialog url={link} onClose={closeLink} />}
