@@ -47,7 +47,7 @@ describe('registre des consignes', () => {
       expect(p.label).not.toBe('')
       expect(p.variables.length).toBeGreaterThan(0)
       // Aucune variable ne porte un texte de la forge.
-      for (const v of p.variables) expect(['branche', 'base', 'issue', 'commentaires', 'extraits', 'execution']).toContain(v.name)
+      for (const v of p.variables) expect(['branche', 'base', 'issue', 'commentaires', 'extraits', 'execution', 'pr', 'commit']).toContain(v.name)
     }
     expect(PROMPTS.find((p) => p.id === 'issue')!.variables.map((v) => v.name)).toEqual(['issue'])
   })

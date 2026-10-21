@@ -1095,3 +1095,19 @@ fieldset.asw-list legend { padding: 0 0 4px; font-weight: 600 }
 .asw-hint-x { width: 22px; height: 22px; border: 1px solid transparent; border-radius: var(--r); background: transparent; color: var(--muted); font: inherit; cursor: pointer }
 .asw-hint-x:hover { border-color: var(--line-2); color: var(--fg) }
 .asw-hint-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+
+/* Revue assistée (lot 19) : badge « revue », confirmation et aperçu de ce qui part. */
+.review-chip { font-size: 11.5px; color: var(--link); border-color: color-mix(in srgb, var(--link) 45%, var(--line)); background: transparent; flex: none }
+button.review-chip { cursor: pointer }
+button.review-chip:hover, button.review-chip:focus-visible { border-color: var(--link); text-decoration: underline }
+.srow .review-chip { padding: 0 5px; font-size: 10.5px }
+.aireview .ar-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0 }
+.aireview .ar-facts dt { color: var(--muted) }
+.aireview .ar-facts dd { margin: 0; overflow-wrap: anywhere }
+.aireview .ar-status { margin: 0; color: var(--muted); display: flex; gap: 6px; align-items: center }
+.aireview .ar-pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sunk); border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin: 4px 0 8px; font-size: 12px }
+.aireview code { overflow-wrap: anywhere }
+.pdetail .aireview { border: 1px solid var(--line); border-radius: 8px; margin-top: 8px }
+.btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed }
+.aireview .ar-status p { margin: 0 }
+.aireview .ar-notes { margin: 0; padding-left: 18px }

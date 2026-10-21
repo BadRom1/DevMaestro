@@ -18,6 +18,21 @@ describe('validation des paramètres de la page', () => {
     })
   })
 
+  it('revue assistée (lot 19) : mode plan, worktree jetable sur un sha, consigne tapée et 64 Kio collés passent tels quels', () => {
+    const sha = 'abc1234' + 'd'.repeat(33)
+    const pasted = `Demande de fusion #42 : titre\n\tindentation gardée\n${'é'.repeat(30_000)}`
+    const params = {
+      cwd: '/p',
+      profile: 'travail',
+      mode: 'plan',
+      cols: 120,
+      rows: 40,
+      initial: { instruction: 'Aide-moi à relire la demande de fusion #42, en lecture seule.', pasted },
+      worktree: { branch: 'revue/pr-42-abc1234', base: sha, location: 'managed' },
+    }
+    expect(validateParams('sessions.launch', params)).toEqual(params)
+  })
+
   it('refuse identifiants, tailles et énumérations invalides', () => {
     const bad: [Parameters<typeof validateParams>[0], unknown][] = [
       ['sessions.stop', { id: 'pas-un-uuid' }],

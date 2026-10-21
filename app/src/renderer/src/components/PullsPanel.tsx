@@ -24,6 +24,7 @@ import {
   type PullStateFilter,
 } from '../../../shared/protocol'
 import { CallError, call, errorCode, errorText } from '../api'
+import type { ReviewTarget } from '../state/aiReview'
 import { STATUS_LABELS, diffRows } from '../state/diff'
 import { firstFile } from '../state/diffTree'
 import { oneLine } from '../state/forge'
@@ -65,6 +66,7 @@ import {
   type PullFilters,
 } from '../state/forgePulls'
 import { relativeTime, shortAgo } from '../state/format'
+import { AiReviewButton, AiReviewConfirm, useAiReview } from './AiReview'
 import { DiffFileList, DiffTable, FileHeadCounts, fileKeys, useFileNav, useListMode } from './DiffReader'
 import { ForgeMarkdown, IssueLabels } from './ForgeContent'
 
@@ -336,6 +338,17 @@ function PullDetailView({
   /** Raccourcis du lecteur (onglet « Fichiers ») : écoutés sur tout le détail, le focus pouvant être sur l'onglet lui-même. */
   const fileKeysRef = useRef<((e: KeyboardEvent<HTMLElement>) => void) | null>(null)
   const [publish, setPublish] = useState<PublishState | null>(null)
+  /** Confirmation de la revue assistée (lot 19), affichée à la place du détail. */
+  const [assist, setAssist] = useState<ReviewTarget | null>(null)
+  const aiReview = useAiReview()
+  /** Bouton « Revue assistée » : le focus y revient quand on annule la confirmation. */
+  const assistBtn = useRef<HTMLButtonElement>(null)
+  const refocusAssist = useRef(false)
+  useEffect(() => {
+    if (assist || !refocusAssist.current) return
+    refocusAssist.current = false
+    assistBtn.current?.focus()
+  }, [assist])
   const [draft, dispatch] = useForgeDraft(forgeDraftKey(root, pull.number))
   const files = useMemo(() => pullDiffFiles(pull.files), [pull.files])
   const head = validHeadSha(pull.head?.sha)
@@ -354,6 +367,26 @@ function PullDetailView({
   const n = activeForgeComments(draft).length
   const decision = reviewDecisionLabel(pull.review_decision)
   const url = safeHttps(pull.url)
+
+  if (assist && aiReview) {
+    return (
+      <article className="iissue pdetail" aria-label={`Revue assistée de la demande #${pull.number}`}>
+        <h3 className="ih">
+          Revue assistée de <span className="inum mono">#{pull.number}</span> {oneLine(pull.title)}
+        </h3>
+        <AiReviewConfirm
+          target={assist}
+          deps={aiReview}
+          onBusy={onBusy}
+          onCancel={() => {
+            refocusAssist.current = true
+            setAssist(null)
+          }}
+          onDone={() => setAssist(null)}
+        />
+      </article>
+    )
+  }
 
   if (publish) {
     return (
@@ -396,6 +429,11 @@ function PullDetailView({
             Voir sur la forge ↗
           </button>
         )}
+        <AiReviewButton
+          target={() => (head ? { kind: 'pull', root, pull, files, listTruncated: !!pull.files_truncated } : null)}
+          onClick={setAssist}
+          buttonRef={assistBtn}
+        />
       </div>
       <div className="ptabs" role="tablist" aria-label="Vues de la demande">
         {(

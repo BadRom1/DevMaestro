@@ -12,6 +12,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 import { defaultSettings } from '../../src/shared/settings'
 import { emptyDraft } from '../../src/renderer/src/state/review'
+import { session as fixtureSession } from '../fixtures'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -96,6 +97,7 @@ beforeAll(async () => {
     view: async () => ({ ok: true }),
     call: async () => ({ ok: false, error: { code: -32601, message: 'inconnue' } }),
     onTerminal: () => () => {},
+    onNotification: () => () => {},
   }
   store = await import('../../src/renderer/src/components/layoutStore')
   unsaved = await import('../../src/renderer/src/state/unsaved')
@@ -136,7 +138,7 @@ async function mount(el: React.ReactElement) {
 
 const noop = () => {}
 
-function pane(runnersSupported: boolean | null = true) {
+function pane(runnersSupported: boolean | null = true, extra: Record<string, unknown> = {}) {
   return createElement(SettingsProvider, {
     initial: defaultSettings(),
     children: createElement(SessionPane, {
@@ -165,6 +167,7 @@ function pane(runnersSupported: boolean | null = true) {
       runnersRunning: 0,
       onRunnersRunning: noop,
       onRunnersUnsupported: noop,
+      ...extra,
     }),
   })
 }
@@ -610,5 +613,34 @@ describe('colonnes redimensionnables', () => {
     const grip = host!.querySelector<HTMLElement>('[role="separator"]')!
     expect(grip.getAttribute('aria-valuemax')).toBe('420')
     expect(grip.getAttribute('aria-valuenow')).toBe('420')
+  })
+})
+
+describe('session de revue assistée (lot 19)', () => {
+  it('en-tête : badge « revue » (ouvre la PR) et barre de livraison masquée ; sans marque : barre présente', async () => {
+    const { reviewMarks } = await import('../../src/renderer/src/components/AiReview')
+    const s = fixtureSession({ mode: 'plan', branch: 'revue/pr-42-abc1234' })
+    const opened: number[] = []
+    // Barre de livraison montée ⇔ elle demande l'état de livraison au démon.
+    const dm = (window as unknown as { devmaestro: { call: (m: string) => Promise<unknown> } }).devmaestro
+    const orig = dm.call
+    const methods: string[] = []
+    dm.call = async (m: string) => (methods.push(m), orig(m))
+    const extra = { session: s, onOpenPull: (_s: unknown, n: number) => opened.push(n), integrated: false }
+    reviewMarks.set(s.id, { kind: 'pull', pr: 42, sha: 'a'.repeat(40), root: '/home/u/code/projet', worktree: null })
+    await mount(pane(true, extra))
+    const chip = host!.querySelector<HTMLButtonElement>('.sh button.review-chip')!
+    expect(chip.textContent).toContain('revue PR #42')
+    await click(chip)
+    expect(opened).toEqual([42])
+    expect(methods).not.toContain('forge.sessionCi')
+    act(() => root?.unmount())
+    root = null
+    host?.remove()
+    reviewMarks.remove(s.id)
+    await mount(pane(true, extra))
+    expect(host!.querySelector('.review-chip')).toBeNull()
+    expect(methods).toContain('forge.sessionCi')
+    dm.call = orig
   })
 })

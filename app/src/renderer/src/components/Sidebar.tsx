@@ -25,6 +25,8 @@ import { useSettings } from '../settings'
 import { ForgetConfirm, HideConfirm } from './ForgetConfirm'
 import { ColorBar } from './SessionIdentity'
 import { SidebarAgents } from './Subagents'
+import { ReviewBadge, useReviewMarks } from './AiReview'
+import { reviewCleanupWorktree } from '../state/aiReview'
 
 /** Aucun sous-agent (référence stable). */
 const NO_AGENTS: readonly Subagent[] = []
@@ -139,6 +141,7 @@ export function Sidebar(props: {
   const pastOpen = !isCollapsed(PAST_SECTION)
   const pastListId = useId()
   const { settings, label: labelOf } = useSettings()
+  const reviewMarksNow = useReviewMarks()
 
   /** Retrait ou masquage : confirmation dans l'app, sauf si elle est coupée dans les réglages. */
   function ask(key: string, act: () => Promise<void>, what: string) {
@@ -172,6 +175,10 @@ export function Sidebar(props: {
       wt && !s.alive && (candidate(wt, props.worktreesWorked) || (pullMerged && removable(wt) && wt.managed_by !== 'claude_desktop'))
         ? wt
         : undefined
+    // Session de revue assistée (lot 19) : badge, et son worktree jetable proposé au nettoyage une fois arrêtée.
+    const mark = reviewMarksNow[s.id]
+    const reviewWt =
+      !integratedWt && props.worktreesEnabled && isGit ? reviewCleanupWorktree(s, mark, props.worktrees?.[groupRoot]?.worktrees) : null
     const delivered = deliveryOf(s.delivery, !!integratedWt) === 'merged'
     const branch = s.branch ?? (s.cwd !== groupRoot ? basename(s.cwd) : 'sans branche')
     const name = sessionDisplayName(s)
@@ -186,7 +193,7 @@ export function Sidebar(props: {
         <button
           className="srow"
           aria-current={s.id === props.selectedId}
-          aria-label={`${name}, ${branch}, ${glyph.label}, profil ${labelOf(s.profile).long}${color ? `, couleur ${COLOR_LABELS[color].toLowerCase()}` : ''}${missing ? ', dossier supprimé' : ''}${delivered ? ', livrée' : ''}${integratedWt ? ', branche intégrée' : ''}${runners ? `, ${runners}` : ''}, dernière activité ${relativeTime(s.last_activity)}`}
+          aria-label={`${name}, ${branch}, ${glyph.label}, profil ${labelOf(s.profile).long}${color ? `, couleur ${COLOR_LABELS[color].toLowerCase()}` : ''}${missing ? ', dossier supprimé' : ''}${delivered ? ', livrée' : ''}${integratedWt ? ', branche intégrée' : ''}${mark ? ', session de revue' : ''}${runners ? `, ${runners}` : ''}, dernière activité ${relativeTime(s.last_activity)}`}
           title={`${name}\n${branch} · ${s.cwd}${missing ? ' (dossier supprimé)' : ''}`}
           onClick={() => props.onSelect(s.id)}
           onContextMenu={(e) => {
@@ -202,8 +209,9 @@ export function Sidebar(props: {
               <ColorBar color={color} />
               <span className="nm-t">{name}</span>
             </span>
-            {(branch !== name || missing || integratedWt || runners || delivered) && (
+            {(branch !== name || missing || integratedWt || runners || delivered || mark) && (
               <span className="sub">
+                {mark && <ReviewBadge mark={mark} />}
                 {branch !== name && <span className="br">{branch}</span>}
                 {missing && (
                   <span className="gone" title={`ancien emplacement : ${s.cwd}`}>
@@ -236,6 +244,16 @@ export function Sidebar(props: {
             aria-label={`Nettoyer le worktree de « ${name} »`}
             title="Nettoyer le worktree (branche intégrée)…"
             onClick={() => props.onCleanup!(groupRoot, groupName, integratedWt.path)}
+          >
+            Nettoyer…
+          </button>
+        )}
+        {reviewWt && props.onCleanup && (
+          <button
+            className="row-act wt-act"
+            aria-label={`Nettoyer le worktree de revue de « ${name} »`}
+            title="Revue terminée : nettoyer son worktree jetable…"
+            onClick={() => props.onCleanup!(groupRoot, groupName, reviewWt.path)}
           >
             Nettoyer…
           </button>

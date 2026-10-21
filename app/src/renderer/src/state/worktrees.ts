@@ -143,7 +143,8 @@ export function lossesFor(w: WorktreeInfo, deleteBranch: boolean, force = false)
         : 'modifications non commitées : la suppression sera refusée sans confirmation supplémentaire',
     )
   }
-  if (deleteBranch && w.branch && !isIntegrated(w) && (w.ahead ?? 0) > 0) {
+  // `empty` : branche créée par le démon, encore sur son commit de départ (aucun commit à elle ; supprimée par `-D`).
+  if (deleteBranch && w.branch && !isIntegrated(w) && w.integrated !== 'empty' && (w.ahead ?? 0) > 0) {
     out.push(
       force
         ? `${plural(w.ahead!, 'commit non intégré', 'commits non intégrés')} de ${w.branch} seront perdus`

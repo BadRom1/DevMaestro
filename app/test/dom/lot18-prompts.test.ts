@@ -120,6 +120,9 @@ describe('Réglages → Consignes', () => {
       'Livraison : demande de fusion',
       'Livraison : fusion directe',
       'Échec de CI',
+      'Revue assistée : demande de fusion',
+      'Revue assistée : commit',
+      'Revue assistée : diff',
     ])
     expect(area('Issue').value).toBe(defaultPrompt('issue'))
     expect(origin('Issue')).toBe('Origine : texte par défaut')

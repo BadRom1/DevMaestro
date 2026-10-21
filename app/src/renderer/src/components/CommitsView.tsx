@@ -40,6 +40,7 @@ import {
 } from '../state/review'
 import { useNotifiedReload } from '../notifiedReload'
 import { DiffFileList, DiffTable, FileHeadCounts, fileKeys, useFileNav } from './DiffReader'
+import { AiReviewButton } from './AiReview'
 import { ReviewBar } from './ReviewBar'
 
 export interface CommitsState {
@@ -424,6 +425,12 @@ export function CommitsView({
                   <span className="hint">
                     <span className="plus">+{t.additions}</span> <span className="minus">−{t.deletions}</span>
                   </span>
+                )}
+                {cdiff && cdiff.sha === commit.sha && (
+                  <AiReviewButton
+                    className="btn sm ghost"
+                    target={() => ({ kind: 'commit', session, commit, files, listTruncated: !!cdiff.truncated, skipped: skippedCount(cdiff.skipped_non_utf8) })}
+                  />
                 )}
                 {cdiff?.truncated && <span className="chip pend">liste tronquée</span>}
                 {cdiff && skippedCount(cdiff.skipped_non_utf8) > 0 && (

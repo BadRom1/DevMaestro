@@ -27,6 +27,7 @@ import {
 import { displayedMode, idleMode, modeReducer, normalizeMode } from '../state/modeSwitch'
 import { glyphFor } from '../state/status'
 import { sessionIssue } from '../state/forge'
+import { ReviewBadge, useReviewMarks } from './AiReview'
 import { IssueChip } from './IssueChip'
 import { PullChip, useBranchPull } from './PullChip'
 import { DeliveryBar } from './DeliveryBar'
@@ -160,6 +161,8 @@ function Header({
   const color = sessionColor(session)
   const agentsRunning = runningLabel(runningCount(session, agents))
   const iss = sessionIssue(session)
+  /** Session de revue assistée (lot 19) : badge, pas de barre de livraison. */
+  const review = useReviewMarks()[session.id]
   // Demande de fusion de la branche (lot 13b) : relue toutes les 60 s tant que la session est affichée.
   const sw15 = accountSwitch?.state ?? null
   // Arrêt ou reprise de la bascule en cours : « Arrêter » et « Reprendre » attendent.
@@ -225,6 +228,9 @@ function Header({
           </span>
           {iss && <IssueChip issue={iss} onOpen={onOpenIssue ? () => onOpenIssue(session) : undefined} />}
           {pull && <PullChip pull={pull} onOpen={onOpenPull ? () => onOpenPull(session, pull.number) : undefined} />}
+          {review && (
+            <ReviewBadge mark={review} {...(onOpenPull && review.kind === 'pull' && review.pr ? { onOpenPull: () => onOpenPull(session, review.pr!) } : {})} />
+          )}
         </div>
         <div className="sh-tags">
           <ProfileChip profile={session.profile} profiles={profiles} />
@@ -328,7 +334,7 @@ function Header({
           onCancel={() => setForgetting(false)}
         />
       )}
-      {onOpenPull && project?.is_git !== false && project?.exists !== false && (
+      {onOpenPull && !review && project?.is_git !== false && project?.exists !== false && (
         <DeliveryBar
           session={session}
           projectKey={project ? profileKeyOf(session.cwd, project) : null}

@@ -11,6 +11,7 @@ import { STATUS_LABELS, baseLabel, diffRows, skippedCount, sortFiles, totals } f
 import { MAX_COMMENTS, activeComments, commentsAt, editingAt, isDiffComment, type ReviewAction, type ReviewDraft } from '../state/review'
 import { useNotifiedReload } from '../notifiedReload'
 import { DiffFileList, DiffTable, FileHeadCounts, fileKeys, useFileNav } from './DiffReader'
+import { AiReviewButton } from './AiReview'
 import { ReviewBar } from './ReviewBar'
 
 /** Fichier choisi et défilement, par session (gardés hors du composant). */
@@ -245,6 +246,12 @@ export function DiffView({
               </span>
               {diff.loading && ' · mise à jour…'}
             </span>
+            {files.length > 0 && (
+              <AiReviewButton
+                className="btn sm ghost"
+                target={() => ({ kind: 'diff', session, files, listTruncated: !!diff.summary?.truncated, skipped: skippedCount(diff.summary?.skipped_non_utf8) })}
+              />
+            )}
             {diff.summary.truncated && (
               <span className="chip pend" title="Trop de fichiers changés : le démon n’en donne qu’une partie.">
                 liste tronquée

@@ -53,6 +53,7 @@ import { resolveScheme } from './state/themeTokens'
 import { forgetComposerMemory } from './components/ConversationView'
 import { applyTheme, systemPrefersLight, terminalTheme, type ThemeMode } from './theme'
 import { resolvePrompt } from '../../shared/prompts'
+import { AiReviewProvider, reviewMarks } from './components/AiReview'
 
 /** État gardé des onglets Diff, Fichiers, Commits et Conversation d'une session oubliée : libéré. */
 function forgetViewMemory(id: string): void {
@@ -61,6 +62,7 @@ function forgetViewMemory(id: string): void {
   forgetDiffMemory(id)
   forgetCommitsMemory(id)
   forgetCommitDiffs(id)
+  reviewMarks.remove(id)
 }
 
 /** Aucun fichier vu (référence stable). */
@@ -775,6 +777,27 @@ export function App() {
     return false
   }, [selected, worktreeLists, worktreesSupported])
 
+  /* ---------- Revue assistée (lot 19) ---------- */
+
+  /** Le démon sait taper une consigne puis coller un contenu au lancement (`hello` ou, à défaut, `forge.status`). */
+  const reviewSupported =
+    (state.connection.state === 'connected' && state.connection.capabilities?.initial_prompt === true) || initialSupported
+  const reviewProjectFor = useCallback(
+    (root: string) => {
+      const choice = projectChoices.find((c) => c.root === root)
+      return { profileKey: choice?.profileKey ?? root, recentProfile: choice?.recentProfile ?? null }
+    },
+    [projectChoices],
+  )
+  /** Session de revue lancée : affichée, panneau « Forge » fermé. */
+  const onReviewLaunched = useCallback(
+    (s: Session, warnings: string[]) => {
+      setIssues(null)
+      onLaunched(s, warnings)
+    },
+    [onLaunched],
+  )
+
   // Changer de compte (lot 15 ter) : bascules tenues ici, l'en-tête est démonté quand on change de session.
   const switcher = useAccountSwitch({
     sessions: state.sessions,
@@ -839,6 +862,15 @@ export function App() {
   )
 
   return (
+    <AiReviewProvider
+      supported={reviewSupported}
+      profiles={state.profiles}
+      termSize={termSize}
+      worktreeLists={worktreeLists}
+      loadWorktrees={loadWorktrees}
+      projectFor={reviewProjectFor}
+      onLaunched={onReviewLaunched}
+    >
     <div className="app">
       <TopBar
         sessions={sessions}
@@ -994,5 +1026,6 @@ export function App() {
       {link && <LinkDialog url={link} onClose={closeLink} />}
       <UnsavedConfirm />
     </div>
+    </AiReviewProvider>
   )
 }
