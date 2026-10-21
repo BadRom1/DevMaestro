@@ -15,7 +15,7 @@ Application desktop open source pour suivre et piloter plusieurs sessions Claude
 - Rust : un seul domaine, des modules dans `crates/core` (pas de crate par adaptateur). Le domaine ne dépend d'aucun adaptateur (ports dans `ports/`, implémentations dans `adapters/`).
 - Ne jamais épingler une version de dépendance de mémoire : vérifier sur crates.io ou npm au moment de l'ajout.
 - Ne jamais modifier la configuration Claude Code de l'utilisateur (`~/.claude*`) : tout passe par `--plugin-dir` et `--settings` au lancement.
-- Aucun port réseau ouvert, aucune télémétrie ; le socket du démon n'est lisible que par l'utilisateur. Seule connexion sortante : l'endpoint d'usage d'Anthropic pour les quotas (jeton OAuth du profil lu, jamais écrit ni journalisé), désactivable par `[quotas] usage_api = false`.
+- Aucun port réseau ouvert, aucune télémétrie ; le socket du démon n'est lisible que par l'utilisateur. Seule connexion sortante : l'endpoint d'usage d'Anthropic pour les quotas (jeton OAuth du profil lu, jamais écrit ni journalisé), désactivable par `[quotas] usage_api = false`. Les forges (GitHub, GitLab…) passent par la CLI de l'utilisateur (`gh`, `glab`), lancée par le démon à la demande de l'utilisateur, sans jeton tenu par l'app ([ADR 0006](docs/adr/0006-port-forge.md)).
 
 ## Vérifications avant de rendre la main
 
