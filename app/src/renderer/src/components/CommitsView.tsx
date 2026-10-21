@@ -39,7 +39,7 @@ import {
   type ReviewDraft,
 } from '../state/review'
 import { useNotifiedReload } from '../notifiedReload'
-import { DiffFileList, DiffTable, fileKeys } from './DiffReader'
+import { DiffFileList, DiffTable, FileHeadCounts, fileKeys, useFileNav } from './DiffReader'
 import { ReviewBar } from './ReviewBar'
 
 export interface CommitsState {
@@ -210,11 +210,12 @@ export function CommitsView({
   }, [session.id, sha])
 
   const files = useMemo(() => (cdiff && cdiff.sha === sha ? sortFiles(cdiff.files) : []), [cdiff, sha])
+  const nav = useFileNav(files, path)
 
   useEffect(() => {
     if (!cdiff || cdiff.sha !== sha) return
     if (path && files.some((f) => f.path === path)) return
-    setPath(files[0]?.path ?? null)
+    setPath(nav.first)
   }, [files])
 
   const file: DiffFile | null = files.find((f) => f.path === path) ?? null
@@ -253,7 +254,7 @@ export function CommitsView({
   /** Diff de fichier du commit et du fichier choisis (pas celui d'un commit précédent encore en mémoire). */
   const shown = fileDiff && file && fileDiff.sha === sha && fileDiff.path === file.path ? fileDiff : null
   const full = activeComments(draft).length >= MAX_COMMENTS
-  const onFileKey = fileKeys(files, path, setPath, listRef)
+  const onFileKey = fileKeys(files, path, setPath, listRef, { nav })
   const commit = list?.commits.find((c) => c.sha === sha) ?? null
   const t = totals(files)
 
@@ -297,7 +298,8 @@ export function CommitsView({
   const now = Date.now()
 
   return (
-    <div className="commitspane">
+    // j / k écoutés sur tout l'onglet : après un clic sur un commit, le focus est dans la liste des commits, à côté du lecteur.
+    <div className="commitspane" onKeyDown={onFileKey}>
       <div
         className="clist"
         ref={clistRef}
@@ -397,12 +399,13 @@ export function CommitsView({
           <kbd>↑</kbd> / <kbd>↓</kbd> dans la liste : commit précédent / suivant
         </p>
       </div>
-      <div className="diffpane" onKeyDown={onFileKey}>
+      <div className="diffpane">
         <DiffFileList
           files={files}
           selected={path}
           onSelect={setPath}
           listRef={listRef}
+          nav={nav}
           label={commit ? `Fichiers du commit ${shortSha(commit.sha)}` : 'Fichiers du commit'}
           empty={!sha ? 'Choisis un commit.' : cdiff ? 'Aucun fichier changé.' : cdiffError ? '' : 'Chargement…'}
           comments={(p) => (sha ? commitComments(draft, sha).filter((c) => c.path === p).length : 0)}
@@ -442,6 +445,7 @@ export function CommitsView({
                 {file.old_path ? `${file.old_path} → ` : ''}
                 {file.path}
               </span>
+              <FileHeadCounts file={file} fileDiff={shown?.data ?? null} />
               <span className="hint">
                 {STATUS_LABELS[file.status]} dans « {commit.subject || shortSha(commit.sha)} » · survole une ligne et clique sur + pour
                 commenter

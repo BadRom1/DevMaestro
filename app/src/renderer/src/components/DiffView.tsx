@@ -10,7 +10,7 @@ import { call, errorCode, errorText } from '../api'
 import { STATUS_LABELS, baseLabel, diffRows, skippedCount, sortFiles, totals } from '../state/diff'
 import { MAX_COMMENTS, activeComments, commentsAt, editingAt, isDiffComment, type ReviewAction, type ReviewDraft } from '../state/review'
 import { useNotifiedReload } from '../notifiedReload'
-import { DiffFileList, DiffTable, fileKeys } from './DiffReader'
+import { DiffFileList, DiffTable, FileHeadCounts, fileKeys, useFileNav } from './DiffReader'
 import { ReviewBar } from './ReviewBar'
 
 /** Fichier choisi et défilement, par session (gardés hors du composant). */
@@ -139,17 +139,21 @@ export function DiffView({
   const [fileDiff, setFileDiff] = useState<{ path: string; data: FileDiff } | null>(null)
   const [fileError, setFileError] = useState<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
-  const onKey = fileKeys(files, selected, setSelected, listRef)
+  const nav = useFileNav(files, selected)
 
   // Fichier choisi : le premier, ou le même s'il est toujours dans la liste.
   useEffect(() => {
     // Liste pas encore chargée : on garde le fichier demandé.
     if (files.length === 0 && !diff.summary) return
     if (selected && files.some((f) => f.path === selected)) return
-    setSelected(files[0]?.path ?? null)
+    setSelected(nav.first)
   }, [files, selected])
 
   const file: DiffFile | null = files.find((f) => f.path === selected) ?? null
+  const onKey = fileKeys(files, selected, setSelected, listRef, {
+    nav,
+    onToggleSeen: () => file && onSeen(file.path, !seen[file.path]),
+  })
 
   // Lignes du fichier choisi, relues à chaque nouvelle liste.
   useEffect(() => {
@@ -220,6 +224,7 @@ export function DiffView({
         label="Fichiers changés"
         empty="Aucune modification depuis la base."
         seen={seen}
+        nav={nav}
         comments={(path) => draft.comments.filter(isDiffComment).filter((c) => c.path === path && !c.stale).length}
         head={
           <>
@@ -264,6 +269,7 @@ export function DiffView({
               {file.old_path ? `${file.old_path} → ` : ''}
               {file.path}
             </span>
+            <FileHeadCounts file={file} fileDiff={fileDiff?.path === file.path ? fileDiff.data : null} />
             <span className="hint">{STATUS_LABELS[file.status]} · survole une ligne et clique sur + pour commenter</span>
             <label>
               <input type="checkbox" checked={!!seen[file.path]} onChange={(e) => onSeen(file.path, e.target.checked)} /> Vu

@@ -125,3 +125,25 @@ export function stepFile(files: readonly DiffFile[], current: string | null, del
   if (i < 0) return files[0]!.path
   return files[Math.max(0, Math.min(files.length - 1, i + delta))]!.path
 }
+
+/**
+ * Ajouts et suppressions du fichier ouvert (en tête du diff) : les compteurs
+ * de la liste s'ils sont connus, sinon comptés dans les hunks chargés ;
+ * `null` quand ni l'un ni l'autre n'est disponible (fichier binaire, trop
+ * volumineux ou pas encore chargé).
+ */
+export function fileCounts(
+  file: Pick<DiffFile, 'additions' | 'deletions'>,
+  fd: FileDiff | null | undefined,
+): { additions: number; deletions: number } | null {
+  if (typeof file.additions === 'number' && typeof file.deletions === 'number') return { additions: file.additions, deletions: file.deletions }
+  if (!fd || fd.binary || fd.too_large) return null
+  const out = { additions: 0, deletions: 0 }
+  for (const h of fd.hunks) {
+    for (const l of h.lines) {
+      if (l.kind === '+') out.additions++
+      else if (l.kind === '-') out.deletions++
+    }
+  }
+  return out
+}

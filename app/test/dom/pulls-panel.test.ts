@@ -79,6 +79,8 @@ let submit: (params: Record<string, unknown>) => { ok: true; result: unknown } |
   result: { url: 'https://github.com/o/r/pull/5#pullrequestreview-9' },
 })
 let head = SHA
+/** Deuxième fichier dans la demande (raccourcis j / k). */
+let twoFiles = false
 const calls: { method: string; params: Record<string, unknown> }[] = []
 
 type Mod = typeof import('../../src/renderer/src/components/IssuesPanel')
@@ -93,6 +95,9 @@ beforeAll(async () => {
     unobserve() {}
     disconnect() {}
   }
+  const g = globalThis as { CSS?: { escape?: (s: string) => string } }
+  g.CSS ??= {}
+  g.CSS.escape ??= (s: string) => s.replace(/["\\]/g, '\\$&')
   ;(window as unknown as { devmaestro: object }).devmaestro = {
     call: async (method: string, params: Record<string, unknown>) => {
       calls.push({ method, params })
@@ -100,7 +105,15 @@ beforeAll(async () => {
       if (method === 'forge.issues') return { ok: true, result: { issues: [], truncated: false } }
       if (pullsOld && method.startsWith('forge.pull')) return { ok: false, error: { code: -32601, message: `méthode inconnue : ${method}` } }
       if (method === 'forge.pulls') return { ok: true, result: { pulls: [{ ...PULL, body: undefined }], truncated: false } }
-      if (method === 'forge.pull') return { ok: true, result: { ...PULL, head: { ...PULL.head, sha: head } } }
+      if (method === 'forge.pull')
+        return {
+          ok: true,
+          result: {
+            ...PULL,
+            head: { ...PULL.head, sha: head },
+            ...(twoFiles ? { files: [...PULL.files!, { path: 'src/import.ts', status: 'added', additions: 2, deletions: 0 }, { path: 'src/zip.ts', status: 'added', additions: 1, deletions: 0 }] } : {}),
+          },
+        }
       if (method === 'forge.pullFile') return { ok: true, result: FILE }
       if (method === 'forge.submitReview') return submit(params)
       return { ok: false, error: { code: -32601, message: 'inconnue' } }
@@ -193,6 +206,30 @@ async function addLineComment(text: string) {
 }
 
 describe('onglet « Demandes de fusion »', () => {
+  it('j / k dès le clic sur l’onglet « Fichiers » (focus sur l’onglet, hors du lecteur)', async () => {
+    twoFiles = true
+    try {
+      await render()
+      const tab = button('Fichiers (3)')
+      await act(async () => {
+        tab.focus()
+        tab.click()
+      })
+      await flush()
+      expect(q('.pfiles .dhead .path')!.textContent).toBe('src/export.ts')
+      await act(async () => tab.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true, cancelable: true })))
+      await flush()
+      // Un seul gestionnaire : j avance d'un seul fichier.
+      expect(q('.pfiles .dhead .path')!.textContent).toBe('src/import.ts')
+      expect(q('.pfiles .dhead .fcounts [aria-hidden="true"]')!.textContent).toBe('+2 −0')
+      await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', bubbles: true, cancelable: true })))
+      await flush()
+      expect(q('.pfiles .dhead .path')!.textContent).toBe('src/export.ts')
+    } finally {
+      twoFiles = false
+    }
+  })
+
   it('liste : état, décision de revue et CI en glyphe + texte ; détail sûr, CI avec lien par confirmation, fils en lecture', async () => {
     const links: string[] = []
     await render({ onLink: (u) => links.push(u) })

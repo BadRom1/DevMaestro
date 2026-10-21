@@ -384,6 +384,16 @@ kbd { font-family: var(--f-mono); font-size: 11px; border: 1px solid var(--line-
 .frow .st2 { margin-left: auto; white-space: nowrap; font-size: 11px; flex: none }
 .frow.seen .n { color: var(--faint); text-decoration: line-through }
 .plus { color: var(--add-ink) } .minus { color: var(--del-ink) }
+/* Lot 15 bis : arborescence de la liste des fichiers, compteurs du fichier ouvert. */
+.files .fmode { margin: 0 8px 6px; align-self: start }
+.files .fmode button { font-size: 11.5px; padding: 2px 8px }
+.dtree { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px }
+.dtree .frow { cursor: pointer; user-select: none }
+.dtree .frow[aria-selected="true"] { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent) }
+.dtree .frow:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px }
+.frow.fdir .n { color: var(--muted) }
+.frow .chev { flex: none; width: 12px; color: var(--muted) }
+.dhead .fcounts { font-family: var(--f-mono); font-size: 12px; white-space: nowrap }
 .dmain { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; min-width: 0 }
 .dhead { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); min-height: 38px }
 .dhead .path { font-family: var(--f-mono); font-size: 12.5px; overflow-wrap: anywhere; font-variant-ligatures: none; font-feature-settings: "calt" 0, "liga" 0 }

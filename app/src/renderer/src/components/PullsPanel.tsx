@@ -12,7 +12,7 @@
  * Seule écriture vers la forge : `publishConfirmed`, appelée uniquement par le
  * bouton « Publier sur GitHub » de l'étape de confirmation.
  */
-import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react'
 
 import {
   FORGE_REVIEW_EVENTS,
@@ -25,6 +25,7 @@ import {
 } from '../../../shared/protocol'
 import { CallError, call, errorCode, errorText } from '../api'
 import { STATUS_LABELS, diffRows } from '../state/diff'
+import { firstFile } from '../state/diffTree'
 import { oneLine } from '../state/forge'
 import {
   DEFAULT_PULL_FILTERS,
@@ -64,7 +65,7 @@ import {
   type PullFilters,
 } from '../state/forgePulls'
 import { relativeTime, shortAgo } from '../state/format'
-import { DiffFileList, DiffTable, fileKeys } from './DiffReader'
+import { DiffFileList, DiffTable, FileHeadCounts, fileKeys, useFileNav, useListMode } from './DiffReader'
 import { ForgeMarkdown, IssueLabels } from './ForgeContent'
 
 const SEARCH_DEBOUNCE_MS = 350
@@ -332,6 +333,8 @@ function PullDetailView({
   onPull: (p: PullDetail) => void
 }) {
   const [tab, setTab] = useState<DetailTab>('desc')
+  /** Raccourcis du lecteur (onglet « Fichiers ») : écoutés sur tout le détail, le focus pouvant être sur l'onglet lui-même. */
+  const fileKeysRef = useRef<((e: KeyboardEvent<HTMLElement>) => void) | null>(null)
   const [publish, setPublish] = useState<PublishState | null>(null)
   const [draft, dispatch] = useForgeDraft(forgeDraftKey(root, pull.number))
   const files = useMemo(() => pullDiffFiles(pull.files), [pull.files])
@@ -371,7 +374,7 @@ function PullDetailView({
   }
 
   return (
-    <article className="iissue pdetail">
+    <article className="iissue pdetail" onKeyDown={tab === 'files' ? (e) => fileKeysRef.current?.(e) : undefined}>
       <h3 className="ih">
         <span className="inum mono">#{pull.number}</span> {oneLine(pull.title)}
       </h3>
@@ -426,7 +429,7 @@ function PullDetailView({
         </p>
       )}
       {tab === 'files' && (
-        <PullFiles root={root} pull={pull} files={files} draft={draft} dispatch={dispatch} canReview={canReview} />
+        <PullFiles root={root} pull={pull} files={files} draft={draft} dispatch={dispatch} canReview={canReview} keysRef={fileKeysRef} />
       )}
       <section className="fdraft" aria-label="Brouillon de revue de la forge">
         <div className="fdraft-h">
@@ -559,6 +562,7 @@ function PullFiles({
   draft,
   dispatch,
   canReview,
+  keysRef,
 }: {
   root: string
   pull: PullDetail
@@ -566,12 +570,25 @@ function PullFiles({
   draft: ForgeDraft
   dispatch: (a: ForgeDraftAction) => void
   canReview: boolean
+  /** Reçoit le gestionnaire des raccourcis, posé par le détail de la demande. */
+  keysRef: { current: ((e: KeyboardEvent<HTMLElement>) => void) | null }
 }) {
-  const [selected, setSelected] = useState<string | null>(files[0]?.path ?? null)
+  const [listMode] = useListMode()
+  const [selected, setSelected] = useState<string | null>(() => firstFile(files, listMode))
   const [fileDiff, setFileDiff] = useState<{ path: string; sha: string; data: FileDiff } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
-  const onKey = fileKeys(files, selected, setSelected, listRef)
+  const nav = useFileNav(files, selected)
+  const onKey = fileKeys(files, selected, setSelected, listRef, { nav })
+  useLayoutEffect(() => {
+    keysRef.current = onKey
+  })
+  useLayoutEffect(
+    () => () => {
+      keysRef.current = null
+    },
+    [keysRef],
+  )
   const sha = pull.head?.sha ?? ''
 
   useEffect(() => {
@@ -604,12 +621,13 @@ function PullFiles({
   const full = activeForgeComments(draft).length >= MAX_FORGE_COMMENTS
 
   return (
-    <div className="diffpane pfiles" onKeyDown={onKey}>
+    <div className="diffpane pfiles">
       <DiffFileList
         files={files}
         selected={selected}
         onSelect={setSelected}
         listRef={listRef}
+        nav={nav}
         label="Fichiers de la demande"
         empty="Aucun fichier."
         comments={(path) => draft.comments.filter((c) => c.path === path && !c.stale).length}
@@ -623,6 +641,7 @@ function PullFiles({
                 {file.old_path ? `${file.old_path} → ` : ''}
                 {file.path}
               </span>
+              <FileHeadCounts file={file} fileDiff={fileDiff?.path === file.path ? fileDiff.data : null} />
               <span className="hint">
                 {STATUS_LABELS[file.status]}
                 {canReview ? ' · clique sur + pour commenter (brouillon de la forge)' : ''}
