@@ -9,7 +9,7 @@
  *   affiche cette session (l'utilisateur la voit déjà).
  * - Une demande close (réponse, fin de tour…) retire sa notification.
  */
-import type { Demand, Session, WorktreeInfo } from '../shared/protocol'
+import type { ChecksState, Demand, Session, WorktreeInfo } from '../shared/protocol'
 import { summarizeToolInput } from '../shared/summary'
 import { cleanupCandidate, hasOwnWork } from '../shared/worktrees'
 
@@ -217,5 +217,47 @@ export class IntegratedNotifier {
 export function integratedContent(root: string, w: Pick<WorktreeInfo, 'branch' | 'path'>): { title: string; body: string } {
   const title = oneLine(`La branche ${w.branch ?? basename(w.path)} est intégrée : nettoyer le worktree ?`, TITLE_MAX * 2)
   const body = oneLine(`${basename(root)} · ${w.path}`, BODY_MAX)
+  return { title, body }
+}
+
+/* ---------- CI en échec (v0.3, lot 14b) ---------- */
+
+/** Au-delà, les sessions les plus anciennes sont oubliées. */
+const MAX_CI_SESSIONS = 1000
+
+/**
+ * Notification « CI en échec sur <session> » : seulement au passage à
+ * `failure` (un second `forge.ci_changed` en échec, sans retour à un autre
+ * état entre les deux, n'en montre pas d'autre) ; rien si le réglage est
+ * coupé, ni si la fenêtre a le focus et affiche cette session (l'en-tête la
+ * montre déjà).
+ */
+export class CiNotifier {
+  private last = new Map<string, ChecksState>()
+
+  changed(sessionId: string, state: ChecksState, ctx: NotifyContext): boolean {
+    const prev = this.last.get(sessionId)
+    this.last.delete(sessionId)
+    this.last.set(sessionId, state)
+    if (this.last.size > MAX_CI_SESSIONS) this.last.delete(this.last.keys().next().value!)
+    if (state !== 'failure' || prev === 'failure') return false
+    if (!ctx.enabled) return false
+    return !(ctx.windowFocused && ctx.visibleSessionId === sessionId)
+  }
+
+  forget(sessionId: string): void {
+    this.last.delete(sessionId)
+  }
+}
+
+/** Texte de la notification « CI en échec ». */
+export function ciFailureContent(
+  session: Pick<Session, 'id' | 'cwd' | 'project_root' | 'display_name' | 'title' | 'branch'> | null,
+): { title: string; body: string } {
+  const name =
+    session?.display_name?.trim() || session?.title?.trim() || session?.branch?.trim() || (session ? session.id.slice(0, 8) : 'une session')
+  const title = oneLine(`CI en échec sur ${name}`, TITLE_MAX)
+  const where = session ? [basename(session.project_root ?? session.cwd), session.branch].filter(Boolean).join(' · ') : ''
+  const body = oneLine(where ? `${where} — « Voir l’échec » dans l’app` : '« Voir l’échec » dans l’app', BODY_MAX)
   return { title, body }
 }

@@ -18,7 +18,8 @@ import {
 import { RESOLVING_GROUP, pastFolderMissing, pastOrigin, type PastEntry, type PastGroup, type ProjectGroup } from '../state/projects'
 import { sessionIssue } from '../state/forge'
 import { glyphFor } from '../state/status'
-import { candidate, cleanupCount, worktreeOf, type WorktreeLists } from '../state/worktrees'
+import { candidate, cleanupCount, removable, worktreeOf, type WorktreeLists } from '../state/worktrees'
+import { deliveryOf } from '../state/delivery'
 import { AnyProfileBadge, PathLabel, ProfileBadge, StatusGlyph } from './common'
 import { useSettings } from '../settings'
 import { ForgetConfirm, HideConfirm } from './ForgetConfirm'
@@ -165,7 +166,13 @@ export function Sidebar(props: {
     const glyph = glyphFor(s.status)
     // Worktree intégré sans session vivante (lot 6) : badge et « Nettoyer… ».
     const wt = props.worktreesEnabled && isGit ? worktreeOf(s.cwd, props.worktrees?.[groupRoot]?.worktrees) : undefined
-    const integratedWt = wt && !s.alive && candidate(wt, props.worktreesWorked) ? wt : undefined
+    // Demande de fusion fusionnée (lot 14b) : même proposition de nettoyage, même sans intégration vue par git.
+    const pullMerged = s.delivery?.state === 'merged'
+    const integratedWt =
+      wt && !s.alive && (candidate(wt, props.worktreesWorked) || (pullMerged && removable(wt) && wt.managed_by !== 'claude_desktop'))
+        ? wt
+        : undefined
+    const delivered = deliveryOf(s.delivery, !!integratedWt) === 'merged'
     const branch = s.branch ?? (s.cwd !== groupRoot ? basename(s.cwd) : 'sans branche')
     const name = sessionDisplayName(s)
     const color = sessionColor(s)
@@ -179,7 +186,7 @@ export function Sidebar(props: {
         <button
           className="srow"
           aria-current={s.id === props.selectedId}
-          aria-label={`${name}, ${branch}, ${glyph.label}, profil ${labelOf(s.profile).long}${color ? `, couleur ${COLOR_LABELS[color].toLowerCase()}` : ''}${missing ? ', dossier supprimé' : ''}${integratedWt ? ', branche intégrée' : ''}${runners ? `, ${runners}` : ''}, dernière activité ${relativeTime(s.last_activity)}`}
+          aria-label={`${name}, ${branch}, ${glyph.label}, profil ${labelOf(s.profile).long}${color ? `, couleur ${COLOR_LABELS[color].toLowerCase()}` : ''}${missing ? ', dossier supprimé' : ''}${delivered ? ', livrée' : ''}${integratedWt ? ', branche intégrée' : ''}${runners ? `, ${runners}` : ''}, dernière activité ${relativeTime(s.last_activity)}`}
           title={`${name}\n${branch} · ${s.cwd}${missing ? ' (dossier supprimé)' : ''}`}
           onClick={() => props.onSelect(s.id)}
           onContextMenu={(e) => {
@@ -195,7 +202,7 @@ export function Sidebar(props: {
               <ColorBar color={color} />
               <span className="nm-t">{name}</span>
             </span>
-            {(branch !== name || missing || integratedWt || runners) && (
+            {(branch !== name || missing || integratedWt || runners || delivered) && (
               <span className="sub">
                 {branch !== name && <span className="br">{branch}</span>}
                 {missing && (
@@ -208,7 +215,12 @@ export function Sidebar(props: {
                     <span aria-hidden="true">▶</span> {props.runnersRunning?.[s.id]}
                   </span>
                 )}
-                {integratedWt && (
+                {delivered && (
+                  <span className="integ" title={s.delivery?.state === 'merged' ? 'Livrée : demande de fusion fusionnée, ou commits poussés sur la branche par défaut' : 'Livrée : branche intégrée dans la référence'}>
+                    <span aria-hidden="true">✓</span> livrée
+                  </span>
+                )}
+                {integratedWt && !delivered && (
                   <span className="integ" title={`Branche intégrée, aucune session ne tourne dans ${integratedWt.path}`}>
                     <span aria-hidden="true">✓</span> intégrée
                   </span>

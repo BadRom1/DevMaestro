@@ -252,6 +252,9 @@ pub trait DiffSource: Send + Sync {
     /// (`None` : automatique, voir
     /// [`crate::domain::commits::CommitRange::resolve`]) ; compteurs par
     /// commit seulement avec `stats`.
+    /// `user.email` de git pour ce dossier (dépôt, puis configuration de
+    /// l'utilisateur), s'il est défini (lot 14b).
+    fn user_email(&self, cwd: &Path) -> Option<String>;
     fn commits(
         &self,
         cwd: &Path,
@@ -563,6 +566,30 @@ pub trait Forge: Send + Sync {
         number: u64,
         review: &crate::domain::forge::pulls::ForgeReview,
     ) -> Result<String, ForgeError>;
+    /// Dernière demande de fusion de `branch` (du même dépôt), quel que soit
+    /// son état : l'ouverte s'il y en a une, sinon la plus récente (lot 14b).
+    fn last_pull_for_branch(
+        &self,
+        root: &Path,
+        remote: &crate::domain::forge::RemoteRepo,
+        branch: &str,
+    ) -> Result<Option<crate::domain::forge::pulls::Pull>, ForgeError>;
+    /// Exécutions de CI du dépôt (lot 14b), les plus récentes d'abord ;
+    /// `true` s'il y en avait plus que `filter.limit`.
+    fn runs(
+        &self,
+        root: &Path,
+        remote: &crate::domain::forge::RemoteRepo,
+        filter: &crate::domain::forge::runs::RunFilter,
+    ) -> Result<(Vec<crate::domain::forge::runs::Run>, bool), ForgeError>;
+    /// Une exécution, ses jobs en échec et les journaux de leurs étapes en
+    /// échec, nettoyés et bornés (lot 14b). Lecture seule.
+    fn run_failure(
+        &self,
+        root: &Path,
+        remote: &crate::domain::forge::RemoteRepo,
+        run_id: u64,
+    ) -> Result<crate::domain::forge::runs::RunFailure, ForgeError>;
 }
 
 /// Persistance des sessions.

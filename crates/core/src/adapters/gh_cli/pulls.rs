@@ -503,12 +503,17 @@ impl GithubCli {
         parse_rest_patches(&out.stdout)
     }
 
-    pub(super) fn gh_pull_for_branch(
+    /// Demandes de fusion de `--head=<branche>` dans l'état `state`, dont la
+    /// tête est dans le dépôt lui-même (ni fourche, ni autre propriétaire) et
+    /// s'appelle exactement `branch`, dans l'ordre de `gh` (les plus récentes
+    /// d'abord).
+    fn own_pulls_for_branch(
         &self,
         root: &Path,
         remote: &RemoteRepo,
         branch: &str,
-    ) -> Result<Option<Pull>, ForgeError> {
+        state: &str,
+    ) -> Result<Vec<Pull>, ForgeError> {
         let repo = remote.slug();
         let head = format!("--head={branch}");
         let out = self.call(
@@ -522,7 +527,7 @@ impl GithubCli {
                 "--json",
                 PULL_LIST_FIELDS,
                 &head,
-                "--state=open",
+                state,
                 FOR_BRANCH_LIMIT,
             ],
         )?;
@@ -532,13 +537,46 @@ impl GithubCli {
         // `--head` ne distingue pas les fourches : seule une demande dont la
         // tête est dans le dépôt lui-même (même propriétaire, pas une
         // fourche) est celle de la branche locale.
-        Ok(parse_gh_pulls(&out.stdout)?.into_iter().find(|p| {
-            !p.cross_repository
-                && p.head_owner
-                    .as_deref()
-                    .is_some_and(|o| o.eq_ignore_ascii_case(&remote.owner))
-                && p.head_branch == branch
-        }))
+        Ok(parse_gh_pulls(&out.stdout)?
+            .into_iter()
+            .filter(|p| {
+                !p.cross_repository
+                    && p.head_owner
+                        .as_deref()
+                        .is_some_and(|o| o.eq_ignore_ascii_case(&remote.owner))
+                    && p.head_branch == branch
+            })
+            .collect())
+    }
+
+    pub(super) fn gh_pull_for_branch(
+        &self,
+        root: &Path,
+        remote: &RemoteRepo,
+        branch: &str,
+    ) -> Result<Option<Pull>, ForgeError> {
+        Ok(self
+            .own_pulls_for_branch(root, remote, branch, "--state=open")?
+            .into_iter()
+            .next())
+    }
+
+    /// Dernière demande de la branche, quel que soit son état (lot 14b) :
+    /// l'ouverte s'il y en a une, sinon la plus récente (fusionnée ou fermée).
+    pub(super) fn gh_last_pull_for_branch(
+        &self,
+        root: &Path,
+        remote: &RemoteRepo,
+        branch: &str,
+    ) -> Result<Option<Pull>, ForgeError> {
+        let pulls = self.own_pulls_for_branch(root, remote, branch, "--state=all")?;
+        let open = pulls
+            .iter()
+            .position(|p| p.state == crate::domain::forge::pulls::PullState::Open);
+        Ok(match open {
+            Some(i) => pulls.into_iter().nth(i),
+            None => pulls.into_iter().next(),
+        })
     }
 
     pub(super) fn gh_submit_review(

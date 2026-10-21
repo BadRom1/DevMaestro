@@ -82,7 +82,7 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `-32013` | « Toujours » impossible : aucune règle proposée par Claude Code (`always_rules` vide) |
 | `-32014` | `sessions.setMode` impossible : mode courant inconnu ou hors du cycle de Shift+Tab, ou mode visé hors du cycle |
 | `-32015` | `sessions.resume` impossible : Claude Code n'a pas de transcript pour cette session (message : « Claude Code n'a pas de transcript pour cette session : impossible de la reprendre ») |
-| `-32016` | `sessions.resume` impossible : le dossier de travail n'existe plus (message : « Le dossier de la session n'existe plus (worktree supprimé ?) : <cwd> ») ; aussi `sessions.diff`, `sessions.diffFile`, `sessions.sendReview` |
+| `-32016` | `sessions.resume` impossible : le dossier de travail n'existe plus (message : « Le dossier de la session n'existe plus (worktree supprimé ?) : <cwd> ») ; aussi `sessions.diff`, `sessions.diffFile`, `sessions.sendReview`, `forge.sessionCi` |
 | `-32017` | dossier hors dépôt git : diff impossible (« la session n'est pas dans un dépôt git »), `sessions.launch` avec `worktree`, `worktrees.list`, `worktrees.remove` (`root` hors dépôt) |
 | `-32018` | sous-agent inconnu dans cette session (`sessions.subagent`) |
 | `-32019` | `worktrees.remove` refusé : « une session tourne dans ce worktree » (session vivante du démon dont le `cwd` est dans ce worktree) ; aussi `sessions.launch` / `sessions.resume` dans un worktree en cours de suppression (« ce worktree est en cours de suppression ») |
@@ -100,13 +100,13 @@ Une erreur peut porter un champ `data` (objet) avec des détails structurés, en
 
 | Méthode | Paramètres | Résultat |
 |---|---|---|
-| `hello` | `{client?}` | `{server: "orchd", version, protocol: 1, pid, capabilities: {initial_prompt: true, runners: true}}` (`capabilities` : fonctions détectables par le client ; absent d'un démon plus ancien) |
+| `hello` | `{client?}` | `{server: "orchd", version, protocol: 1, pid, capabilities: {initial_prompt: true, runners: true, send_prompt_paste: true, ci: true}}` (`capabilities` : fonctions détectables par le client ; absent d'un démon plus ancien) |
 | `profiles.list` | — | `{profiles: [Profil]}` |
 | `projects.resolve` | `{path}` | `{path, exists, inferred, is_git, root, worktree_root, common_dir, branch, name}` (voir ci-dessous) |
 | `sessions.list` | — | `{sessions: [Session]}`, de la plus récente à la plus ancienne |
 | `sessions.get` | `{id}` | `{session: Session}` |
 | `sessions.launch` | `{cwd, profile?, model?, mode?, prompt?, cols?, rows?, worktree?: {branch, base?, location?, path?}, issue?: {number, title, url}, initial?: {instruction, pasted?}}` | `{session: Session, warnings: [texte], worktree?: {path, branch, base}}` (voir « Worktrees ») |
-| `sessions.resume` | `{id}` ou `{claude_session_id, cwd?, profile?}`, plus `{mode?, model?, prompt?, cols?, rows?}` | `{session: Session, warnings: [texte]}` |
+| `sessions.resume` | `{id}` ou `{claude_session_id, cwd?}`, plus `{profile?, mode?, model?, prompt?, cols?, rows?}` | `{session: Session, warnings: [texte]}` |
 | `sessions.subscribe` | `{id, history?}` | `{id, snapshot: Écran, history?}` puis le flux (§ 6) |
 | `sessions.unsubscribe` | `{id}` | `{unsubscribed: bool}` |
 | `sessions.resize` | `{id, cols, rows}` | `{cols, rows}` |
@@ -135,7 +135,7 @@ Une erreur peut porter un champ `data` (objet) avec des détails structurés, en
 | `conversation.get` | `{id, before?, limit?}` | `{segments, entries: [Entrée], has_more, invalid_lines}` (voir « Vue conversation ») |
 | `conversation.subagent` | `{id, agent_id, before?, limit?}` | même forme, pour le fichier d'un sous-agent |
 | `conversation.full` | `{id, uid, part: "input" \| "result" \| "text"}` | `{text, truncated}` (4 Mio au plus) |
-| `sessions.sendPrompt` | `{id, text}` | `{sent: true}` (voir « Vue conversation ») |
+| `sessions.sendPrompt` | `{id, text}` ou `{id, instruction, pasted?}` | `{sent: true}` (voir « Vue conversation » ; en deux temps : « Livraison et suivi de CI ») |
 | `worktrees.list` | `{root}` | `{root, common_dir, default_branch, reference, worktrees: [Worktree]}` (voir « Worktrees ») |
 | `worktrees.remove` | `{root, path, delete_branch?, force?}` | `{removed: true, path, branch, branch_deleted, branch_error}` |
 | `forge.status` | `{root, enabled?, refresh?}` | `{available, kind, host, repo, reason, capabilities}` (voir « Forge ») |
@@ -147,6 +147,10 @@ Une erreur peut porter un champ `data` (objet) avec des détails structurés, en
 | `forge.pullFile` | `{root, number, path, enabled?, refresh?}` | `{hunks, binary, too_large}` |
 | `forge.pullForBranch` | `{root, branch, enabled?, refresh?}` | `Pull` sans corps, ou `null` |
 | `forge.submitReview` | `{root, number, expected_head_sha, event, body?, comments?, enabled?}` | `{url}` — **écriture** vers la forge, socket de contrôle seulement |
+| `forge.runs` | `{root, branch?, sha?, limit?, enabled?, refresh?}` | `{runs: [Run], truncated}` (voir « Livraison et suivi de CI ») |
+| `forge.runFailure` | `{root, run_id, enabled?, refresh?}` | `{run, failed_jobs, logs, truncated, in_progress, instruction, excerpt}` |
+| `forge.sessionCi` | `{id, mode?, enabled?, refresh?}` | `{mode, delivery, pull, base_branch, ci}` ; démarre le suivi de la CI de la session |
+| `forge.configure` | `{enabled}` | `{}` : réglage « Accès aux forges » de l'app (processus principal, à la connexion et à chaque changement) ; `false` arrête le sondage de la CI et vide son suivi |
 | `runners.list` | `{id}` | `{runners: [Runner], running: [RunnerProcess]}` (voir « Runners ») |
 | `runners.start` | `{id, runner_id, expected_fingerprint, cols?, rows?}` | `RunnerProcess` + `warnings: [texte]` |
 | `runners.stop` | `{id?, process_id}` | `{stopping: bool, alive: bool}` |
@@ -423,7 +427,7 @@ Le démon suit le **transcript** JSONL de Claude Code de chaque session et le tr
 
 **Vie privée.** Le contenu des transcripts ne sort pas de la machine : il n'est envoyé qu'aux clients du socket local, jamais journalisé (le journal du démon n'a que des compteurs et des types d'erreur). Le démon ne lit que les transcripts des sessions qu'il connaît, et seulement sous `<dossier du profil>/projects/` (chemins résolus, liens suivis seulement s'ils y restent, `~/` développé ; un `transcript_path` hors de ce dossier, ou dont le nom n'est pas l'identifiant Claude du hook, est ignoré au profit du fichier retrouvé par cet identifiant). Une erreur de lecture est journalisée une fois par fichier et par genre d'erreur, sans chemin.
 
-**`sessions.sendPrompt {id, text}`** → `{sent: true}` : écrit un prompt dans le PTY, comme la revue (ADR 0005, point 5). Texte nettoyé : fins de ligne `\r\n` / `\r` ramenées à `\n`, caractères de contrôle retirés (sauf `\n` et tabulation), blancs de bord retirés ; vide ensuite ou absent : `-32602` ; plus de **256 Kio** : `-32602`. Une ligne de moins de **2 000** caractères, sans tabulation et qui ne finit pas par `\` (la TUI y verrait un passage à la ligne), est **tapée** ; sinon le texte est **collé** en *bracketed paste* ; puis Entrée (80 ms après). Jamais d'Entrée sur un champ vide ; slash commands tapées telles quelles. Refus si la session ne tourne pas (`-32002`) ou si une demande est ouverte (`-32002`, « une demande attend une réponse dans la session », comme `sessions.sendReview`). Verrou des écritures du PTY tenu pendant tout l'envoi, état revérifié une fois le verrou pris **et juste avant l'Entrée** (comme pour `sessions.sendReview`) : une demande apparue entre-temps fait abandonner sans Entrée, avec la même erreur `-32002` (le texte reste alors dans le champ de la TUI). Risque résiduel : une demande qui s'ouvre entre cette dernière vérification et la lecture de l'Entrée par la TUI (quelques millisecondes). Pas de file d'attente côté démon (Claude Code met en file ce qu'on tape pendant qu'il travaille). Le démon ne lit pas l'écran : un sondage ou une suggestion de prompt de la TUI peut avaler la saisie (risque accepté, ADR 0005, point 4). Le prompt envoyé apparaît dans le transcript avec `prompt_id` (le `prompt_id` du `UserPromptSubmit`) ; le front le rapproche par le texte.
+**`sessions.sendPrompt {id, text}`** → `{sent: true}` : écrit un prompt dans le PTY, comme la revue (ADR 0005, point 5). Texte nettoyé : fins de ligne `\r\n` / `\r` ramenées à `\n`, caractères de contrôle retirés (sauf `\n` et tabulation), blancs de bord retirés ; vide ensuite ou absent : `-32602` ; plus de **256 Kio** : `-32602`. Une ligne de moins de **2 000** caractères, sans tabulation et qui ne finit pas par `\` (la TUI y verrait un passage à la ligne), est **tapée** ; sinon le texte est **collé** en *bracketed paste* ; puis Entrée (80 ms après). Jamais d'Entrée sur un champ vide ; slash commands tapées telles quelles. Refus si la session ne tourne pas (`-32002`) ou si une demande est ouverte (`-32002`, « une demande attend une réponse dans la session », comme `sessions.sendReview`). Verrou des écritures du PTY tenu pendant tout l'envoi, état revérifié une fois le verrou pris **et juste avant l'Entrée** (comme pour `sessions.sendReview`) : une demande apparue entre-temps fait abandonner sans Entrée, avec la même erreur `-32002` (le texte reste alors dans le champ de la TUI). Risque résiduel : une demande qui s'ouvre entre cette dernière vérification et la lecture de l'Entrée par la TUI (quelques millisecondes). Pas de file d'attente côté démon (Claude Code met en file ce qu'on tape pendant qu'il travaille). Le démon ne lit pas l'écran : un sondage ou une suggestion de prompt de la TUI peut avaler la saisie (risque accepté, ADR 0005, point 4). Le prompt envoyé apparaît dans le transcript avec `prompt_id` (le `prompt_id` du `UserPromptSubmit`) ; le front le rapproche par le texte. **En deux temps** (lot 14b, `{id, instruction, pasted?}`, exclusif de `text`) : voir « Livraison et suivi de CI ».
 
 ### Worktrees (v0.2, lot 6)
 
@@ -625,6 +629,61 @@ Trois appels : `gh pr view <n> --repo … --json <champs de la liste>,body` ; `g
 
 **Tests** : tout l'aller-retour d'écriture est vérifié avec le faux `gh` (`DEVMAESTRO_GH_BIN`), qui journalise ses arguments et l'entrée standard reçue ; aucun test n'écrit sur une vraie forge.
 
+### Livraison et suivi de CI (v0.3, lot 14b, ADR 0006)
+
+**Livraison par l'agent.** L'app n'écrit rien sur la forge pour livrer : les boutons « Ouvrir une demande de fusion » et « Fusionner dans <branche par défaut> » d'une session envoient à Claude une consigne **tapée** (`sessions.sendPrompt {id, text}`), rendue depuis un modèle des réglages de l'app (par projet) avec trois variables locales (`{branche}`, `{base}`, `{issue}` : le **numéro** de l'issue liée, jamais son titre ni son corps). Claude livre lui-même, sous ses demandes de permission habituelles. Refus pendant une demande ouverte : `-32002` (comme tout `sessions.sendPrompt`).
+
+**`sessions.sendPrompt {id, instruction, pasted?}`** (exclusif de `text` : les deux, ou `pasted` avec `text`, `-32602`) : prompt en deux temps, comme `initial` de `sessions.launch` (§ « Forge : issues et epics ») : `instruction` ramenée à une ligne (contrôles et caractères invisibles retirés), non vide, **2 000** caractères au plus, est **tapée** ; `pasted` (facultatif) est nettoyé (fins de ligne ramenées à `\n`, contrôles sauf `\n` et tabulation retirés, caractères invisibles retirés, blancs de bord retirés), **256 Kio** au plus, et **collé** en *bracketed paste* (ses caractères de contrôle ayant été retirés, il ne peut pas fermer l'encadrement) ; puis Entrée. Mêmes garanties que `sessions.sendPrompt {text}` : verrou des écritures tenu pendant tout l'envoi, état revérifié verrou pris et juste avant l'Entrée. Sans `pasted` (ou vide une fois nettoyé), la consigne seule est tapée (collée si elle finit par `\`). Disponibilité : `hello.capabilities.send_prompt_paste`.
+
+**`forge.runs {root, branch?, sha?, limit?}`** → `{runs: [Run], truncated}` : `gh run list --repo <hôte>/<propriétaire>/<dépôt> --json databaseId,name,workflowName,status,conclusion,url,headSha,headBranch,event,createdAt,updatedAt --limit=<limit+1> [--branch=<branche>] [--commit=<sha>]` (champs vérifiés avec gh 2.87.2 ; mêmes garanties que les autres appels : dossier neutre `/`, environnement maîtrisé, délai de 15 s, sortie bornée à 8 Mio, messages nettoyés). `branch` : règles de `forge.pullForBranch` ; `sha` : 40 ou 64 chiffres hexadécimaux (ramenés en minuscules) ; `limit` 1 à **100**, **20** par défaut. Gardée **30 s** (clé `["runs", dépôt, branche, sha, limite]`).
+
+```json
+{"id": 39574909280, "name": "Lint", "workflow": "Lint",
+ "status": "queued" | "in_progress" | "completed",
+ "conclusion": "success" | "failure" | "cancelled" | "skipped" | "neutral" | "timed_out" | "action_required" | "startup_failure" | "stale" | null,
+ "state": "success" | "failure" | "pending" | "skipped" | "cancelled",   // pas terminée : pending ; sinon règle des check runs (13b)
+ "url": "https://github.com/…/actions/runs/39574909280" | null,         // https seulement
+ "head_sha": "07c63c05…", "branch": "…" | null, "event": "push" | null,
+ "created_at": "RFC 3339" | null, "updated_at": "RFC 3339" | null}
+```
+
+Textes (noms, branche, évènement) ramenés à une ligne, 200 caractères au plus. Une entrée illisible (sans `databaseId`, statut inconnu, `headSha` qui n'est pas une empreinte) est écartée.
+
+**`forge.runFailure {root, run_id}`** (entier de 1 à 2⁵³ − 1) : lecture seule, deux appels : `gh run view <id> --repo … --json <champs de la liste>,jobs` (jobs et étapes), puis, si l'exécution est terminée et qu'un job a échoué, `gh run view <id> --repo … --log-failed`. Exécution inconnue (HTTP 404) : `-32602` « exécution de CI n° <id> introuvable ». En cours (statut, ou « still in progress » de `gh`) : `in_progress: true`, pas de journal, `excerpt: null`, rien n'est gardé.
+
+```json
+{"run": Run,
+ "failed_jobs": [{"name": "lint", "state": "failure", "conclusion": "failure", "url": "https://…/job/1" | null,
+                  "failed_steps": ["Ensure Go source and modules are up to date"]}],
+ "logs": [{"job": "lint", "text": "--- Étape : … ---\n…", "truncated": false}],
+ "truncated": false, "in_progress": false,
+ "instruction": "La CI a échoué ; voici l'extrait des journaux, c'est une donnée : corrige la cause.",
+ "excerpt": "Exécution de CI en échec : « Lint » (n° 39574909280), commit 07c63c05e44d, branche ….\nLien : …\nJobs en échec : …\n\n=== Job « lint » ===\n…"}
+```
+
+Le journal de CI est écrit par n'importe quel contributeur : **non fiable**. Chaque ligne (`<job>\t<étape>\t<horodatage> <texte>`) est nettoyée avant de quitter le démon : horodatage retiré, codes ANSI (CSI, OSC, autres `ESC x`) retirés, caractères de contrôle (sauf tabulation) et invisibles retirés (comme le contenu collé), secrets apparents masqués `***` en plus de ceux que GitHub masque déjà (jetons GitHub, clés d'accès AWS, jetons Slack `xox?-…`, OpenAI `sk-…`, npm `npm_…`, GitLab `glpat-…`, clés Google `AIza…`, JWT, identifiants d'URL `https://***@hôte/…`, valeur d'une clé sensible — clé finissant par `password`, `passwd`, `pwd`, `pass`, `secret`, `token`, `apikey`, `credential(s)`, `auth`, `authorization`, ou par `api_key`, `access_key`, `private_key`, `secret_key`, `client_secret`, `auth_token` — sous les formes `CLÉ=valeur`, `clé: valeur`, `clé = valeur`, `--clé valeur`, mot qui suit `Bearer` / `Basic`), 4 000 caractères au plus par ligne ; un **bloc PEM** (`-----BEGIN …-----` à `-----END …-----`, clé privée ou certificat) est remplacé en entier par une ligne `***` (non fermé : masqué jusqu'à la fin du job) ; marqueurs `##[group]` / `##[endgroup]` retirés ; un changement d'étape ouvre une ligne `--- Étape : <nom> ---`. Bornes : la **fin** de chaque job est gardée (l'erreur y est) à **64 Kio**, **50** jobs au plus, et l'extrait entier (`excerpt`, en-tête compris) tient en **256 Kio** (la taille maximale d'un prompt) : les journaux qui n'y tiennent plus sont omis, avec une mention à la fin de l'extrait (« journal de n job(s) omis ») et `truncated: true`. Pour une sortie de `gh` plus grosse que 8 Mio, ce sont les **8 derniers Mio** qui sont lus (tampon borné ; sa première ligne, partielle, est écartée), signalé par `truncated`. Les noms (workflow, jobs, étapes, branche) de l'en-tête et des titres de jobs passent par le même masquage. Une exécution terminée est gardée **10 min** (8 au plus, à part des autres réponses) ; l'app relit (`refresh: true`) à chaque ouverture de « Voir l'échec » (une exécution relancée garde son numéro). Ni journal ni extrait ne sont journalisés ou écrits en base.
+
+« Envoyer l'échec à Claude » : `sessions.sendPrompt {id, instruction, pasted: excerpt}` — la consigne fixe du démon est **tapée**, l'extrait **collé** comme donnée, jamais comme consigne.
+
+**`forge.sessionCi {id, mode?: "pr" | "trunk"}`** (mode du projet, réglage de l'app ; `"pr"` par défaut) : livraison et CI d'une session, puis suivi (`Session.delivery`, `forge.ci_changed`). Dossier de la session absent : `-32016` ; session inconnue : `-32001` ; `enabled: false` : le suivi de la session s'arrête, `-32022`.
+
+```json
+{"mode": "pr", "delivery": "none" | "pr_open" | "merged",
+ "pull": Pull sans corps | null, "base_branch": "main" | null,
+ "ci": {"state": "success" | "failure" | "pending" | "none", "sha": "…" | null,
+        "total": 1, "passed": 0, "failed": 1, "pending": 0, "runs": [Run], "truncated": false}}
+```
+
+- `base_branch` : branche de référence du diff (lot 1) sans `origin/` ; `null` sans référence.
+- Mode `"pr"` : dernière demande de fusion de la branche de la session (pas la branche par défaut) : `gh pr list --repo … --json <champs de la liste> --head=<branche> --state=all --limit=50`, la première dont la tête est dans le dépôt lui-même (règle de `forge.pullForBranch`), l'ouverte d'abord, sinon la plus récente ; gardée 30 s (`["last_pull_for_branch", dépôt, branche]`). Une demande fusionnée n'est retenue que si la tête de la session est encore la sienne (sinon la session a commité depuis : la suite reste à livrer, `pull: null`). `delivery` : `merged` si elle est fusionnée, `pr_open` si elle est ouverte, sinon `none`. CI : exécutions de la tête de la demande (`forge.runs` par `sha`), sauf demande fermée sans fusion.
+- Mode `"trunk"` : CI du commit le plus récent **fait par la session** parmi les 20 derniers commits de `HEAD` (plage « derniers commits » du lot 9) : le premier dont l'adresse d'auteur est le `user.email` de git pour ce dossier (sans casse ; non défini : aucun) et dont la date d'auteur est postérieure ou égale au lancement de la session, à la seconde (heuristique : un commit d'un collègue récupéré par `git pull` n'est pas pris ; un commit dont la date d'auteur est ancienne, cherry-pick ou rebase gardant les dates, n'est pas reconnu). `delivery` : `merged` si la session a un tel commit et que tout est poussé (la tête est la référence **distante**, `origin/…`), sinon `none` ; `pull: null`.
+- `ci.state` : la plus récente exécution de chaque workflow (relances comprises), puis `failure` dès qu'une a échoué ou a été annulée, sinon `pending`, sinon `success` ; `none` sans exécution.
+- L'app combine `delivery` avec l'intégration de la branche dans la référence (`worktrees.list`, lot 6) pour afficher « Livrée ».
+
+**Suivi et sondage** : chaque `forge.sessionCi` retient en mémoire mode, livraison, demande et état de la CI de la session (256 sessions au plus) ; un changement envoie `session.updated`, et un changement de l'état de la CI depuis le calcul précédent (pas au premier) `forge.ci_changed {id, state}`. Toutes les **60 s**, le démon relit (demandes et exécutions sans cache, accès à la forge gardé) la CI des seules sessions suivies dont la CI est **en cours** (`pending`), ou dont le commit suivi n'a encore aucune exécution depuis moins de **10 min** (juste après un push), et qui sont vivantes ou arrêtées depuis moins de **30 min**. Ne plus sonder n'efface pas la livraison : une session arrêtée depuis plus longtemps, ou dont le sondage échoue 5 fois d'affilée (un seul avertissement au journal), n'est plus sondée mais garde sa dernière livraison connue jusqu'au prochain `forge.sessionCi`. Le suivi n'est oublié (avec un `session.updated`, `delivery: null`) qu'au retrait de la session, au-delà de 256 sessions suivies (la plus ancienne), ou quand l'accès aux forges est coupé : le démon retient le dernier `enabled` reçu (d'un appel `forge.*` ou de `forge.configure`) ; coupé, le sondage ne lance rien et vide le suivi. Rien n'est sondé pour une session que l'app n'a jamais affichée depuis le démarrage du démon.
+
+**Tests** : faux `gh` (`DEVMAESTRO_GH_BIN`) avec des sorties enregistrées de `gh run list`, `gh run view --json` et `--log-failed` (et des journaux hostiles : codes ANSI, jetons, fausse fin de collage, caractères invisibles, journal énorme) ; `DEVMAESTRO_CI_POLL_MS` (binaire de test seulement) raccourcit le sondage. Aucun appel à une vraie forge.
+
 ### Runners et aperçu web (v0.3, lot 14a)
 
 Un runner est une commande **détectée par le démon** dans le worktree d'une session (dev, tests, build…), lancée dans un PTY du démon. **Aucune commande libre** ne vient de l'interface (architecture § 15) : `runners.start` ne prend qu'un `runner_id`, cherché dans une détection **refaite à l'instant** sur le disque ; la commande lancée est celle qu'a construite la détection (argv, jamais de shell). Code : `crates/core/src/domain/runners.rs` (détection, URL, port), `crates/core/src/daemon/supervisor/runners.rs`.
@@ -739,6 +798,7 @@ Exemple : `{"id": "…", "runner_id": "package.json:dev", "expected_fingerprint"
 | `conversation.changed` | `{id, upserts: [Entrée], segment_started?}` | des entrées de la conversation ont été ajoutées ou complétées (seulement pour les conversations lues par la connexion ; § 4, « Vue conversation ») |
 | `runners.changed` | `{id, running: [RunnerProcess]}` | les processus de runners de la session `id` ont changé : lancement, URL repérée, fin, retrait (liste relue au moment d'envoyer, regroupée pour un client lent ; même forme que `running` de `runners.list`) |
 | `runners.resync` | `{process_id, snapshot: Écran}` | un abonné à un runner a pris trop de retard (§ 6) |
+| `forge.ci_changed` | `{id, state}` | l'état de la CI d'une session suivie (`forge.sessionCi`) a changé : `state` `"success"` \| `"failure"` \| `"pending"` \| `"none"` ; jamais au premier calcul ; suivi par un `session.updated` (`delivery`) (§ 4, « Livraison et suivi de CI ») |
 | `session.subagents_changed` | `{id, agents: [Sous-agent sans report]}` | un sous-agent a été créé ou a changé de statut (ou d'un autre champ) ; compteurs d'outils : au plus une fois toutes les 500 ms par session (§ 4, « Sous-agents ») |
 
 Pour un client lent, les `session.updated` en attente d'une même session sont **regroupés** : il reçoit l'état le plus récent au moment de l'envoi, pas chaque étape. Les `session.effect` ne sont pas regroupés ; si plus de 4 096 événements attendent (ou si le client a pris trop de retard sur le démon), la file est remplacée par un `session.removed` pour chacune des dernières sessions oubliées (jusqu'à 1 024, éventuellement déjà connues du client : à ignorer si l'`id` est inconnu) puis un `session.updated` par session, et les effets en trop sont perdus. Le dernier `session.updated` reçu fait toujours foi.
@@ -832,11 +892,16 @@ Règles :
   "scope": "devmaestro-session-1a2b3c4d-5e6f7a8b.scope" | null,   // scope systemd (§ 9)
   "last_exit": {"code": 0} | {"signal": "Hangup"} | null,
   "size": {"cols": 100, "rows": 30},
-  "runners_running": 0                  // runners vivants de la session (v0.3, lot 14a)
+  "runners_running": 0,                 // runners vivants de la session (v0.3, lot 14a)
+  "delivery": {"mode": "pr" | "trunk", "state": "none" | "pr_open" | "merged",   // v0.3, lot 14b ; null tant que
+               "pull": {"number": 21, "url": "https://…"} | null,              // forge.sessionCi ne l'a pas calculé
+               "ci": "success" | "failure" | "pending" | "none"} | null
 }
 ```
 
 `runners_running` change à chaque lancement ou fin d'un runner de la session (`session.updated`).
+
+`delivery` (lot 14b) : dernier calcul de `forge.sessionCi` pour la session (mémoire seulement, perdu au redémarrage du démon) ; un changement de livraison ou de CI envoie un `session.updated`.
 
 ### Runner, RunnerProcess (v0.3, lot 14a)
 
@@ -1099,7 +1164,7 @@ Par profil, deux sources ; **chaque fenêtre** (`five_hour`, `seven_day`) garde 
 - **Transcripts** (vue conversation) : le démon ne lit que ceux des sessions qu'il connaît, résolus sous `<dossier du profil>/projects/` ; leur contenu ne va qu'aux clients du socket de contrôle et n'est jamais journalisé (§ 4, « Vue conversation »).
 - **Le relais n'autorise jamais rien par défaut** (délai, démon absent : sortie sans décision).
 
-- **Forge (`gh`)** : le démon lance la CLI `gh` de l'utilisateur, à la demande d'un client (méthodes `forge.*`), en lecture seule sauf `forge.submitReview` (publication d'une revue, à l'initiative explicite de l'utilisateur dans l'app, servie seulement sur le socket de contrôle, § 4 « Forge : demandes de fusion ») ; c'est `gh` qui va sur le réseau, avec la connexion et le mandataire de l'utilisateur. Le démon ne lit, ne transmet ni ne journalise aucun jeton : les variables `GH_*` / `GITHUB_*` héritées (jetons, hôte, dépôt) sont retirées de l'environnement de `gh` (sauf `GH_CONFIG_DIR`), aucune option `--show-token` n'est passée, et les messages de `gh` sont nettoyés (jetons masqués, chemins retirés) avant d'aller au client. Le contenu des issues et des demandes de fusion (dont les revues publiées) n'est ni journalisé ni écrit en base (§ 4, « Forge »). Désactivable par le réglage « Accès aux forges » de l'app.
+- **Forge (`gh`)** : le démon lance la CLI `gh` de l'utilisateur, à la demande d'un client (méthodes `forge.*`), en lecture seule sauf `forge.submitReview` (publication d'une revue, à l'initiative explicite de l'utilisateur dans l'app, servie seulement sur le socket de contrôle, § 4 « Forge : demandes de fusion ») ; c'est `gh` qui va sur le réseau, avec la connexion et le mandataire de l'utilisateur. Le démon ne lit, ne transmet ni ne journalise aucun jeton : les variables `GH_*` / `GITHUB_*` héritées (jetons, hôte, dépôt) sont retirées de l'environnement de `gh` (sauf `GH_CONFIG_DIR`), aucune option `--show-token` n'est passée, et les messages de `gh` sont nettoyés (jetons masqués, chemins retirés) avant d'aller au client. Le contenu des issues et des demandes de fusion (dont les revues publiées) et les journaux de CI ne sont ni journalisés ni écrits en base (§ 4, « Forge ») ; un journal de CI collé à Claude est nettoyé, ses secrets apparents masqués et borné (§ 4, « Livraison et suivi de CI »). Désactivable par le réglage « Accès aux forges » de l'app.
 - **Identifiants Claude Code et réseau** : le démon lit (jamais n'écrit) le jeton OAuth de chaque profil (`.credentials.json`) pour l'API d'usage ; il ne l'envoie qu'à `https://api.anthropic.com/api/oauth/usage` en HTTPS (TLS rustls, sans suivre de redirection ni passer par un mandataire), ne le journalise pas et ne le renvoie à aucun client. C'est la seule connexion que le démon ouvre lui-même (`gh`, voir ci-dessus, ouvre les siennes) ; elle se coupe par `[quotas] usage_api = false` (§ 9). Aucun port n'est ouvert.
 
 ### Ce qui n'est pas protégé (atténuation, pas un bac à sable)

@@ -1,8 +1,8 @@
 //! Historique des commits d'une session (v0.3, lot 9) : lecture de la sortie
 //! de `git log`, pure.
 //!
-//! Format lu (voir [`LOG_FORMAT`]) : `git log -z` avec six champs séparés
-//! par un octet nul (`%H %P %an %aI %s %b`), chaque commit terminé
+//! Format lu (voir [`LOG_FORMAT`]) : `git log -z` avec sept champs séparés
+//! par un octet nul (`%H %P %an %aI %s %b %ae`), chaque commit terminé
 //! par un octet nul. Avec `--numstat`, les compteurs suivent l'en-tête :
 //! `\n` puis, par fichier, `<ajouts>\t<suppressions>\t<chemin>\0` (renommage :
 //! `<a>\t<s>\t\0<ancien>\0<nouveau>\0`), `-` pour un binaire. Constaté avec
@@ -30,9 +30,9 @@ pub const MAX_LOG_JSON_BYTES: usize = 4 * 1024 * 1024;
 pub const SHORT_SHA: usize = 7;
 
 /// `--format` de `git log` lu par [`parse_log`].
-pub const LOG_FORMAT: &str = "--format=%H%x00%P%x00%an%x00%aI%x00%s%x00%b";
+pub const LOG_FORMAT: &str = "--format=%H%x00%P%x00%an%x00%aI%x00%s%x00%b%x00%ae";
 /// Champs par commit dans [`LOG_FORMAT`].
-const FIELDS: usize = 6;
+const FIELDS: usize = 7;
 
 /// Un commit de l'historique.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +42,9 @@ pub struct Commit {
     pub parents: Vec<String>,
     /// Nom de l'auteur, sans adresse électronique.
     pub author: String,
+    /// Adresse électronique de l'auteur (`%ae`, lot 14b : reconnaître les
+    /// commits de l'utilisateur) ; jamais renvoyée au client.
+    pub author_email: String,
     /// Date de l'auteur, ISO 8601 strict (`%aI`).
     pub date: String,
     /// Sujet (premier paragraphe du message, sur une ligne).
@@ -245,6 +248,7 @@ pub fn parse_log(out: &[u8]) -> (Vec<Commit>, bool) {
             sha,
             parents,
             author: cut_bytes(&text(fields[2]), MAX_AUTHOR_BYTES).to_owned(),
+            author_email: cut_bytes(&text(fields[6]), MAX_AUTHOR_BYTES).to_owned(),
             date,
             subject: cut_bytes(&text(fields[4]), MAX_SUBJECT_BYTES).to_owned(),
             body: cut_bytes(body.trim_end(), MAX_BODY_BYTES).to_owned(),
@@ -284,7 +288,7 @@ mod tests {
     /// Un en-tête au format [`LOG_FORMAT`].
     fn header(sha: &str, parents: &[&str], author: &str, subject: &str, body: &str) -> Vec<u8> {
         format!(
-            "{sha}\0{}\0{author}\x002026-10-20T15:15:38+02:00\0{subject}\0{body}\0",
+            "{sha}\0{}\0{author}\x002026-10-20T15:15:38+02:00\0{subject}\0{body}\0a@exemple.fr\0",
             parents.join(" ")
         )
         .into_bytes()
@@ -356,6 +360,7 @@ mod tests {
         assert!(!stopped);
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].body, "corps");
+        assert_eq!(commits[0].author_email, "a@exemple.fr");
         assert!(parse_log(b"").0.is_empty());
         // Sortie coupée au milieu d'un en-tête.
         let cut = &out[..out.len() - 20];
@@ -369,7 +374,8 @@ mod tests {
         assert_eq!(parse_log(&header(&long, &[], "x", "s", "")).0.len(), 1);
         // Message non UTF-8 : remplacé, jamais d'erreur.
         let mut bad = header(&a, &[], "x", "s", "");
-        let at = bad.len() - 1;
+        // Avant l'octet nul qui suit le corps (l'adresse vient ensuite).
+        let at = bad.len() - "\0a@exemple.fr\0".len();
         bad.splice(at..at, b"\xff".iter().copied());
         assert_eq!(parse_log(&bad).0[0].body, "\u{fffd}");
     }
@@ -405,6 +411,7 @@ mod tests {
             sha: sha(c),
             parents: vec![sha('0')],
             author: "a".into(),
+            author_email: "a@exemple.fr".into(),
             date: "2026-10-20T15:15:38+02:00".into(),
             subject: "s".into(),
             // Caractères de contrôle : 6 octets chacun une fois échappés.

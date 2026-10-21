@@ -28,6 +28,8 @@ import {
   ErrorCode,
   FORGE_METHODS,
   RENDERER_METHODS,
+  isChecksState,
+  type ChecksState,
   type Demand,
   type Effect,
   type MethodName,
@@ -37,7 +39,7 @@ import {
 } from '../shared/protocol'
 import { SettingsError, runnerConfirmed, stepZoom, type ZoomDirection } from '../shared/settings'
 import { managedWorktreesDir, rootFromCommonDir } from '../shared/worktrees'
-import { IntegratedNotifier, NotifyDecider, integratedContent, notificationContent } from './notifyLogic'
+import { CiNotifier, IntegratedNotifier, NotifyDecider, ciFailureContent, integratedContent, notificationContent } from './notifyLogic'
 import { SettingsStore } from './settingsStore'
 import { DaemonClient } from './daemon/client'
 import { defaultSocketPath } from './daemon/paths'
@@ -48,6 +50,7 @@ import { resolveOrchdBin, spawnDaemon } from './daemon/spawn'
 import {
   ValidationError,
   WORKTREE_TIMEOUT_MS,
+  isUuid,
   requestTimeoutMs,
   validateExternalUrl,
   validateParams,
@@ -161,6 +164,66 @@ async function notifyWaiting(sessionId: string, requestId: number, demand: Deman
     }
   })
   live.set(sessionId, n)
+  n.show()
+}
+
+/* ---------- Accès aux forges signalé au démon (lot 14b) ---------- */
+
+/** Dernière valeur envoyée au démon (`null` : rien d'envoyé sur cette connexion). */
+let forgeEnabledSent: boolean | null = null
+
+/**
+ * Réglage « Accès aux forges » transmis au démon (`forge.configure`) à la
+ * connexion et à chaque changement : coupé, il arrête aussitôt le sondage
+ * de la CI (sans attendre un prochain appel `forge.*`).
+ */
+function syncForgeEnabled(): void {
+  const enabled = settings.settings.forges.enabled
+  if (forgeEnabledSent === enabled || client.state.state !== 'connected') return
+  forgeEnabledSent = enabled
+  client.request('forge.configure', { enabled }).catch((err: unknown) => {
+    forgeEnabledSent = null
+    // Démon plus ancien : rien à arrêter de son côté.
+    if (!(err instanceof RpcError && err.code === ErrorCode.MethodNotFound)) log(`forge.configure : ${(err as Error).message}`)
+  })
+}
+
+/* ---------- Notification « CI en échec » (lot 14b) ---------- */
+
+const ciNotifier = new CiNotifier()
+/** Notification « CI en échec » visible, par session. */
+const liveCi = new Map<string, Notification>()
+
+async function onCiChanged(sessionId: string, state: ChecksState): Promise<void> {
+  const show = ciNotifier.changed(sessionId, state, {
+    enabled: settings.settings.notifications.enabled && settings.settings.delivery.notifyCiFailure && Notification.isSupported(),
+    windowFocused: mainWindow?.isFocused() ?? false,
+    visibleSessionId: relay.visible,
+  })
+  if (!show) {
+    if (state !== 'failure') liveCi.get(sessionId)?.close()
+    return
+  }
+  let s = sessionCache.get(sessionId) ?? null
+  if (!s) {
+    try {
+      s = ((await client.request('sessions.get', { id: sessionId })) as { session: Session }).session
+      sessionCache.set(sessionId, s)
+    } catch {
+      /* titre de repli */
+    }
+  }
+  const { title, body } = ciFailureContent(s)
+  liveCi.get(sessionId)?.close()
+  const n = new Notification({ title, body, silent: true, urgency: 'normal' })
+  n.on('click', () => {
+    liveCi.delete(sessionId)
+    focusSession(sessionId)
+  })
+  n.on('close', () => {
+    if (liveCi.get(sessionId) === n) liveCi.delete(sessionId)
+  })
+  liveCi.set(sessionId, n)
   n.show()
 }
 
@@ -288,11 +351,15 @@ client.on('notification', (n) => {
     const id = (n.params as { id?: string }).id
     if (typeof id === 'string') {
       sessionCache.delete(id)
+      ciNotifier.forget(id)
       if (decider.stale(id, null)) closeNotification(id)
     }
   } else if (n.method === 'project.worktrees_changed') {
     const root = (n.params as { root?: unknown }).root
     if (typeof root === 'string' && root.startsWith('/')) void onWorktreesChanged(root)
+  } else if (n.method === 'forge.ci_changed') {
+    const p = n.params as { id?: unknown; state?: unknown }
+    if (isUuid(p.id) && isChecksState(p.state)) void settingsLoaded.then(() => onCiChanged(p.id as string, p.state as ChecksState))
   }
   if (
     n.method === 'session.updated' ||
@@ -303,12 +370,15 @@ client.on('notification', (n) => {
     n.method === 'session.subagents_changed' ||
     n.method === 'project.worktrees_changed' ||
     n.method === 'conversation.changed' ||
-    n.method === 'runners.changed'
+    n.method === 'runners.changed' ||
+    n.method === 'forge.ci_changed'
   ) {
     toPage(Ipc.notification, { method: n.method, params: n.params })
   }
 })
 client.on('connected', () => {
+  forgeEnabledSent = null
+  void settingsLoaded.then(() => syncForgeEnabled())
   relay.onConnected()
   runnerRelay.onConnected()
   void settingsLoaded.then(() => baselineWorktrees())
@@ -641,6 +711,7 @@ function registerIpc(): void {
       // `update` change la valeur en mémoire avant d'écrire : la taille est appliquée sans attendre le disque.
       const saving = settings.update(patch)
       applyZoom()
+      syncForgeEnabled()
       return { ok: true, settings: await saving }
     } catch (err) {
       if (err instanceof SettingsError) {
@@ -656,7 +727,10 @@ function registerIpc(): void {
     void settingsLoaded.then(() =>
       settings
         .update(patch)
-        .then(() => applyZoom())
+        .then(() => {
+          applyZoom()
+          syncForgeEnabled()
+        })
         .catch((err: unknown) => log(`réglages de fermeture non enregistrés : ${(err as Error).message}`)),
     )
   })

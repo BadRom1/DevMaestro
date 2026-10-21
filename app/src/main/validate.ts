@@ -6,6 +6,7 @@
  */
 import {
   COMMIT_RANGES,
+  DELIVERY_MODES,
   FULL_PARTS,
   FORGE_REVIEW_EVENTS,
   ISSUE_STATE_FILTERS,
@@ -345,28 +346,33 @@ function issueRef(o: Obj, k: string): Obj {
 export const MAX_INSTRUCTION_CHARS = 2000
 
 /**
- * Premier message en deux temps : `instruction` d'une ligne, non vide, sans
- * caractère de contrôle (elle est tapée) ; `pasted` facultatif, 256 Kio
- * d'UTF-8 au plus, sans caractère nul.
+ * Prompt en deux temps (premier message de `sessions.launch`, `sessions.sendPrompt`
+ * du lot 14b) : `instruction` d'une ligne, non vide, sans caractère de contrôle
+ * (elle est tapée) ; `pasted` facultatif, 256 Kio d'UTF-8 au plus, sans
+ * caractère nul (il est collé comme donnée).
  */
+function twoStep(w: Obj): Obj {
+  const instruction = str(w, 'instruction', MAX_INSTRUCTION_CHARS, { nonEmpty: true, codePoints: true })
+  if (/[\p{Cc}\u2028\u2029]/u.test(instruction)) throw new ValidationError('« instruction » doit tenir sur une ligne, sans caractère de contrôle')
+  const out: Obj = { instruction }
+  if (present(w, 'pasted')) {
+    const pasted = w.pasted
+    if (typeof pasted !== 'string') throw new ValidationError('« pasted » doit être une chaîne')
+    if (pasted.length > MAX_PROMPT_BYTES || new TextEncoder().encode(pasted).length > MAX_PROMPT_BYTES) {
+      throw new ValidationError('« pasted » est trop long (256 Kio au plus)')
+    }
+    if (pasted.includes('\0')) throw new ValidationError('« pasted » contient un caractère nul')
+    if (pasted.trim() !== '') out.pasted = pasted
+  }
+  return out
+}
+
+/** Premier message d'une session lancée (`initial`) : voir `twoStep`. */
 function initialMessage(o: Obj, k: string): Obj {
   const v = o[k]
   if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new ValidationError(`« ${k} » doit être un objet`)
-  const w = v as Obj
   try {
-    const instruction = str(w, 'instruction', MAX_INSTRUCTION_CHARS, { nonEmpty: true, codePoints: true })
-    if (/[\p{Cc}\u2028\u2029]/u.test(instruction)) throw new ValidationError('« instruction » doit tenir sur une ligne, sans caractère de contrôle')
-    const out: Obj = { instruction }
-    if (present(w, 'pasted')) {
-      const pasted = w.pasted
-      if (typeof pasted !== 'string') throw new ValidationError('« pasted » doit être une chaîne')
-      if (pasted.length > MAX_PROMPT_BYTES || new TextEncoder().encode(pasted).length > MAX_PROMPT_BYTES) {
-        throw new ValidationError('« pasted » est trop long (256 Kio au plus)')
-      }
-      if (pasted.includes('\0')) throw new ValidationError('« pasted » contient un caractère nul')
-      if (pasted.trim() !== '') out.pasted = pasted
-    }
-    return out
+    return twoStep(v as Obj)
   } catch (e) {
     throw new ValidationError(`${k} : ${(e as Error).message}`)
   }
@@ -417,6 +423,18 @@ function forgeReview(o: Obj, out: Obj): void {
   if (out.event !== 'approve' && (out.body as string).trim() === '') {
     throw new ValidationError('commentaire général obligatoire pour « comment » et « request_changes » (GitHub l’exige)')
   }
+}
+
+/** Exécutions de CI listées au plus (`forge.runs`, lot 14b). */
+export const MAX_RUNS_LIMIT = 100
+
+/** Empreinte d'un commit pour `forge.runs` : 40 ou 64 caractères hexadécimaux (casse indifférente, le démon la ramène en minuscules). */
+function commitSha(o: Obj, k: string): string {
+  const v = o[k]
+  if (typeof v !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(v)) {
+    throw new ValidationError(`« ${k} » doit être une empreinte de commit complète (40 ou 64 caractères hexadécimaux)`)
+  }
+  return v
 }
 
 /** Délai des opérations git longues du démon (création, liste, suppression de worktrees). */
@@ -540,7 +558,14 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       return out
     case 'sessions.sendPrompt':
       out.id = uuid(o, 'id')
-      out.text = promptText(o, 'text')
+      if (present(o, 'instruction')) {
+        // Deux temps (lot 14b) : consigne tapée, contenu collé comme donnée.
+        if (present(o, 'text')) throw new ValidationError('« text » et « instruction » ne vont pas ensemble')
+        Object.assign(out, twoStep(o))
+      } else {
+        if (present(o, 'pasted')) throw new ValidationError('« pasted » va avec « instruction », pas avec « text »')
+        out.text = promptText(o, 'text')
+      }
       return out
     case 'files.list':
       out.id = uuid(o, 'id')
@@ -688,6 +713,27 @@ export function validateParams(method: MethodName, raw: unknown): Obj {
       return out
     case 'forge.submitReview':
       forgeReview(o, out)
+      return out
+    case 'forge.configure':
+      // Processus principal seulement (absente de RENDERER_METHODS).
+      out.enabled = bool(o, 'enabled')
+      return out
+    case 'forge.runs':
+      out.root = absPath(o, 'root')
+      optional(o, out, 'branch', branchName)
+      optional(o, out, 'sha', commitSha)
+      optional(o, out, 'limit', (x, k) => int(x, k, 1, MAX_RUNS_LIMIT))
+      optional(o, out, 'refresh', bool)
+      return out
+    case 'forge.runFailure':
+      out.root = absPath(o, 'root')
+      out.run_id = issueNumber(o, 'run_id')
+      optional(o, out, 'refresh', bool)
+      return out
+    case 'forge.sessionCi':
+      out.id = uuid(o, 'id')
+      optional(o, out, 'mode', (x, k) => oneOf(x, k, DELIVERY_MODES))
+      optional(o, out, 'refresh', bool)
       return out
     case 'runners.list':
       out.id = uuid(o, 'id')

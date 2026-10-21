@@ -323,6 +323,11 @@ export type ReviewDecision = 'approved' | 'changes_requested' | 'review_required
 
 /** État résumé de la CI d'une demande de fusion. */
 export type ChecksState = 'success' | 'failure' | 'pending' | 'none'
+export const CHECKS_STATES: readonly ChecksState[] = ['success', 'failure', 'pending', 'none']
+
+export function isChecksState(v: unknown): v is ChecksState {
+  return (CHECKS_STATES as readonly unknown[]).includes(v)
+}
 
 export interface ChecksSummary {
   state: ChecksState
@@ -1212,6 +1217,11 @@ export interface Methods {
   }
   /** Jobs en échec d'une exécution et extrait borné de leurs journaux (lecture seule). */
   'forge.runFailure': { params: { root: string; run_id: number; refresh?: boolean }; result: RunFailure }
+  /**
+   * Réglage « Accès aux forges » transmis par le processus principal (jamais
+   * par la page) : coupé, le démon arrête le sondage de la CI.
+   */
+  'forge.configure': { params: { enabled: boolean }; result: unknown }
   /** Livraison et CI d'une session ; démarre son suivi (`forge.ci_changed`). */
   'forge.sessionCi': { params: { id: string; mode?: DeliveryMode; refresh?: boolean }; result: SessionCi }
   /**

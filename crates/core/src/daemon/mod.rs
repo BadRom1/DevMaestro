@@ -64,6 +64,7 @@ pub fn default_config(paths: Paths) -> Result<Config, String> {
         systemd_run: detect_systemd_scope(),
         systemd_runtime_dir: std::env::var_os("DEVMAESTRO_SYSTEMD_RUNTIME_DIR"),
         initial_prompt_timeout: initial_prompt_timeout(),
+        ci_poll_interval: ci_poll_interval(),
         paths,
     })
 }
@@ -94,6 +95,20 @@ fn stop_timeout() -> Duration {
         return Duration::from_millis(ms);
     }
     Duration::from_secs(3)
+}
+
+/// Intervalle du sondage de la CI. Seul un binaire de test
+/// (`test-support`) lit `DEVMAESTRO_CI_POLL_MS`.
+fn ci_poll_interval() -> Duration {
+    #[cfg(feature = "test-support")]
+    if let Some(ms) = std::env::var("DEVMAESTRO_CI_POLL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+    {
+        return Duration::from_millis(ms);
+    }
+    supervisor::forge::runs::CI_POLL_INTERVAL
 }
 
 /// Délai du prompt initial. Seul un binaire de test (`test-support`) lit
@@ -259,6 +274,7 @@ async fn run(paths: Paths, scrubbed: Vec<String>) -> Result<(), String> {
     daemon.start_quota_polling();
     daemon.start_diff_polling();
     daemon.start_worktree_polling();
+    daemon.start_ci_polling();
     daemon.start_conversation_follow();
 
     let socket = paths.socket();

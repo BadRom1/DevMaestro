@@ -8,6 +8,8 @@
  * - `applyPatch` : réglages + modification validée.
  */
 
+import { DEFAULT_MERGE_TEMPLATE, DEFAULT_PR_TEMPLATE, templateProblem } from './delivery'
+import { DELIVERY_MODES, type DeliveryMode } from './protocol'
 import { DEFAULT_WORKTREE_LOCATIONS, branchPrefixProblem, type DefaultWorktreeLocation } from './worktrees'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
@@ -67,6 +69,116 @@ export interface AppSettings {
   forges: { enabled: boolean }
   /** Runners (v0.3, lot 14a). */
   runners: RunnerSettings
+  /** Livraison et CI (v0.3, lot 14b). */
+  delivery: DeliverySettings
+}
+
+/** Livraison d'un projet : mode (bouton principal, CI suivie) et modèles propres (vides : ceux par défaut). */
+export interface ProjectDelivery {
+  mode: DeliveryMode
+  prTemplate?: string
+  mergeTemplate?: string
+}
+
+export interface DeliverySettings {
+  /** Notification du bureau « CI en échec sur <session> ». */
+  notifyCiFailure: boolean
+  /** Modèle de « Ouvrir une demande de fusion » (variables {branche}, {base}, {issue}). */
+  prTemplate: string
+  /** Modèle de « Fusionner dans <branche par défaut> ». */
+  mergeTemplate: string
+  /** Par projet (même clé que `projectProfiles`). */
+  projects: Record<string, ProjectDelivery>
+}
+
+/** Livraison effective d'un projet : ses réglages, sinon ceux par défaut (mode « PR »). */
+export function projectDelivery(s: DeliverySettings, projectKey: string | null): Required<ProjectDelivery> {
+  const p = projectKey && Object.prototype.hasOwnProperty.call(s.projects, projectKey) ? s.projects[projectKey] : undefined
+  return {
+    mode: p?.mode ?? 'pr',
+    prTemplate: p?.prTemplate || s.prTemplate,
+    mergeTemplate: p?.mergeTemplate || s.mergeTemplate,
+  }
+}
+
+function isDeliveryMode(v: unknown): v is DeliveryMode {
+  return (DELIVERY_MODES as readonly unknown[]).includes(v)
+}
+
+/** Livraison d'un projet lue d'un fichier : `null` si illisible ; modèles invalides ignorés. */
+function projectDeliveryFrom(v: unknown): ProjectDelivery | null {
+  if (!isObj(v) || !isDeliveryMode(v.mode)) return null
+  const out: ProjectDelivery = { mode: v.mode }
+  if (typeof v.prTemplate === 'string' && templateProblem(v.prTemplate) === null) out.prTemplate = v.prTemplate
+  if (typeof v.mergeTemplate === 'string' && templateProblem(v.mergeTemplate) === null) out.mergeTemplate = v.mergeTemplate
+  return out
+}
+
+function deliveryFrom(v: unknown): DeliverySettings {
+  const d = defaultSettings().delivery
+  if (!isObj(v)) return d
+  const projects: Record<string, ProjectDelivery> = {}
+  if (isObj(v.projects)) {
+    for (const [k, p] of Object.entries(v.projects)) {
+      if (Object.keys(projects).length >= MAX_PROJECT_PROFILES) break
+      const pd = projectDeliveryFrom(p)
+      if (isProjectKey(k) && pd) projects[k] = pd
+    }
+  }
+  const template = (t: unknown, def: string) => (typeof t === 'string' && templateProblem(t) === null ? t : def)
+  return {
+    notifyCiFailure: typeof v.notifyCiFailure === 'boolean' ? v.notifyCiFailure : d.notifyCiFailure,
+    prTemplate: template(v.prTemplate, d.prTemplate),
+    mergeTemplate: template(v.mergeTemplate, d.mergeTemplate),
+    projects,
+  }
+}
+
+function deliveryPatch(v: unknown): NonNullable<SettingsPatch['delivery']> {
+  if (!isObj(v)) throw new SettingsError('« delivery » doit être un objet')
+  const out: NonNullable<SettingsPatch['delivery']> = {}
+  for (const k of Object.keys(v)) {
+    if (!['notifyCiFailure', 'prTemplate', 'mergeTemplate', 'projects'].includes(k)) throw new SettingsError(`réglage inconnu : delivery.${k}`)
+  }
+  if (v.notifyCiFailure !== undefined) {
+    if (typeof v.notifyCiFailure !== 'boolean') throw new SettingsError('« delivery.notifyCiFailure » doit être un booléen')
+    out.notifyCiFailure = v.notifyCiFailure
+  }
+  for (const k of ['prTemplate', 'mergeTemplate'] as const) {
+    if (v[k] === undefined) continue
+    const problem = templateProblem(v[k])
+    if (problem) throw new SettingsError(`« delivery.${k} » : ${problem}`)
+    out[k] = v[k] as string
+  }
+  if (v.projects !== undefined) {
+    if (!isObj(v.projects)) throw new SettingsError('« delivery.projects » doit être un objet')
+    const entries = Object.entries(v.projects)
+    if (entries.length > MAX_PROJECT_PROFILES) throw new SettingsError('trop de projets')
+    const pp: Record<string, ProjectDelivery | null> = {}
+    for (const [k, p] of entries) {
+      if (!isProjectKey(k)) throw new SettingsError('projet : chemin absolu attendu')
+      if (p === null) {
+        pp[k] = null
+        continue
+      }
+      if (!isObj(p)) throw new SettingsError(`livraison invalide pour ${k}`)
+      for (const f of Object.keys(p)) {
+        if (!['mode', 'prTemplate', 'mergeTemplate'].includes(f)) throw new SettingsError(`réglage inconnu : delivery.projects.${f}`)
+      }
+      if (!isDeliveryMode(p.mode)) throw new SettingsError(`« mode » doit valoir ${DELIVERY_MODES.join(' ou ')} pour ${k}`)
+      const pd: ProjectDelivery = { mode: p.mode }
+      for (const t of ['prTemplate', 'mergeTemplate'] as const) {
+        // Vide : modèle par défaut.
+        if (p[t] === undefined || p[t] === '') continue
+        const problem = templateProblem(p[t])
+        if (problem) throw new SettingsError(`modèle du projet ${k} : ${problem}`)
+        pd[t] = p[t] as string
+      }
+      pp[k] = pd
+    }
+    out.projects = pp
+  }
+  return out
 }
 
 export interface RunnerSettings {
@@ -179,6 +291,13 @@ export interface SettingsPatch {
   }
   ui?: { zoom?: number; sessionTab?: SessionTab }
   forges?: { enabled: boolean }
+  /** Champs fournis seulement ; `projects` fusionné (`null` retire l'entrée, une entrée remplace celle du projet). */
+  delivery?: {
+    notifyCiFailure?: boolean
+    prTemplate?: string
+    mergeTemplate?: string
+    projects?: Record<string, ProjectDelivery | null>
+  }
 }
 
 export const MAX_PROJECT_PROFILES = 500
@@ -202,6 +321,7 @@ export function defaultSettings(): AppSettings {
     ui: { zoom: DEFAULT_ZOOM, sessionTab: DEFAULT_SESSION_TAB },
     forges: { enabled: true },
     runners: { confirmed: {} },
+    delivery: { notifyCiFailure: true, prTemplate: DEFAULT_PR_TEMPLATE, mergeTemplate: DEFAULT_MERGE_TEMPLATE, projects: {} },
   }
 }
 
@@ -450,6 +570,7 @@ export function normalizeSettings(raw: unknown): AppSettings {
       enabled: isObj(raw.forges) && typeof raw.forges.enabled === 'boolean' ? raw.forges.enabled : d.forges.enabled,
     },
     runners: runnersFrom(raw.runners),
+    delivery: deliveryFrom(raw.delivery),
   }
 }
 
@@ -502,7 +623,7 @@ export function validatePatch(raw: unknown): SettingsPatch {
   if (!isObj(raw)) throw new SettingsError('modification des réglages : objet attendu')
   const out: SettingsPatch = {}
   for (const k of Object.keys(raw)) {
-    if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view', 'worktrees', 'ui', 'forges'].includes(k)) {
+    if (!['theme', 'notifications', 'projectProfiles', 'confirmRemoval', 'profileLabels', 'view', 'worktrees', 'ui', 'forges', 'delivery'].includes(k)) {
       throw new SettingsError(k === 'runners' ? 'les commandes acceptées ne se modifient pas depuis la page' : `réglage inconnu : ${k}`)
     }
   }
@@ -556,6 +677,7 @@ export function validatePatch(raw: unknown): SettingsPatch {
     }
     out.forges = { enabled: raw.forges.enabled }
   }
+  if (raw.delivery !== undefined) out.delivery = deliveryPatch(raw.delivery)
   return out
 }
 
@@ -653,6 +775,19 @@ export function applyPatch(s: AppSettings, p: SettingsPatch): AppSettings {
   }
   if (p.ui) next.ui = { ...s.ui, ...p.ui }
   if (p.forges) next.forges = { ...p.forges }
+  if (p.delivery) {
+    const { projects, ...rest } = p.delivery
+    const d: DeliverySettings = { ...s.delivery, ...rest, projects: { ...s.delivery.projects } }
+    if (projects) {
+      for (const [k, v] of Object.entries(projects)) {
+        if (v === null) delete d.projects[k]
+        else d.projects[k] = v
+      }
+      const keys = Object.keys(d.projects)
+      for (const k of keys.slice(0, Math.max(0, keys.length - MAX_PROJECT_PROFILES))) delete d.projects[k]
+    }
+    next.delivery = d
+  }
   return next
 }
 
@@ -663,6 +798,10 @@ export function mergePatches(a: SettingsPatch, b: SettingsPatch): SettingsPatch 
   if (a.projectProfiles && b.projectProfiles) out.projectProfiles = { ...a.projectProfiles, ...b.projectProfiles }
   if (a.profileLabels && b.profileLabels) out.profileLabels = { ...a.profileLabels, ...b.profileLabels }
   if (a.ui && b.ui) out.ui = { ...a.ui, ...b.ui }
+  if (a.delivery && b.delivery) {
+    out.delivery = { ...a.delivery, ...b.delivery }
+    if (a.delivery.projects && b.delivery.projects) out.delivery.projects = { ...a.delivery.projects, ...b.delivery.projects }
+  }
   if (a.worktrees && b.worktrees) {
     out.worktrees = { ...a.worktrees, ...b.worktrees }
     if (a.worktrees.projectLocations && b.worktrees.projectLocations) {

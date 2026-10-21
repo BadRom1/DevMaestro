@@ -5,11 +5,13 @@
 //! Le contenu des issues n'est jamais enregistré en base ni journalisé : seul
 //! le lien session ↔ issue ([`SessionIssue`]) l'est.
 //!
-//! Demandes de fusion, CI et revue publiée (lot 13b) : [`pulls`].
+//! Demandes de fusion, CI et revue publiée (lot 13b) : [`pulls`] ; livraison
+//! et suivi de CI (lot 14b) : [`runs`].
 
 use std::path::Path;
 
 pub mod pulls;
+pub mod runs;
 
 /// Corps d'une issue gardé au plus (64 Kio, coupé sur un caractère entier).
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -453,7 +455,7 @@ pub fn truncate_body(body: &str) -> (String, bool) {
 
 /// Identifiants d'une URL (`schéma://utilisateur:secret@hôte/…`) masqués :
 /// `schéma://…@hôte/…`. `None` si le mot n'en porte pas.
-fn mask_url_credentials(word: &str) -> Option<String> {
+pub(crate) fn mask_url_credentials(word: &str) -> Option<String> {
     let i = word.find("://")?;
     let rest = &word[i + 3..];
     let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
@@ -463,7 +465,7 @@ fn mask_url_credentials(word: &str) -> Option<String> {
 
 /// Le mot ressemble-t-il à un jeton GitHub (`ghp_…`, `gho_…`, `ghu_…`,
 /// `ghs_…`, `ghr_…`, `github_pat_…`) ?
-fn looks_like_token(word: &str) -> bool {
+pub(crate) fn looks_like_token(word: &str) -> bool {
     let w = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
     let body = if let Some(rest) = w.strip_prefix("github_pat_") {
         rest

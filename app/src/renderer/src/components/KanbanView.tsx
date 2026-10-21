@@ -6,6 +6,8 @@
  * retenu localement.
  */
 import { runnersIndicator } from '../state/runners'
+import { ciBadge, deliveryBadge } from '../state/delivery'
+import { ForgeBadge } from './PullsPanel'
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 
 import type { PendingRequest, ProjectInfo, Profile, Session, Subagent } from '../../../shared/protocol'
@@ -125,6 +127,10 @@ function Card({
   const m = session.metrics
   const agentsRunning = runningLabel(runningCount(session, agents))
   const iss = sessionIssue(session)
+  // Livraison et CI suivies (lot 14b) : « Livrée », « PR #n ouverte », CI en échec ou en cours.
+  const delivery = deliveryBadge(session.delivery, false)
+  const ciState = session.delivery?.ci
+  const ci = ciState === 'failure' || ciState === 'pending' ? ciBadge(ciState) : null
   // Clic ailleurs que sur un bouton de la carte : ouvre la session (au clavier : le bouton du nom).
   const onCardClick = (e: MouseEvent<HTMLLIElement>) => {
     if ((e.target as Element).closest('button, a, input, select, textarea')) return
@@ -182,6 +188,12 @@ function Card({
       {agentsRunning && (
         <span className="chip ag-chip">
           <span className="st running" aria-hidden="true" /> {agentsRunning}
+        </span>
+      )}
+      {(delivery || ci) && (
+        <span className="kdeliv">
+          {delivery && <ForgeBadge b={delivery} className="sm" />}
+          {ci && <ForgeBadge b={ci} className="sm" />}
         </span>
       )}
       {runnersIndicator(runnersRunning) && (

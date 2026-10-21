@@ -226,6 +226,9 @@ pub struct Config {
     /// Délai laissé au prompt initial de `sessions.launch` (`initial`) pour
     /// partir ([`forge::INITIAL_PROMPT_TIMEOUT`] ; plus court dans les tests).
     pub initial_prompt_timeout: Duration,
+    /// Intervalle du sondage de la CI des sessions suivies
+    /// ([`forge::runs::CI_POLL_INTERVAL`] ; plus court dans les tests).
+    pub ci_poll_interval: Duration,
 }
 
 /// Adaptateurs utilisés par le démon.
@@ -272,6 +275,9 @@ pub enum Event {
     /// Les processus de runners d'une session ont changé (`runners.changed`,
     /// liste relue au moment d'envoyer).
     RunnersChanged(Uuid),
+    /// L'état de la CI d'une session suivie a changé (`forge.ci_changed`,
+    /// v0.3, lot 14b).
+    CiChanged { id: Uuid, state: &'static str },
 }
 
 /// Anti-rebond du recalcul du diff d'une session.
@@ -335,6 +341,10 @@ pub struct PromptToSend {
     /// Collé en *bracketed paste* (multiligne, tabulation, `\` final, ou long) ;
     /// sinon tapé.
     pub paste: bool,
+    /// Contenu collé derrière `text` (`{instruction, pasted}`, lot 14b) :
+    /// `text` est alors la consigne, toujours **tapée**, et ce contenu
+    /// (nettoyé, non vide) est collé en *bracketed paste*.
+    pub pasted: Option<String>,
 }
 
 /// Taille maximale d'un prompt envoyé (256 Kio).
@@ -620,6 +630,12 @@ pub struct Daemon {
     /// Runners vivants par session (`Session.runners_running`). Verrou
     /// feuille : aucun autre verrou n'est pris pendant qu'on le tient.
     runner_live: Mutex<HashMap<Uuid, usize>>,
+    /// Suivi de la CI des sessions (v0.3, lot 14b, `Session.delivery`).
+    /// Verrou feuille : aucun autre verrou n'est pris pendant qu'on le tient.
+    ci_watch: Mutex<HashMap<Uuid, forge::runs::CiWatch>>,
+    /// Dernier réglage « Accès aux forges » reçu (`enabled` d'un appel
+    /// `forge.*`, `forge.configure`) : coupé, le sondage de la CI ne lance rien.
+    forge_enabled: AtomicBool,
 }
 
 /// Liste des fichiers d'un dépôt, quand, pour quelle empreinte du diff et
@@ -991,6 +1007,8 @@ impl Daemon {
             runners: Mutex::new(runners::RunnerTable::default()),
             runner_start: Mutex::new(()),
             runner_live: Mutex::new(HashMap::new()),
+            ci_watch: Mutex::new(HashMap::new()),
+            forge_enabled: AtomicBool::new(true),
         })
     }
 
@@ -1408,6 +1426,7 @@ impl Daemon {
     fn entry_json(&self, e: &Entry) -> Value {
         let mut v = e.json();
         v["runners_running"] = json!(self.live_runners_of(&e.session.id));
+        v["delivery"] = self.delivery_json_of(&e.session.id);
         v
     }
 
@@ -1830,36 +1849,64 @@ impl Daemon {
         Ok(())
     }
 
-    /// `sessions.sendPrompt {id, text}` (v0.3, lot 12) : nettoie et valide le
-    /// prompt, et renvoie de quoi l'écrire (voir [`PromptToSend`]).
+    /// `sessions.sendPrompt {id, text}` (v0.3, lot 12) ou `{id, instruction,
+    /// pasted}` (lot 14b : consigne tapée, contenu collé, comme `initial` de
+    /// `sessions.launch`) : nettoie et valide le prompt, et renvoie de quoi
+    /// l'écrire (voir [`PromptToSend`]).
     pub fn prepare_prompt(&self, params: &Value) -> Result<PromptToSend, RpcError> {
         let id = session_id_param(params)?;
-        let raw = opt_str(params, "text")?.ok_or_else(|| RpcError::params("« text » manquant"))?;
-        let text = clean_prompt(&raw);
-        if text.is_empty() {
-            return Err(RpcError::params("prompt vide"));
-        }
-        if text.len() > MAX_PROMPT_BYTES {
-            return Err(RpcError::params(format!(
-                "prompt trop long : {} octets, {MAX_PROMPT_BYTES} au plus",
-                text.len()
-            )));
-        }
+        let raw = opt_str(params, "text")?;
+        let instruction = opt_str(params, "instruction")?;
+        let (text, paste, pasted) = match (raw, instruction) {
+            (Some(_), Some(_)) => {
+                return Err(RpcError::params(
+                    "« text » et « instruction » ne vont pas ensemble",
+                ));
+            }
+            (None, None) => return Err(RpcError::params("« text » manquant")),
+            (None, Some(instruction)) => {
+                let p = forge::two_step_prompt(&instruction, params.get("pasted"), "")?;
+                // Sans contenu, la consigne seule est tapée (collée si elle
+                // finit par `\`, comme le prompt initial).
+                let paste = p.pasted.is_empty() && p.instruction.ends_with('\\');
+                let pasted = (!p.pasted.is_empty()).then_some(p.pasted);
+                (p.instruction, paste, pasted)
+            }
+            (Some(raw), None) => {
+                if params.get("pasted").is_some_and(|v| !v.is_null()) {
+                    return Err(RpcError::params(
+                        "« pasted » va avec « instruction », pas avec « text »",
+                    ));
+                }
+                let text = clean_prompt(&raw);
+                if text.is_empty() {
+                    return Err(RpcError::params("prompt vide"));
+                }
+                if text.len() > MAX_PROMPT_BYTES {
+                    return Err(RpcError::params(format!(
+                        "prompt trop long : {} octets, {MAX_PROMPT_BYTES} au plus",
+                        text.len()
+                    )));
+                }
+                // Un `\` final ferait passer la TUI à la ligne au lieu d'envoyer.
+                let paste = text.contains('\n')
+                    || text.contains('\t')
+                    || text.ends_with('\\')
+                    || text.chars().count() >= TYPED_PROMPT_CHARS;
+                (text, paste, None)
+            }
+        };
         let (_, input, lock) = self.input_target(
             &id,
             "la session ne tourne pas : la reprendre pour lui écrire",
         )?;
-        // Un `\` final ferait passer la TUI à la ligne au lieu d'envoyer.
-        let paste = text.contains('\n')
-            || text.contains('\t')
-            || text.ends_with('\\')
-            || text.chars().count() >= TYPED_PROMPT_CHARS;
         Ok(PromptToSend {
             id,
             input,
             lock,
             text,
             paste,
+            pasted,
         })
     }
 

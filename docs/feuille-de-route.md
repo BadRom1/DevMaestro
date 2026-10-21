@@ -1,7 +1,7 @@
 # Feuille de route
 
 > Document de suivi partagé avec l'utilisateur. Mis à jour à chaque lot livré ou à chaque retour d'essai.
-> Dernière mise à jour : 2026-10-20.
+> Dernière mise à jour : 2026-10-21.
 > Détail des lots et contrats de protocole : [v0.1](v0.1.md), [v0.2](v0.2.md). Architecture : [architecture.md](architecture.md).
 
 ## Où on en est
@@ -40,7 +40,9 @@ Commité sur `v0.1`, **démon et app non redémarrés** (tu les utilises) : la n
 - **Lot 15** : filtres de la forge alignés, étiquettes choisies parmi celles du dépôt, cases à cocher Markdown, panneau Forge redimensionnable et plein écran, bouton de lancement en bas, noms de session et de branche courts.
 - **Reprise d'une ancienne session** : relancée depuis le dossier où la conversation a commencé (celui sous lequel Claude Code l'a rangée) ; avertissement si on force un autre dossier, message clair si Claude Code ne la trouve pas.
 
-Prochaines étapes : 14b, 16, 17… (lot 15 bis livré, à essayer : arborescence dans le lecteur de diff, compteurs +/−, j/k dans Commits, `l` pour « vu »)
+- **Lot 14b** (livraison et CI, non commité) : sous l'en-tête d'une session, « Ouvrir une demande de fusion » et « Fusionner dans <branche par défaut> » (bouton principal selon le mode du projet, consigne montrée puis tapée, modèles dans Réglages → Général → Livraison) ; « Livrée » / « PR #n ouverte » et CI de la session dans l'en-tête, la barre latérale et le kanban ; notification « CI en échec sur … » ; « Voir l'échec » et « Envoyer l'échec à Claude » (journal nettoyé, secrets masqués, borné, collé comme donnée). Démon et app à relancer pour l'essayer.
+
+Prochaines étapes : essayer 14b et 15 bis (arborescence dans le lecteur de diff, compteurs +/−, j/k dans Commits, `l` pour « vu ») ; puis 16 (disposition), 17 (slash commands), 18 (consignes personnalisables : les modèles de livraison du 14b en sont un premier morceau).
 
 ## Point de reprise précédent (2026-10-20, soir)
 
@@ -73,7 +75,7 @@ Prochaines étapes proposées (dans l'ordre) : décider l'accès réseau pour Gi
 | **19. Revue assistée par IA** | Depuis une demande de fusion (ou un diff, un commit) : « Revue assistée » qui ouvre directement une session en lecture seule (mode plan) sur la branche, avec le diff en contexte, pour demander des explications et des retours, sans passer par « Nouvelle session » | Retours de l'essai du 2026-10-21 | ⏳ |
 | **20. Langues** | Interface en français et en anglais (choix dans les réglages, langue du système par défaut) ; messages du démon par codes traduits côté app | Partage avec d'autres utilisateurs | ⏳ |
 | **13c. GitHub (suite)** | Issues pour lancer des sessions (une par sous-issue d'un epic), suivi des PR et de la CI, **revue des PR GitHub dans l'app** | Livraison et CI ; demande « pas urgente » | ⏳ demande un ADR : aujourd'hui seule la connexion aux quotas est permise (passer par la CLI `gh` de l'utilisateur ?) |
-| **14. Lancer et livrer** (14a runners et aperçu web : ✅ livré ; 14b livraison et CI : après le lot 15) | Runners (dev, test) avec aperçu web, livraison (PR par l'agent ou merge sur main), suivi de CI | Fin du cycle d'une tâche | ⏳ |
+| **14. Lancer et livrer** (14a runners et aperçu web ; 14b livraison et CI) | Runners (dev, test) avec aperçu web, livraison (PR par l'agent ou merge sur main, consignes typées modifiables par projet), suivi de CI (état sur la session, notification d'échec, « Envoyer l'échec à Claude » avec le journal collé comme donnée) | Fin du cycle d'une tâche | ✅ livré, à essayer (14b : sur un projet avec GitHub Actions) |
 | **21. Dictée** | Push-to-talk et enregistrement avec Parakeet en local, notes vocales en Opus | Prototypes n° 3 et 4 faits, branches non fusionnées | ⏳ |
 | **22. Plugins** | Graphify, CodeGraph, API NLP de l'équipe | Architecture § 19 | ⏳ |
 | **Paquet** | Paquet `.deb` avec profil AppArmor, lancement depuis le menu (le script `scripts/installer-lanceur-dev.sh` couvre le développement) | Utilisation sans session Claude Code, collègues | ⏳ |

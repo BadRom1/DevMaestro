@@ -328,7 +328,7 @@ impl Connection {
                 "protocol": PROTOCOL_VERSION,
                 "pid": std::process::id(),
                 // Fonctions du démon détectables par le client (lot 13a).
-                "capabilities": {"initial_prompt": true, "runners": true},
+                "capabilities": {"initial_prompt": true, "runners": true, "send_prompt_paste": true, "ci": true},
             }),
             "profiles.list" => d.profiles()?,
             "projects.resolve" => {
@@ -495,6 +495,10 @@ impl Connection {
             | "forge.pull"
             | "forge.pullFile"
             | "forge.pullForBranch"
+            | "forge.runs"
+            | "forge.runFailure"
+            | "forge.sessionCi"
+            | "forge.configure"
             | "forge.submitReview" => {
                 // `git` et `gh` : hors du runtime.
                 let (d2, params, m) = (d.clone(), params.clone(), method.to_owned());
@@ -507,6 +511,10 @@ impl Connection {
                     "forge.pull" => d2.forge_pull(&params),
                     "forge.pullFile" => d2.forge_pull_file(&params),
                     "forge.pullForBranch" => d2.forge_pull_for_branch(&params),
+                    "forge.runs" => d2.forge_runs(&params),
+                    "forge.runFailure" => d2.forge_run_failure(&params),
+                    "forge.sessionCi" => d2.forge_session_ci(&params),
+                    "forge.configure" => d2.forge_configure(&params),
                     _ => d2.forge_submit_review(&params),
                 })
                 .await
@@ -710,9 +718,11 @@ async fn enter_if_still_free(
 
 /// Écrit un prompt (`sessions.sendPrompt`) : tapé d'un bloc s'il est court
 /// et sur une ligne, sinon collé en *bracketed paste* ; puis Entrée (règle
-/// du prototype n° 1, Q8, et ADR 0005). Verrou des écritures tenu pendant
-/// tout l'envoi, état revérifié une fois le verrou pris (demande apparue,
-/// processus changé : refus sans rien écrire).
+/// du prototype n° 1, Q8, et ADR 0005). Avec `pasted` (lot 14b) : la
+/// consigne est tapée, le contenu collé, puis Entrée (comme
+/// `sessions.sendReview`). Verrou des écritures tenu pendant tout l'envoi,
+/// état revérifié une fois le verrou pris (demande apparue, processus
+/// changé : refus sans rien écrire).
 async fn send_prompt(d: &Arc<Daemon>, p: &PromptToSend) -> Result<(), RpcError> {
     let _guard = p.lock.lock().await;
     d.recheck_input(&p.id, &p.input)?;
@@ -724,6 +734,10 @@ async fn send_prompt(d: &Arc<Daemon>, p: &PromptToSend) -> Result<(), RpcError> 
     };
     p.input.send(bytes).await.map_err(gone)?;
     tokio::time::sleep(REVIEW_STEP).await;
+    if let Some(pasted) = &p.pasted {
+        p.input.send(bracketed_paste(pasted)).await.map_err(gone)?;
+        tokio::time::sleep(REVIEW_STEP).await;
+    }
     enter_if_still_free(d, &p.id, &p.input).await
 }
 
@@ -1066,6 +1080,9 @@ fn event_frame(daemon: &Daemon, ev: Event) -> Option<Frame> {
             "runners.changed",
             json!({"id": id, "running": daemon.runners_running_json(&id)}),
         ),
+        Event::CiChanged { id, state } => {
+            notification("forge.ci_changed", json!({"id": id, "state": state}))
+        }
         // Calculée par connexion (voir `forward_events`).
         Event::ConversationChanged(_) => return None,
     };

@@ -13,6 +13,7 @@ import { useRunnersIndex } from './useRunnersIndex'
 import { LinkDialog } from './components/LinkDialog'
 import { ForgePanel, type EpicLaunchContext, type ForgeTab } from './components/IssuesPanel'
 import { resetBranchPullSupport } from './components/PullChip'
+import { resetSessionCiSupport } from './components/DeliveryBar'
 import { NewSessionDialog } from './components/NewSessionDialog'
 import { SessionPane } from './components/SessionPane'
 import { Sidebar } from './components/Sidebar'
@@ -32,7 +33,7 @@ import { buildProjectChoices, pastResumeProfile, resolveDefaultProfile, sessionP
 import { initialOf, sessionIssue, supportsInitialPrompt, type IssuePrefill } from './state/forge'
 import { projectWorktreeLocation } from '../../shared/settings'
 import { LOCATION_LABELS } from '../../shared/worktrees'
-import { noteWork, type WorktreeLists } from './state/worktrees'
+import { candidate, noteWork, worktreeOf, type WorktreeLists } from './state/worktrees'
 import { rootFromCommonDir } from '../../shared/worktrees'
 import { emptyDraft, reviewReducer, type ReviewAction, type ReviewDraft } from './state/review'
 import {
@@ -636,6 +637,7 @@ export function App() {
     setForgeSupported(null)
     setInitialSupported(false)
     resetBranchPullSupport()
+    resetSessionCiSupport()
   }, [state.connection])
   const forgeOn = settings.forges.enabled && forgeSupported !== false
   /** Panneau « Forge » du projet ouvert (onglet, issue ou demande de fusion à afficher). */
@@ -757,6 +759,17 @@ export function App() {
     return () => window.removeEventListener('wheel', on, { capture: true })
   }, [])
 
+  // Branche de la session affichée intégrée dans la référence (lot 6) : « Livrée » (lot 14b).
+  const selectedIntegrated = useMemo(() => {
+    if (!selected || worktreesSupported !== true) return false
+    for (const l of Object.values(worktreeLists)) {
+      const wt = worktreeOf(selected.cwd, l?.worktrees)
+      // Même règle que la proposition de nettoyage, la session vivante comprise.
+      if (wt) return candidate({ ...wt, sessions_running: 0 }, wtWorked.current)
+    }
+    return false
+  }, [selected, worktreeLists, worktreesSupported])
+
   const sessionPane = (
     <SessionPane
       session={selected}
@@ -786,6 +799,7 @@ export function App() {
       onRunnersUnsupported={runners.markUnsupported}
       onOpenIssue={forgeOn ? openSessionIssue : undefined}
       onOpenPull={forgeOn ? openSessionPull : undefined}
+      integrated={selectedIntegrated}
     />
   )
 

@@ -1,0 +1,13 @@
+lint	Ensure Go source and modules are up to date	﻿2026-10-21T09:10:50.2501003Z ##[group]Run go mod tidy -diff
+lint	Ensure Go source and modules are up to date	2026-10-21T09:10:50.2501417Z [36;1mgo mod tidy -diff[0m
+lint	Ensure Go source and modules are up to date	2026-10-21T09:10:50.2501687Z [36;1mgo fix -diff ./...[0m
+lint	Ensure Go source and modules are up to date	2026-10-21T09:10:50.2906604Z shell: /usr/bin/bash -e {0}
+lint	Ensure Go source and modules are up to date	2026-10-21T09:10:50.2907125Z env:
+lint	Ensure Go source and modules are up to date	2026-10-21T09:10:50.2907418Z   GOTOOLCHAIN: local
+lint	Ensure Go source and modules are up to date	2026-10-21T09:10:50.2907728Z ##[endgroup]
+lint	Ensure Go source and modules are up to date	2026-10-21T09:10:50.3867967Z go: downloading github.com/cli/go-gh/v2 v2.17.0
+lint	Ensure Go source and modules are up to date	2026-10-21T09:10:57.8099860Z  github.com/cli/oauth v1.2.3-0.20260914234613-cde372eeffd4 h1:Cp3FHONVUKS7aA8y0MORVvisv70Z1TVtap4C1Fqgy/s=
+lint	Ensure Go source and modules are up to date	2026-10-21T09:10:57.8101297Z  github.com/cli/oauth v1.2.3-0.20260914234613-cde372eeffd4/go.mod h1:h0lVJ2xkpgc0WGjM6KHPKb0T2D+YUfsz3GbRTPandyg=
+lint	Ensure Go source and modules are up to date	2026-10-21T09:10:57.8102279Z  github.com/cli/safeexec v1.0.1 h1:e/C79PbXF4yYTN/wauC4tviMxEV13BwljGj0N9j+N00=
+lint	Ensure Go source and modules are up to date	2026-10-21T09:10:57.8102621Z 
+lint	Ensure Go source and modules are up to date	2026-10-21T09:10:57.8115471Z ##[error]Process completed with exit code 1.

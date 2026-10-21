@@ -29,6 +29,8 @@ import { glyphFor } from '../state/status'
 import { sessionIssue } from '../state/forge'
 import { IssueChip } from './IssueChip'
 import { PullChip, useBranchPull } from './PullChip'
+import { DeliveryBar } from './DeliveryBar'
+import { profileKeyOf } from '../state/newSession'
 import type { ITheme } from '@xterm/xterm'
 
 import { TerminalView } from '../terminal/TerminalView'
@@ -115,10 +117,13 @@ function Header({
   onForget,
   onOpenIssue,
   onOpenPull,
+  integrated,
 }: {
   session: Session
   onOpenIssue?: (s: Session) => void
   onOpenPull?: (s: Session, number: number) => void
+  /** Branche de la session intégrée dans la référence (lot 6) : « Livrée ». */
+  integrated: boolean
   agents: readonly Subagent[] | undefined
   project: ProjectInfo | undefined
   profiles: Profile[]
@@ -306,6 +311,16 @@ function Header({
           onCancel={() => setForgetting(false)}
         />
       )}
+      {onOpenPull && project?.is_git !== false && project?.exists !== false && (
+        <DeliveryBar
+          session={session}
+          projectKey={project ? profileKeyOf(session.cwd, project) : null}
+          root={project?.root ?? session.cwd}
+          integrated={integrated}
+          enabled={settings.forges.enabled}
+          hidePullCi={!!pull}
+        />
+      )}
       <div className="sh-2">
         <span>{glyph.label}</span>
         {agentsRunning && (
@@ -393,7 +408,10 @@ export function SessionPane({
   runnersRunning,
   onRunnersRunning,
   onRunnersUnsupported,
+  integrated = false,
 }: {
+  /** Branche de la session affichée intégrée dans la référence (lot 6). */
+  integrated?: boolean
   /** Le démon connaît les runners (lot 14a) ; `false` : onglet « Lancer » masqué. */
   runnersSupported: boolean | null
   /** Exécutions en cours de la session affichée (badge de l'onglet). */
@@ -539,6 +557,7 @@ export function SessionPane({
           onForget={onForget}
           onOpenIssue={onOpenIssue}
           onOpenPull={onOpenPull}
+          integrated={integrated}
         />
       ) : (
         <div className="sh">

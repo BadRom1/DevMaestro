@@ -1,5 +1,6 @@
-//! Forge GitHub par la CLI `gh` de l'utilisateur (ADR 0006, v0.3 lots 13a
-//! et 13b ; demandes de fusion et revue : [`pulls`]).
+//! Forge GitHub par la CLI `gh` de l'utilisateur (ADR 0006, v0.3 lots 13a,
+//! 13b et 14b ; demandes de fusion et revue : [`pulls`] ; exécutions de CI :
+//! [`runs`]).
 //!
 //! Le démon ne tient aucun jeton et n'ouvre aucune connexion lui-même : il
 //! lance `gh` (arguments séparés, jamais de shell, délai, sortie bornée,
@@ -34,6 +35,7 @@ use crate::domain::forge::{
 use crate::ports::{Forge, ForgeError};
 
 pub mod pulls;
+pub mod runs;
 
 /// Délai maximal d'un appel à `gh`.
 pub const GH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -159,7 +161,14 @@ impl GhExec {
     /// processus (tué en entier au bout du délai, et après sa fin : aucun
     /// descendant ne survit), entrée fermée.
     pub fn run(&self, args: &[&str]) -> GhRun {
-        self.run_with(args, None)
+        self.run_with(args, None, false)
+    }
+
+    /// Comme [`GhExec::run`], mais une sortie trop longue garde sa **fin**
+    /// ([`MAX_GH_OUTPUT`] derniers octets, `truncated`) au lieu de son début :
+    /// pour un journal, dont l'erreur est à la fin (lot 14b).
+    pub fn run_tail(&self, args: &[&str]) -> GhRun {
+        self.run_with(args, None, true)
     }
 
     /// Comme [`GhExec::run`], avec `input` écrit sur l'entrée standard (puis
@@ -173,10 +182,10 @@ impl GhExec {
                 MAX_GH_INPUT / (1024 * 1024)
             ));
         }
-        self.run_with(args, Some(input.to_vec()))
+        self.run_with(args, Some(input.to_vec()), false)
     }
 
-    fn run_with(&self, args: &[&str], input: Option<Vec<u8>>) -> GhRun {
+    fn run_with(&self, args: &[&str], input: Option<Vec<u8>>, tail: bool) -> GhRun {
         let Some(program) = &self.program else {
             return GhRun::Missing;
         };
@@ -219,6 +228,27 @@ impl GhExec {
         let max = self.max_output as u64;
         let reader = std::thread::spawn(move || {
             let mut buf = Vec::new();
+            if tail {
+                // Fin gardée : tampon borné à 2 × `max`, ramené à `max + 1`
+                // (le `+ 1` signale la coupe) quand il déborde.
+                let max = max as usize;
+                let mut chunk = [0u8; 64 * 1024];
+                loop {
+                    match stdout.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if buf.len() > 2 * max + 1 {
+                                buf.drain(..buf.len() - (max + 1));
+                            }
+                        }
+                    }
+                }
+                if buf.len() > max + 1 {
+                    buf.drain(..buf.len() - (max + 1));
+                }
+                return buf;
+            }
             let _ = (&mut stdout).take(max + 1).read_to_end(&mut buf);
             let _ = std::io::copy(&mut stdout, &mut std::io::sink());
             buf
@@ -267,7 +297,11 @@ impl GhExec {
             let _ = w.join();
         }
         let truncated = stdout.len() > self.max_output;
-        stdout.truncate(self.max_output);
+        if tail && truncated {
+            stdout.drain(..stdout.len() - self.max_output);
+        } else {
+            stdout.truncate(self.max_output);
+        }
         GhRun::Done(GhOut {
             ok: status.success(),
             code: status.code(),
@@ -842,6 +876,33 @@ impl Forge for GithubCli {
     ) -> Result<String, ForgeError> {
         self.gh_submit_review(root, remote, number, review)
     }
+
+    fn last_pull_for_branch(
+        &self,
+        root: &Path,
+        remote: &RemoteRepo,
+        branch: &str,
+    ) -> Result<Option<crate::domain::forge::pulls::Pull>, ForgeError> {
+        self.gh_last_pull_for_branch(root, remote, branch)
+    }
+
+    fn runs(
+        &self,
+        root: &Path,
+        remote: &RemoteRepo,
+        filter: &crate::domain::forge::runs::RunFilter,
+    ) -> Result<(Vec<crate::domain::forge::runs::Run>, bool), ForgeError> {
+        self.gh_runs(root, remote, filter)
+    }
+
+    fn run_failure(
+        &self,
+        root: &Path,
+        remote: &RemoteRepo,
+        run_id: u64,
+    ) -> Result<crate::domain::forge::runs::RunFailure, ForgeError> {
+        self.gh_run_failure(root, remote, run_id)
+    }
 }
 
 #[cfg(test)]
@@ -1166,6 +1227,32 @@ mod tests {
                 assert!(o.truncated && o.ok);
                 assert_eq!(o.stdout.len(), 1000);
                 assert_eq!(o.stderr, b"err\n");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Sortie trop grosse, fin gardée (journal).
+        match unbusy(|| big.run_tail(&[])) {
+            GhRun::Done(o) => {
+                assert!(o.truncated && o.ok);
+                assert_eq!(o.stdout.len(), 1000);
+                assert!(o.stdout.iter().all(|b| *b == 0));
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut tailed = GhExec::new(
+            Some(script(
+                d,
+                "queue",
+                "i=0; while [ $i -lt 300 ]; do echo \"ligne $i\"; i=$((i+1)); done; echo FIN",
+            )),
+            Duration::from_secs(5),
+        );
+        tailed.max_output = 100;
+        match unbusy(|| tailed.run_tail(&[])) {
+            GhRun::Done(o) => {
+                assert!(o.truncated);
+                assert_eq!(o.stdout.len(), 100);
+                assert!(o.stdout.ends_with(b"ligne 299\nFIN\n"));
             }
             other => panic!("{other:?}"),
         }

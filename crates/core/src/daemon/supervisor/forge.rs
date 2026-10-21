@@ -1,6 +1,7 @@
 //! Forge (v0.3, lot 13a, ADR 0006) : `forge.status`, `forge.issues`,
 //! `forge.issue`, `forge.labels` (lot 15), et le lien session ↔ issue de `sessions.launch` ;
-//! demandes de fusion, CI et revue (lot 13b) : [`pulls`].
+//! demandes de fusion, CI et revue (lot 13b) : [`pulls`] ; livraison et
+//! suivi de CI (lot 14b) : [`runs`].
 //!
 //! Les appels à la forge passent par le port [`crate::ports::Forge`], hors
 //! du runtime et jamais sous le verrou du registre. Les réponses sont
@@ -23,6 +24,7 @@ use crate::ports::ForgeError;
 use crate::protocol::error_code;
 
 pub mod pulls;
+pub mod runs;
 
 /// Consigne tapée d'un prompt initial, en caractères au plus.
 pub const MAX_INITIAL_INSTRUCTION_CHARS: usize = 2000;
@@ -54,11 +56,8 @@ pub enum InitialReadiness {
     Gone,
 }
 
-/// `initial: {instruction, pasted}` de `sessions.launch` : consigne ramenée
-/// à une ligne (contrôles et invisibles retirés), non vide,
-/// [`MAX_INITIAL_INSTRUCTION_CHARS`] au plus ; `pasted` nettoyé (fins de
-/// ligne, contrôles sauf `\n` et `\t`, invisibles), blancs de bord retirés,
-/// [`super::MAX_PROMPT_BYTES`] au plus.
+/// `initial: {instruction, pasted}` de `sessions.launch` : voir
+/// [`two_step_prompt`].
 pub(super) fn initial_param(params: &Value) -> Result<Option<InitialPrompt>, RpcError> {
     let bad = || RpcError::params("« initial » doit être un objet {instruction, pasted}");
     let o = match params.get("initial") {
@@ -70,33 +69,52 @@ pub(super) fn initial_param(params: &Value) -> Result<Option<InitialPrompt>, Rpc
         .get("instruction")
         .and_then(Value::as_str)
         .ok_or_else(bad)?;
-    let pasted = match o.get("pasted") {
+    two_step_prompt(instruction, o.get("pasted"), "initial.").map(Some)
+}
+
+/// Prompt en deux temps (`initial` de `sessions.launch`, `{instruction,
+/// pasted}` de `sessions.sendPrompt`) : consigne ramenée à une ligne
+/// (contrôles et invisibles retirés), non vide,
+/// [`MAX_INITIAL_INSTRUCTION_CHARS`] au plus ; `pasted` (absent ou `null` :
+/// vide) nettoyé (fins de ligne, contrôles sauf `\n` et `\t`, invisibles),
+/// blancs de bord retirés, [`super::MAX_PROMPT_BYTES`] au plus. `prefix` :
+/// devant les noms des champs dans les messages.
+pub(super) fn two_step_prompt(
+    instruction: &str,
+    pasted: Option<&Value>,
+    prefix: &str,
+) -> Result<InitialPrompt, RpcError> {
+    let pasted = match pasted {
         None | Some(Value::Null) => "",
         Some(Value::String(s)) => s.as_str(),
-        Some(_) => return Err(bad()),
+        Some(_) => {
+            return Err(RpcError::params(format!(
+                "« {prefix}pasted » doit être un texte"
+            )));
+        }
     };
     let instruction = crate::domain::forge::one_line(instruction);
     if instruction.is_empty() {
-        return Err(RpcError::params("« initial.instruction » vide"));
+        return Err(RpcError::params(format!("« {prefix}instruction » vide")));
     }
     let n = instruction.chars().count();
     if n > MAX_INITIAL_INSTRUCTION_CHARS {
         return Err(RpcError::params(format!(
-            "« initial.instruction » : {n} caractères, {MAX_INITIAL_INSTRUCTION_CHARS} au plus"
+            "« {prefix}instruction » : {n} caractères, {MAX_INITIAL_INSTRUCTION_CHARS} au plus"
         )));
     }
     let pasted = crate::domain::forge::clean_text(pasted).trim().to_owned();
     if pasted.len() > super::MAX_PROMPT_BYTES {
         return Err(RpcError::params(format!(
-            "« initial.pasted » trop long : {} octets, {} au plus",
+            "« {prefix}pasted » trop long : {} octets, {} au plus",
             pasted.len(),
             super::MAX_PROMPT_BYTES
         )));
     }
-    Ok(Some(InitialPrompt {
+    Ok(InitialPrompt {
         instruction,
         pasted,
-    }))
+    })
 }
 
 /// Durée de vie d'une réponse de la forge gardée en mémoire (état, issues).
@@ -126,12 +144,17 @@ pub(super) type PullDiff = std::collections::HashMap<String, crate::domain::diff
 pub(super) struct ForgeCache {
     entries: std::collections::HashMap<String, (Instant, Duration, Arc<Cached>)>,
     diffs: std::collections::HashMap<String, (Instant, Arc<PullDiff>)>,
+    /// Échecs d'exécutions terminées (`forge.runFailure`, lot 14b) : jusqu'à
+    /// 256 Kio chacun, à part et peu nombreux.
+    failures: std::collections::HashMap<String, (Instant, Arc<Value>)>,
 }
 
 #[derive(Debug)]
 pub(super) enum Cached {
     Status(ForgeStatus),
     Json(Value),
+    /// Dernière demande de fusion d'une branche (lot 14b).
+    Pull(Option<crate::domain::forge::pulls::Pull>),
 }
 
 impl ForgeCache {
@@ -198,10 +221,45 @@ impl ForgeCache {
     fn forget_pulls(&mut self, slug: &str) {
         self.entries.retain(|k, _| {
             serde_json::from_str::<Value>(k).map_or(true, |v| {
-                !(matches!(v[0].as_str(), Some("pulls" | "pull" | "pull_for_branch"))
-                    && v[1] == slug)
+                !(matches!(
+                    v[0].as_str(),
+                    Some("pulls" | "pull" | "pull_for_branch" | "last_pull_for_branch")
+                ) && v[1] == slug)
             })
         });
+    }
+
+    /// Oublie les états gardés (`forge.status`) : forge devenue indisponible.
+    fn forget_status(&mut self) {
+        self.entries.retain(|k, _| !is_status_key(k));
+    }
+
+    fn get_failure(&mut self, key: &str, now: Instant) -> Option<Arc<Value>> {
+        match self.failures.get(key) {
+            Some((at, v)) if now.duration_since(*at) < runs::FAILURE_CACHE_TTL => Some(v.clone()),
+            Some(_) => {
+                self.failures.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn put_failure(&mut self, key: String, value: Arc<Value>, now: Instant) {
+        self.failures
+            .retain(|_, (at, _)| now.duration_since(*at) < runs::FAILURE_CACHE_TTL);
+        while self.failures.len() >= runs::FAILURE_CACHE_MAX {
+            let Some(oldest) = self
+                .failures
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            self.failures.remove(&oldest);
+        }
+        self.failures.insert(key, (now, value));
     }
 }
 
@@ -488,6 +546,9 @@ impl Daemon {
     /// État de la forge de `root` (gardé 60 s, sauf `refresh`). Désactivé :
     /// rien n'est lancé, ni `git` ni `gh`.
     fn forge_state(&self, root: &Path, enabled: bool, refresh: bool) -> ForgeStatus {
+        if enabled != self.forge_allowed() {
+            self.note_forge_enabled(enabled);
+        }
         if !enabled {
             return ForgeStatus::unavailable(None, None, DISABLED_REASON);
         }
@@ -554,7 +615,7 @@ impl Daemon {
         let value = fetch().map_err(|e| {
             // Forge devenue indisponible (déconnexion…) : l'état gardé est oublié.
             if matches!(e, ForgeError::Unavailable(_)) {
-                self.forge_cache().entries.retain(|k, _| !is_status_key(k));
+                self.forge_cache().forget_status();
             }
             forge_error(e)
         })?;

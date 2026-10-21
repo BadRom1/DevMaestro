@@ -262,6 +262,11 @@ impl DiffSource for GitDiff {
         self.toplevel(cwd)
     }
 
+    fn user_email(&self, cwd: &Path) -> Option<String> {
+        self.line(cwd, &["config", "--get", "user.email"])
+            .filter(|e| !e.trim().is_empty())
+    }
+
     fn repo_files(&self, root: &Path) -> Result<(Vec<String>, bool), DiffError> {
         let out = self.run(
             root,
