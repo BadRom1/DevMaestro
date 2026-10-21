@@ -2,7 +2,7 @@
 
 - Statut : accepté (2026-10-21)
 - Modifie : la règle « seule connexion sortante : l'endpoint d'usage d'Anthropic » (CLAUDE.md, architecture § 2) : le démon peut lancer la CLI de la forge de l'utilisateur, qui, elle, va sur le réseau
-- Voir aussi : [architecture § 19](../architecture.md) (plugins), [feuille de route](../feuille-de-route.md) (lots 13 et 16)
+- Voir aussi : [architecture § 19](../architecture.md) (plugins), [feuille de route](../feuille-de-route.md) (lots 13 et 22)
 
 ## Contexte
 

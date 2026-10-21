@@ -90,6 +90,9 @@ Les octets d'un PTY ne sont **jamais** analysés par le démon pour en déduire 
 | `-32021` | `files.write` refusé : « le fichier a été modifié depuis son ouverture » ; `data: {version}` (version actuelle, `null` si le fichier n'existe plus) ; rien n'est écrit |
 | `-32022` | forge indisponible (toutes les méthodes `forge.*` sauf `forge.status`) : accès désactivé, dépôt hors GitHub, `gh` absent ou non connecté ; message « forge indisponible : <raison> », `data: {reason}` (la raison seule, en français) |
 | `-32023` | `forge.submitReview` refusé : « la demande de fusion a changé depuis son ouverture » (la tête relue n'est plus `expected_head_sha`) ; `data: {head_sha}` (tête actuelle) ; rien n'est publié |
+| `-32024` | `runners.start` : `runner_id` absent de la détection refaite à l'instant par le démon (« runner inconnu : « … » (absent de la détection actuelle) ») ; jamais de commande libre (§ 4, « Runners ») |
+| `-32025` | `runners.start` : 8 runners vivants pour cette session (« 8 runners tournent déjà pour cette session : en arrêter un d'abord ») |
+| `-32026` | processus de runner inconnu (`process_id`), ou qui n'appartient pas à la session `id` donnée (`runners.stop`, `runners.subscribe`, `runners.resize`) |
 
 Une erreur peut porter un champ `data` (objet) avec des détails structurés, en plus de `code` et `message` ; il n'est présent que là où ce document le décrit (aujourd'hui : commentaires de fichier de `sessions.sendReview`, `{index, path, line, line_end}` ; `-32020` de `worktrees.remove`, `{files, total}` ; `-32021` de `files.write`, `{version}` ; `-32022` des méthodes `forge.*`, `{reason}` ; `-32023` de `forge.submitReview`, `{head_sha}` ; `-32602` d'un commentaire de `forge.submitReview`, `{index, path, line, side}`). Un client doit ignorer un `data` qu'il ne connaît pas.
 
@@ -97,7 +100,7 @@ Une erreur peut porter un champ `data` (objet) avec des détails structurés, en
 
 | Méthode | Paramètres | Résultat |
 |---|---|---|
-| `hello` | `{client?}` | `{server: "orchd", version, protocol: 1, pid, capabilities: {initial_prompt: true}}` (`capabilities` : fonctions détectables par le client ; absent d'un démon plus ancien) |
+| `hello` | `{client?}` | `{server: "orchd", version, protocol: 1, pid, capabilities: {initial_prompt: true, runners: true}}` (`capabilities` : fonctions détectables par le client ; absent d'un démon plus ancien) |
 | `profiles.list` | — | `{profiles: [Profil]}` |
 | `projects.resolve` | `{path}` | `{path, exists, inferred, is_git, root, worktree_root, common_dir, branch, name}` (voir ci-dessous) |
 | `sessions.list` | — | `{sessions: [Session]}`, de la plus récente à la plus ancienne |
@@ -108,7 +111,7 @@ Une erreur peut porter un champ `data` (objet) avec des détails structurés, en
 | `sessions.unsubscribe` | `{id}` | `{unsubscribed: bool}` |
 | `sessions.resize` | `{id, cols, rows}` | `{cols, rows}` |
 | `sessions.input` | `{id, data}` | `{}` une fois le texte mis en file (texte UTF-8 ; les trames `0x03` sont préférables pour le clavier) |
-| `sessions.stop` | `{id}` | `{stopping: bool, alive: bool}` |
+| `sessions.stop` | `{id, stop_runners?}` | `{stopping: bool, alive: bool, runners_stopping?}` (avec `stop_runners: true`, les runners vivants de la session sont aussi arrêtés ; `runners_stopping` : leur nombre) |
 | `sessions.setMode` | `{id, mode}` | `{sent}` : nombre de Shift+Tab envoyés (voir ci-dessous) |
 | `sessions.update` | `{id, title?: texte \| null, color?: couleur \| null}` | `{session: Session}` (voir ci-dessous) |
 | `sessions.forget` | `{id}` | `{forgotten: true}` (voir ci-dessous) |
@@ -143,6 +146,12 @@ Une erreur peut porter un champ `data` (objet) avec des détails structurés, en
 | `forge.pullFile` | `{root, number, path, enabled?, refresh?}` | `{hunks, binary, too_large}` |
 | `forge.pullForBranch` | `{root, branch, enabled?, refresh?}` | `Pull` sans corps, ou `null` |
 | `forge.submitReview` | `{root, number, expected_head_sha, event, body?, comments?, enabled?}` | `{url}` — **écriture** vers la forge, socket de contrôle seulement |
+| `runners.list` | `{id}` | `{runners: [Runner], running: [RunnerProcess]}` (voir « Runners ») |
+| `runners.start` | `{id, runner_id, cols?, rows?}` | `RunnerProcess` |
+| `runners.stop` | `{id?, process_id}` | `{stopping: bool, alive: bool}` |
+| `runners.subscribe` | `{id?, process_id, history?, cols?, rows?}` | `{process_id, snapshot: Écran, history?}` puis le flux (§ 6) |
+| `runners.unsubscribe` | `{process_id}` | `{unsubscribed: bool}` |
+| `runners.resize` | `{id?, process_id, cols, rows}` | `{cols, rows}` |
 
 Détails :
 
@@ -610,6 +619,43 @@ Trois appels : `gh pr view <n> --repo … --json <champs de la liste>,body` ; `g
 
 **Tests** : tout l'aller-retour d'écriture est vérifié avec le faux `gh` (`DEVMAESTRO_GH_BIN`), qui journalise ses arguments et l'entrée standard reçue ; aucun test n'écrit sur une vraie forge.
 
+### Runners et aperçu web (v0.3, lot 14a)
+
+Un runner est une commande **détectée par le démon** dans le worktree d'une session (dev, tests, build…), lancée dans un PTY du démon. **Aucune commande libre** ne vient de l'interface (architecture § 15) : `runners.start` ne prend qu'un `runner_id`, cherché dans une détection **refaite à l'instant** sur le disque ; la commande lancée est celle qu'a construite la détection (argv, jamais de shell). Code : `crates/core/src/domain/runners.rs` (détection, URL, port), `crates/core/src/daemon/supervisor/runners.rs`.
+
+**Détection** (`runners.list`), dans la racine du worktree de la session (comme `files.*` : racine git du `cwd`, sinon le `cwd`) et dans ses sous-dossiers directs (64 au plus ; ni cachés, ni `node_modules`, `target`, `vendor`, `dist`, `build`, `out`, `venv`, `__pycache__`). Les fichiers sont lus sous la racine avec les garanties de `files.read` (liens qui en sortent refusés, jamais `.git`), 1 Mio au plus, **jamais exécutés** ; un fichier illisible ou invalide est ignoré sans erreur. 200 runners au plus.
+
+| Source | Runners | Commande |
+|---|---|---|
+| `package.json` | un par script (hors scripts du cycle de vie de npm : `install`, `prepare`, `postinstall`…, et crochets `pre<x>`/`post<x>` d'un script `<x>` existant) | `<gestionnaire> run <nom>` ; gestionnaire d'après le verrou du dossier puis de la racine (`pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn, `bun.lockb`/`bun.lock` → bun, `package-lock.json`/`npm-shrinkwrap.json` → npm), sinon `packageManager`, sinon npm |
+| `GNUmakefile`, `makefile`, `Makefile` (le premier, comme `make`) | cibles explicites de **ce** fichier : sans suivre `include`, hors recettes, blocs `define`, affectations, cibles spéciales (`.PHONY`…), motifs (`%`), variables (`$`), chemins (`/`), fichiers (`.` sauf si déclarée `.PHONY`) | `make <cible>` |
+| `justfile`, `Justfile`, `.justfile`, `JUSTFILE` (le premier) | recettes publiques (ni `_…` ni `[private]`) **sans paramètre requis** (valeur par défaut ou `*variadique` acceptés ; `+variadique` ou paramètre nu : écartée) | `just <recette>` |
+| `Cargo.toml` | paquet avec binaire (`src/main.rs`, `src/bin/`, `[[bin]]`) : `cargo run` ; paquet seul : `cargo test`, `cargo build` ; workspace : `cargo test --workspace`, `cargo build --workspace`, et `cargo run -p <nom>` par membre qui a un binaire (membres littéraux et motifs `dossier/*`, `exclude` respecté, 64 au plus ; autres motifs ignorés) | — |
+| `go.mod` | `go run .` (si un `.go` hors tests du dossier est `package main`), `go test ./...`, `go build ./...` | — |
+| `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml` (le premier) | `docker compose -f <fichier> up` | — |
+| `pyproject.toml` | `[project.scripts]` lancés par l'outil du verrou (`uv.lock` → `uv run`, `poetry.lock` ou `[tool.poetry]` → `poetry run`, `pdm.lock` ou `[tool.pdm]` → `pdm run`), `[tool.poetry.scripts]` (poetry), `[tool.pdm.scripts]` (pdm). Sans outil identifiable : rien (un `uv run` écrirait un verrou dans le dépôt) | `<outil> run <nom>` |
+
+Un nom (script, cible, recette, membre) qui commence par `-`, contient un blanc ou un caractère de contrôle, ou dépasse 200 octets est écarté : il devient toujours un argument, jamais une option. Type (`kind`) d'après le nom (premier mot avant `:`, `-`, `_`, `.`) : `dev`/`start`/`serve`/`watch`/`preview`… → `dev`, `test`/`e2e`/`spec`/`coverage`… → `test`, `build`/`compile`/`bundle`… → `build`, `lint`/`fmt`/`format`/`check`/`typecheck`… → `lint`, sinon `other` ; `cargo run`, `go run`, `docker compose up` → `dev`.
+
+**`runners.start {id, runner_id, cols?, rows?}`** (120×30 par défaut) :
+
+- session inconnue `-32001`, dossier disparu `-32016`, worktree en cours de suppression `-32019`, démon qui s'arrête `-32002` ;
+- `runner_id` absent de la détection actuelle : `-32024` ; même runner déjà vivant pour cette session : `-32002` ; 8 runners vivants pour la session : `-32025` ;
+- programme (`npm`, `make`…) introuvable dans le `PATH` du démon, aucun port libre, échec du PTY : `-32004`.
+- Lancement dans un PTY du démon, dossier = racine du worktree + `cwd` du runner, dans un scope systemd utilisateur `devmaestro-runner-<id8 session>-<id8 processus>.scope` quand les sessions en ont un (§ 9). Environnement : celui du démon **sans** `ORCH_*`, `DEVMAESTRO_*`, `CLAUDE_CONFIG_DIR` ni les marqueurs de session Claude Code (§ 9, § 10) ; plus `PORT`, `HOST=127.0.0.1`, `TERM=xterm-256color`, `COLORTERM=truecolor`. Les réglages de l'utilisateur (`ANTHROPIC_*`, mandataires…) sont gardés.
+- **`PORT`** : un par worktree, partagé par ses runners, dans 41 000–41 999. Port préféré dérivé du chemin du worktree (le même d'un démarrage du démon à l'autre), gardé tant que le worktree existe (libéré par `worktrees.remove`). À chaque lancement, s'il n'est tenu par aucun runner vivant du worktree, il est sondé (`bind` sans `listen` sur `127.0.0.1` et `::1`, `SO_REUSEADDR`) ; pris par un autre programme : le suivant libre de la plage (en bouclant), jamais celui d'un autre worktree. Entre la sonde et l'écoute du runner, un autre programme peut le prendre (accepté).
+- Relancer un runner terminé remplace son ancien processus dans `running`.
+
+**`runners.stop {id?, process_id}`** : `SIGTERM` au groupe de processus, `SIGKILL` au bout de 3 s s'il tourne encore ; réponse immédiate `{stopping: true, alive: true}` (déjà terminé : `{stopping: false, alive: false}`), la fin arrive par `runners.changed`. Un processus qui sort seul : `SIGHUP` aux restes de son groupe (comme une session), `SIGKILL` 3 s plus tard.
+
+`id` (la session) est facultatif pour `runners.stop`, `runners.subscribe`, `runners.resize` ; donné, le processus doit appartenir à cette session (`-32026` sinon).
+
+**Durée de vie** : un runner survit à la fermeture de l'app et à l'arrêt de sa session (sauf `sessions.stop {stop_runners: true}`) ; il s'arrête avec `sessions.forget` de sa session (retiré de la liste), avec `worktrees.remove` de son worktree (toutes sessions : `SIGTERM`, `SIGKILL` après 3 s, la suppression attend leur fin, 5 s au plus) et avec le démon (§ 9). Par session, au plus 8 vivants et 16 terminés gardés (les plus anciens partent).
+
+**URL** : la sortie est lue par lignes (fin `\n` ou `\r`, 4 Kio au plus par ligne) après retrait des séquences ANSI (CSI, OSC dont les liens OSC 8, DCS…, même coupées entre deux lectures). Sont repérés `localhost`, `127.0.0.1`, `[::1]` suivis de `:port` (1–65535), avec ou sans `http(s)://` (sans schéma : `http`), avec leur chemin ; `0.0.0.0` et `[::]` sont publiés en `127.0.0.1` et `[::1]`. Pas de chemin : `/`. Dédoublonnées, dans l'ordre d'apparition, 16 au plus, publiées dans `urls` (notification `runners.changed`).
+
+Exemple : `{"id": "…", "runner_id": "package.json:dev"}` → `{"process_id": "…", "runner_id": "package.json:dev", "session_id": "…", "label": "dev", "kind": "dev", "command": ["pnpm", "run", "dev"], "cwd": "", "port": 41372, "started_at": "…", "ended_at": null, "state": "running", "exit_code": null, "signal": null, "urls": []}`.
+
 ### Changer de mode (`sessions.setMode`)
 
 **Contournement** : Claude Code n'a pas d'API pour changer le mode d'une session en cours. Le démon écrit dans le PTY autant de Shift+Tab (`ESC [ Z`) qu'il en faut pour aller du mode courant connu (champ `mode` de la session : dernier `permission_mode` reçu dans un hook, ou dernier mode lu dans le pied de la TUI, voir plus bas) au mode visé, le long du cycle relevé avec **Claude Code 2.1.303** (prototype n° 1, Q9) : `default` (`manual`) → `acceptEdits` → `plan` → `auto` → `default`.
@@ -650,6 +696,8 @@ Trois appels : `gh pr view <n> --repo … --json <champs de la liste>,body` ; `g
 | `session.removed` | `{id}` | la session a été oubliée (`sessions.forget`) : elle n'existe plus ; aucun `session.updated` ne suit pour elle |
 | `project.worktrees_changed` | `{root}` | les worktrees du projet de racine `root` ont changé : création ou suppression par le démon (aussitôt), ou `dirty` / `integrated` (ou la liste) d'un worktree changé. Recalcul 2 s après la fin d'une session du dépôt, chaque `Stop` / `StopFailure` d'une session du dépôt, et toutes les 60 s pour les projets qui ont des sessions vivantes ou des worktrees non principaux au dernier calcul (au démarrage : ceux où le démon a créé un worktree) ; un seul calcul à la fois par projet (une demande pendant un calcul en relance un seul après). Le premier calcul d'un projet (ou un `worktrees.list`, s'il n'y a pas encore de référence) sert de référence sans notifier : le changement suivant est notifié. Relire `worktrees.list` |
 | `conversation.changed` | `{id, upserts: [Entrée], segment_started?}` | des entrées de la conversation ont été ajoutées ou complétées (seulement pour les conversations lues par la connexion ; § 4, « Vue conversation ») |
+| `runners.changed` | `{id, running: [RunnerProcess]}` | les processus de runners de la session `id` ont changé : lancement, URL repérée, fin, retrait (liste relue au moment d'envoyer, regroupée pour un client lent ; même forme que `running` de `runners.list`) |
+| `runners.resync` | `{process_id, snapshot: Écran}` | un abonné à un runner a pris trop de retard (§ 6) |
 | `session.subagents_changed` | `{id, agents: [Sous-agent sans report]}` | un sous-agent a été créé ou a changé de statut (ou d'un autre champ) ; compteurs d'outils : au plus une fois toutes les 500 ms par session (§ 4, « Sous-agents ») |
 
 Pour un client lent, les `session.updated` en attente d'une même session sont **regroupés** : il reçoit l'état le plus récent au moment de l'envoi, pas chaque étape. Les `session.effect` ne sont pas regroupés ; si plus de 4 096 événements attendent (ou si le client a pris trop de retard sur le démon), la file est remplacée par un `session.removed` pour chacune des dernières sessions oubliées (jusqu'à 1 024, éventuellement déjà connues du client : à ignorer si l'`id` est inconnu) puis un `session.updated` par session, et les effets en trop sont perdus. Le dernier `session.updated` reçu fait toujours foi.
@@ -698,6 +746,7 @@ Règles :
 - Un nouvel abonnement à la même session sur la même connexion remplace le précédent (nouvel instantané).
 - L'abonnement survit à l'arrêt et à la reprise de la session.
 - `sessions.resize` redimensionne le PTY (le processus reçoit `SIGWINCH`) et l'émulateur. Avec plusieurs clients, la dernière taille demandée l'emporte.
+- **Runners** (v0.3, lot 14a) : même mécanique, avec l'UUID du **processus** (`process_id`) dans les trames `0x02` et `0x03` ; `runners.subscribe` répond `{process_id, snapshot, history?}` (avec `cols`/`rows`, le terminal et le PTY sont d'abord redimensionnés) ; un abonné en retard reçoit `runners.resync {process_id, snapshot}`. Le terminal d'un runner terminé reste lisible tant que le processus est dans `running`. Une entrée pour un runner terminé est ignorée.
 - Entrées : trames `0x03`, écrites dans l'ordre, **sans perte** : la file d'écriture d'une session est bornée (256 trames) ; quand elle est pleine, le démon cesse de lire la connexion qui écrit jusqu'à ce que `claude` ait consommé (contre-pression sur ce seul client : le PTY, les autres clients et les relais ne sont pas ralentis ; les requêtes de ce client attendent derrière ses entrées). Une entrée pour une session qui ne tourne pas est ignorée. Textes multi-lignes : les encadrer en *bracketed paste* (`ESC[200~ … ESC[201~`), voir architecture § 9.
 
 ## 7. Objets
@@ -737,9 +786,38 @@ Règles :
   "resume_blocker": null | "transcript_missing" | "cwd_missing",
   "scope": "devmaestro-session-1a2b3c4d-5e6f7a8b.scope" | null,   // scope systemd (§ 9)
   "last_exit": {"code": 0} | {"signal": "Hangup"} | null,
-  "size": {"cols": 100, "rows": 30}
+  "size": {"cols": 100, "rows": 30},
+  "runners_running": 0                  // runners vivants de la session (v0.3, lot 14a)
 }
 ```
+
+`runners_running` change à chaque lancement ou fin d'un runner de la session (`session.updated`).
+
+### Runner, RunnerProcess (v0.3, lot 14a)
+
+```json
+Runner: {
+  "id": "app/package.json:dev",       // identifiant stable : la source
+  "label": "dev",                      // nom du script, de la cible, de la recette, ou la commande (cargo, go, compose)
+  "kind": "dev" | "test" | "build" | "lint" | "other",
+  "command": ["pnpm", "run", "dev"],   // argv construit par le démon
+  "cwd": "app",                        // relatif à la racine du worktree, "" pour la racine
+  "source": "app/package.json:dev"     // fichier:clé
+}
+RunnerProcess: {
+  "process_id": "uuid",                // identifiant de l'exécution (trames 0x02/0x03)
+  "runner_id": "app/package.json:dev", "session_id": "uuid",
+  "label": "dev", "kind": "dev", "command": ["pnpm", "run", "dev"], "cwd": "app",
+  "port": 41372,                       // PORT du worktree
+  "started_at": "RFC 3339", "ended_at": "RFC 3339" | null,
+  "state": "running" | "exited",
+  "exit_code": 0 | null,               // null tant qu'il tourne, ou tué par un signal
+  "signal": "Terminated" | null,       // signal qui l'a tué
+  "urls": ["http://localhost:41372/"]
+}
+```
+
+Clés de `Runner.id` : nom du script / de la cible / de la recette ; `run`, `test`, `build`, `run:<membre>` (Cargo) ; `run`, `test`, `build` (Go) ; `up` (compose).
 
 Tout champ peut être `null` quand la donnée est inconnue (principe 4).
 
@@ -907,6 +985,7 @@ Fichiers générés (au démarrage du démon et avant chaque lancement) :
 - Les sessions sont enregistrées dans `$XDG_DATA_HOME/devmaestro/state.db` (SQLite, WAL, `synchronous=NORMAL`) : identifiants, profil, dossiers, branche, modèle, mode, statut, dates, pid, (schéma v2) date de démarrage du processus et scope systemd, (schéma v3) titre, couleur, premier prompt et dernier `session_name` de la statusline, (schéma v4) la table `hidden_transcripts (profile, claude_session_id, hidden_at)` des transcripts masqués, (schéma v6) la colonne `project_common_dir` des sessions et la table `worktrees (path, common_dir, project_root, branch, base, created_branch, start_sha, created_at)` des worktrees créés par le démon (ligne retirée par `worktrees.remove` ou à l'annulation d'une création), (schéma v7) les colonnes `issue_number`, `issue_title`, `issue_url` des sessions (issue liée au lancement, § 4 « Forge » ; une ligne incomplète ou invalide est relue sans issue), et (schéma v5) la table `subagents` (clé `(session, agent_id)`, ordre de lancement `seq`, champs de l'objet `Sous-agent` dont le rapport) : au plus les **100** derniers par session, écrits à chaque création ou changement de statut ou de champ ; les **compteurs d'outils** (`tool_count`, `current_tool`, `last_tool`) ne sont écrits qu'avec ces changements (après un plantage du démon, ils peuvent donc être en retard). Le plafond suit la même règle en mémoire et en base : les plus anciens finis partent d'abord, jamais un `running` ; un sous-agent oublié en mémoire est retiré de la base. Supprimés avec la session (`sessions.forget`). Au démarrage du démon, les sous-agents restés `running` sont relus `interrupted`, avec `ended_at` = dernière activité de la session (ou l'instant de la relecture). Au redémarrage après un plantage, les processus `claude` relus dont des processus vivent encore (eux-mêmes, ou d'autres dans leur groupe ou leur session) restent refusés au socket de contrôle (§ 10). Écriture à chaque changement de statut ou de champ ; une session qui ne change que par sa dernière activité est réécrite au plus toutes les 30 s. Le schéma est versionné (`PRAGMA user_version`, migrations pas à pas) : une base d'une version plus récente est refusée (le démon ne démarre pas, message en français) ; une base illisible ou corrompue est renommée `state.db.corrupt-<horodatage>` et remplacée par une base vide (avertissement au journal).
 - Droits : dossiers `$XDG_RUNTIME_DIR/devmaestro`, `$XDG_DATA_HOME/devmaestro` et `$XDG_STATE_HOME/devmaestro` en 0700 (refusés s'ils sont un lien symbolique ou appartiennent à un autre utilisateur), base, journal, plugin et réglages en 0600.
 - **Arrêter le démon termine les sessions** : `SIGTERM`, `SIGINT` ou `SIGHUP` → `SIGHUP` à chaque session (le socket reste ouvert pour recevoir les `SessionEnd`), `SIGKILL` au bout de 3 s, puis fin. Un second signal pendant cet arrêt envoie `SIGKILL` à toutes les sessions et sort aussitôt. Les sessions restent reprenables. Après un plantage du démon, les sessions qui étaient en démarrage, en cours, à répondre ou inactives sont relues arrêtées (`daemon_restart`) ; celles déjà arrêtées ou en erreur sont relues telles quelles (statut et date inchangés).
+- **Runners** (v0.3, lot 14a) : **non persistés**. Leurs processus ne survivent pas au démon (arrêt : `SIGTERM` à chaque runner avec le `SIGHUP` des sessions, puis `SIGKILL` après 3 s ; plantage : la fermeture de leur PTY leur envoie `SIGHUP`) : un démon qui redémarre n'a aucun runner, `running` est vide. Le port d'un worktree, dérivé de son chemin, reste en général le même. Limite : un runner qui ignore `SIGHUP` survit à un plantage du démon, hors de toute liste ; avec un scope systemd, ses processus restent refusés au socket de contrôle (§ 10).
 - Journal : sortie d'erreur et `$XDG_STATE_HOME/devmaestro/orchd.log`.
 - Réglages du démon (facultatifs, jamais écrits par lui) : `$XDG_CONFIG_HOME/devmaestro/config.toml` (repli `~/.config/devmaestro/config.toml`), lu **une fois au démarrage** : un changement demande de redémarrer le démon (l'app le fera après avoir changé le réglage). Clés : `allow_dangerous_modes = true | false` (faux par défaut) : autorise `bypassPermissions` et `dontAsk` au lancement, à la reprise et par `sessions.setMode` ; et `[quotas]` `usage_api = true | false` (vrai par défaut) : interroger l'API d'usage de Claude Code (non documentée, voir « Quotas » ci-dessous), `false` pour ne lire les quotas que dans les statuslines. Fichier absent, illisible ou invalide : valeurs par défaut (avertissement au journal). L'app l'exposera plus tard comme un réglage explicite.
 
@@ -953,12 +1032,13 @@ Par profil, deux sources ; **chaque fenêtre** (`five_hour`, `seven_day`) garde 
 - **Deux sockets** : `claude` ne reçoit que le chemin de `relay.sock`, qui n'accepte que des trames de hook et de statusline.
 - **Socket de contrôle, pair refusé** (contrôles faits à chaque connexion, dans l'ordre) :
   1. uid différent de celui du démon, ou pair non identifiable (`SO_PEERCRED`) ;
-  2. pair dans un **scope systemd de session** (`/proc/<pid>/cgroup` contient `devmaestro-session-…scope`). L'appartenance à un cgroup survit à `setsid`, aux doubles forks et au rattachement à `init` : en sortir demande un appel **délibéré** à `systemd-run` (ou l'écriture dans un autre cgroup de l'utilisateur). Seulement quand les sessions sont lancées dans un scope (§ 9) ;
+  2. pair dans un **scope systemd de session ou de runner** (`/proc/<pid>/cgroup` contient `devmaestro-session-…scope` ou `devmaestro-runner-…scope`). L'appartenance à un cgroup survit à `setsid`, aux doubles forks et au rattachement à `init` : en sortir demande un appel **délibéré** à `systemd-run` (ou l'écriture dans un autre cgroup de l'utilisateur). Seulement quand les sessions sont lancées dans un scope (§ 9) ;
   3. `ORCH_TOKEN=` ou `ORCH_SESSION=` dans l'environnement du pair (`/proc/<pid>/environ`) : un descendant qui n'a pas nettoyé son environnement. Un environnement illisible ne fait pas refuser (un processus peut aussi simplement retirer ces variables) ;
   4. pair = processus `claude` supervisé, actuel, passé, ou relu en base après un plantage du démon, ou l'un de ses descendants : chaîne des parents remontée dans `/proc`, et à chaque étape groupe et session comparés à ceux des sessions (lancées par `setsid` : pid = groupe = session). Les processus supervisés sont identifiés par leur date de démarrage : un pid réattribué depuis ne fait pas refuser un client légitime ; une date inconnue ne correspond à rien. Un processus supervisé disparu, dont plus aucun processus ne vit dans son groupe ni sa session, est oublié.
   
   Le pair est épinglé par `SO_PEERPIDFD` (noyau 6.5 et plus) : après les lectures de `/proc`, le démon vérifie que ce processus vit toujours (son pid n'a donc pas été réattribué entre l'acceptation et la fin des contrôles). Sans pidfd, la date de démarrage du pid est relue et comparée.
 - **Socket des relais** : une trame n'est acceptée que si son jeton désigne une session vivante **et** si le pair descend du processus `claude` de cette session (ou partage son scope systemd). Un processus d'une session ne peut donc rien envoyer pour une **autre** session. En revanche, un processus d'une session connaît le jeton de **sa** session et peut forger des événements pour elle (une fausse demande, une fausse fin de tour) : l'app affiche toujours le contenu exact de la demande, et « Toujours » ne reprend que les suggestions de la **première** trame d'une demande, seulement des règles qui correspondent à l'outil et à l'entrée de la demande (`toolName` égal ; pour `Bash`, `ruleContent` obligatoire, égal à la commande ou préfixe `…:*` qu'elle prolonge ; pour les outils de fichiers, `ruleContent` obligatoire, égal au chemin ou `<dossier absolu>/**` qui le contient).
+- **Runners** (v0.3, lot 14a) : du code du dépôt, aussi peu sûr qu'une commande Bash d'une session. Le démon n'exécute que les commandes construites par sa propre détection (jamais une commande venue de l'interface, `-32024`), sans shell ; leur processus est supervisé comme `claude` (ses descendants sont refusés au socket de contrôle) et lancé dans son propre scope `devmaestro-runner-…scope` (refusé lui aussi) ; il ne reçoit ni `ORCH_*` ni le chemin d'un socket. Lancer un runner exécute du code du dépôt sur la machine : l'app demande une confirmation la première fois par worktree.
 - **Environnement de `claude`** : les variables `ORCH_*` et `DEVMAESTRO_*` héritées sont retirées, ainsi que les marqueurs de session Claude Code (§ 8), dont le jeton de messagerie d'une session parente (`CLAUDE_CODE_MESSAGING_TOKEN`).
 - **Modes qui suppriment les demandes** (`bypassPermissions`, `dontAsk`) : réglage explicite du démon (§ 9), y compris quand ils viennent d'un `defaultMode` du projet ou du profil ; `bypassPermissions` verrouillé dans les réglages passés à `claude` ; passage détecté et signalé (`dangerous_mode_detected`).
 - **Transcripts** (vue conversation) : le démon ne lit que ceux des sessions qu'il connaît, résolus sous `<dossier du profil>/projects/` ; leur contenu ne va qu'aux clients du socket de contrôle et n'est jamais journalisé (§ 4, « Vue conversation »).
