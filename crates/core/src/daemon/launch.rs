@@ -16,8 +16,19 @@
 //!   `DEVMAESTRO_*` héritées du démon sont retirées.
 //! - Si un gestionnaire systemd utilisateur répond, `claude` est lancé dans
 //!   un scope transitoire : `systemd-run --user --scope --quiet --collect
-//!   --unit=devmaestro-session-<id>.scope -- claude …` ; le socket de
+//!   --unit=devmaestro-session-<id>-<jeton>.scope -- claude …` (de même
+//!   `devmaestro-runner-<id>-<processus>.scope` pour un runner, voir
+//!   [`build_runner`]) ; le nom est unique par exécution. Le socket de
 //!   contrôle refuse tout processus de ce cgroup (voir [`super::peer`]).
+//!   systemd 259 peut garder une unité **vide** « active (running) » que
+//!   `--collect` ne ramasse jamais, quand `systemd-run` est tué pendant
+//!   l'enregistrement du scope, et peut créer l'unité juste après la
+//!   récolte du processus : le fil d'attente libère donc le scope après la
+//!   récolte, seulement s'il est vide, en deux essais (aussitôt, puis
+//!   1,5 s plus tard). Un scope encore peuplé (processus détachés lancés par
+//!   la session) n'est pas touché. Rien n'est libéré si le démon s'arrête
+//!   (tué, ou arrêt normal avant la fin des deux essais). Détails :
+//!   [`super::scope`].
 //! - `--plugin-dir` et `--settings` sont repassés à chaque reprise : Claude
 //!   Code ne les restaure pas.
 //! - Le prompt initial vient en dernier, après `--` : `claude` analyse ses

@@ -17,6 +17,7 @@ pub mod claude_config;
 pub mod launch;
 pub(crate) mod log;
 pub mod peer;
+pub mod scope;
 pub mod server;
 pub mod settings;
 pub mod supervisor;
@@ -47,10 +48,15 @@ pub fn default_config(paths: Paths) -> Result<Config, String> {
     let orchd_exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map_err(|e| format!("chemin du binaire orchd introuvable : {e}"))?;
+    let path_env = std::env::var_os("PATH");
+    let systemd_run = detect_systemd_scope();
+    let systemctl = systemd_run
+        .as_deref()
+        .and_then(|bin| find_systemctl(bin, path_env.as_deref()));
     Ok(Config {
         orchd_exe,
         claude_bin_env: std::env::var_os("DEVMAESTRO_CLAUDE_BIN"),
-        path_env: std::env::var_os("PATH"),
+        path_env,
         exit_grace: Duration::from_millis(500),
         stop_timeout: stop_timeout(),
         // Réglage réservé aux tests : jamais transmis aux processus `claude`.
@@ -62,7 +68,8 @@ pub fn default_config(paths: Paths) -> Result<Config, String> {
         allow_dangerous_modes: settings.allow_dangerous_modes,
         usage_api: settings.usage_api,
         quota_min_interval: quota_min_interval(),
-        systemd_run: detect_systemd_scope(),
+        systemd_run,
+        systemctl,
         systemd_runtime_dir: std::env::var_os("DEVMAESTRO_SYSTEMD_RUNTIME_DIR"),
         initial_prompt_timeout: initial_prompt_timeout(),
         ci_poll_interval: ci_poll_interval(),
@@ -154,6 +161,20 @@ fn initial_prompt_timeout() -> Duration {
         return Duration::from_millis(ms);
     }
     supervisor::forge::INITIAL_PROMPT_TIMEOUT
+}
+
+/// `systemctl` à utiliser avec `systemd_run` : son voisin (même
+/// installation de systemd, et faux binaires des tests), sinon le premier
+/// du `PATH`.
+pub fn find_systemctl(
+    systemd_run: &std::path::Path,
+    path: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    systemd_run
+        .parent()
+        .map(|d| d.join("systemctl"))
+        .filter(|p| launch::is_executable(p))
+        .or_else(|| launch::find_in_path("systemctl", path))
 }
 
 /// `systemd-run`, si `DEVMAESTRO_SYSTEMD_SCOPE` ne vaut pas `off` et qu'un

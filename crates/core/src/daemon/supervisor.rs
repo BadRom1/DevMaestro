@@ -32,6 +32,7 @@ use super::claude_config;
 use super::launch::{self, LaunchKind, LaunchSpec, ScopeSpec};
 use super::log::{error, info, warning};
 use super::peer::{self, Peer, Supervised, SupervisedProc};
+use super::scope::ScopeRelease;
 use super::terminal::{Chunk, RESUME_RESET, Snapshot, Terminal};
 use crate::domain::decision::{self, AnswerError, PermissionAnswer};
 use crate::domain::{
@@ -222,6 +223,11 @@ pub struct Config {
     /// `systemd-run`, si un gestionnaire systemd utilisateur répond au
     /// démarrage : chaque session est alors lancée dans son propre scope.
     pub systemd_run: Option<PathBuf>,
+    /// `systemctl` voisin de [`Config::systemd_run`] (sinon celui du `PATH`),
+    /// résolu une fois au démarrage, seulement avec `systemd_run` : arrêt des
+    /// scopes de plugins, libération des scopes vides après la récolte d'une
+    /// session ou d'un runner (voir [`super::scope`]).
+    pub systemctl: Option<PathBuf>,
     /// `DEVMAESTRO_SYSTEMD_RUNTIME_DIR` : `XDG_RUNTIME_DIR` à donner à
     /// `systemd-run` (tests, dont le dossier runtime est temporaire).
     pub systemd_runtime_dir: Option<OsString>,
@@ -3528,6 +3534,7 @@ impl Daemon {
         let exited_slot = exited.clone();
         let mut child = spawned.child;
         let daemon = Arc::clone(self);
+        let release = ScopeRelease::new(&self.config, scope.as_deref());
         spawn_thread(&format!("pty-attente-{run_id}"), move || {
             let status = child.wait().unwrap_or(ExitStatus::Code(-1));
             // Les descendants restés dans le groupe (outils lancés par claude)
@@ -3538,6 +3545,11 @@ impl Daemon {
             *exited_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(status.clone());
             let rt = daemon.runtime.clone();
             rt.spawn(async move { daemon.on_exit(id, run_id).await });
+            // Après la sortie transmise : le statut n'attend pas (voir
+            // `super::scope`).
+            if let Some(release) = release {
+                release.run();
+            }
         });
 
         Ok((

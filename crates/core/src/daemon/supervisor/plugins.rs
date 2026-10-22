@@ -633,19 +633,17 @@ impl Daemon {
             self.plugin_seq.fetch_add(1, Ordering::SeqCst) + 1,
             &Uuid::new_v4().simple().to_string()[..8]
         );
-        let scope = self.config.systemd_run.as_ref().and_then(|systemd_run| {
-            let systemctl = systemd_run
-                .parent()
-                .map(|d| d.join("systemctl"))
-                .filter(|p| launch::is_executable(p))
-                .or_else(|| launch::find_in_path("systemctl", self.config.path_env.as_deref()))?;
-            Some(PluginScope {
-                systemd_run: systemd_run.clone(),
+        let scope = self
+            .config
+            .systemd_run
+            .clone()
+            .zip(self.config.systemctl.clone())
+            .map(|(systemd_run, systemctl)| PluginScope {
+                systemd_run,
                 systemctl,
                 unit: format!("{}{}-{n}.scope", peer::PLUGIN_SCOPE_PREFIX, l.name),
                 runtime_dir: self.config.systemd_runtime_dir.clone(),
-            })
-        });
+            });
         let generation = {
             let mut i = slot.inner();
             i.generation += 1;

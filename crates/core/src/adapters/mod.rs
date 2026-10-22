@@ -13,6 +13,7 @@ pub mod plugin_process;
 pub mod profiles;
 pub mod pty;
 pub mod sqlite;
+pub mod systemctl;
 pub mod transcript_follow;
 pub mod transcripts;
 pub mod usage_api;

@@ -35,6 +35,7 @@ use super::{
 use crate::daemon::launch::{self, RunnerSpec, ScopeSpec};
 use crate::daemon::log::{info, warning};
 use crate::daemon::peer::{self, SupervisedProc};
+use crate::daemon::scope::ScopeRelease;
 use crate::daemon::terminal::Terminal;
 use crate::domain::files::EntryKind;
 use crate::domain::runners::{
@@ -623,6 +624,7 @@ impl Daemon {
 
         let mut child = spawned.child;
         let daemon = Arc::clone(self);
+        let release = ScopeRelease::new(&self.config, scope.as_deref());
         spawn_thread(
             &format!("runner-attente-{}", &process_id.simple().to_string()[..8]),
             move || {
@@ -639,6 +641,12 @@ impl Daemon {
                     });
                 }
                 daemon.on_runner_exit(&process_id, status);
+                // Après la sortie transmise, sans garder le démon (voir
+                // `crate::daemon::scope`).
+                drop(daemon);
+                if let Some(release) = release {
+                    release.run();
+                }
             },
         );
 

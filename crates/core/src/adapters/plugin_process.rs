@@ -15,10 +15,12 @@
 //! processus propre, scope `systemd-run --user --scope` si demandé.
 //! Arrêt ([`PluginProcess::stop`]) : `shutdown` poli (1 s), fermeture de
 //! stdin, `systemctl --user kill --signal=SIGTERM` au scope, 1 s,
-//! `--signal=SIGKILL` (jamais `systemctl stop`, qui attend 90 s), `SIGKILL`
-//! au groupe, attente de la fin. Le groupe n'est signalé que si son
-//! identifiant ne peut pas avoir été réattribué (chef pas encore récolté,
-//! ou membres encore vivants) : voir `Proc::signal_group`. Le scope est tué même si le processus
+//! `--signal=SIGKILL` (jamais `systemctl stop` ici : sur un scope encore
+//! peuplé, il attend `TimeoutStopSec`, 90 s ; sur un scope vide, il est
+//! immédiat, voir `daemon::scope`), `SIGKILL` au groupe, attente de la
+//! fin. Le groupe n'est signalé que si son identifiant ne peut pas avoir
+//! été réattribué (chef pas encore récolté, ou membres encore vivants) :
+//! voir `Proc::signal_group`. Le scope est tué même si le processus
 //! principal est sorti seul (petits-enfants détachés).
 
 use std::collections::VecDeque;
@@ -32,6 +34,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use super::systemctl::systemctl_bounded;
 use crate::domain::plugins::{
     MAX_LINE_BYTES, MAX_NOTIFICATIONS, STDERR_TAIL_BYTES, clean_stderr_tail,
 };
@@ -43,8 +46,6 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 pub const TERM_GRACE: Duration = Duration::from_secs(1);
 /// Attente maximale de la fin après `SIGKILL`.
 const KILL_WAIT: Duration = Duration::from_secs(3);
-/// Délai d'un appel à `systemctl`.
-const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(3);
 /// Messages lus d'avance au plus (file bornée entre le lecteur et l'hôte).
 const LINE_QUEUE: usize = 64;
 
@@ -156,29 +157,11 @@ fn drain_stderr(mut stderr: impl Read, tail: Arc<Mutex<VecDeque<u8>>>) {
 /// `systemctl --user kill --signal=<sig> <unité>`, borné ; erreurs ignorées
 /// (scope déjà récolté).
 fn kill_scope(scope: &PluginScope, signal: &str) {
-    let mut cmd = Command::new(&scope.systemctl);
-    cmd.args(["--user", "kill", &format!("--signal={signal}"), &scope.unit])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Some(dir) = &scope.runtime_dir {
-        cmd.env("XDG_RUNTIME_DIR", dir);
-    }
-    let Ok(mut child) = cmd.spawn() else {
-        return;
-    };
-    let deadline = Instant::now() + SYSTEMCTL_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return;
-            }
-        }
-    }
+    let _ = systemctl_bounded(
+        &scope.systemctl,
+        scope.runtime_dir.as_deref(),
+        &["kill", &format!("--signal={signal}"), &scope.unit],
+    );
 }
 
 fn killpg(pid: u32, sig: nix::sys::signal::Signal) {
