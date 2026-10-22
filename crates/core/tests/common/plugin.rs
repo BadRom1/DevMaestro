@@ -179,18 +179,21 @@ pub fn systemd_scope_available() -> bool {
 }
 
 /// Écrit un plugin factice `name` dans `plugins_dir` : `fake_plugin.py` et
-/// `plugin.json` (`mode` en argument de la commande). `extra` est fusionné
+/// `plugin.json` (`mode` en argument de la commande). Le script est donné
+/// par son chemin absolu : la commande, Description du scope systemd, porte
+/// ainsi la racine de l'`Env` (filet de `Drop for Env`). `extra` est fusionné
 /// dans le manifeste (champs de premier niveau). Rend son dossier.
 pub fn write_plugin(plugins_dir: &Path, name: &str, mode: &str, extra: Value) -> PathBuf {
     let dir = plugins_dir.join(name);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("fake_plugin.py"), FAKE_PLUGIN_PY).unwrap();
+    let script = dir.join("fake_plugin.py");
+    std::fs::write(&script, FAKE_PLUGIN_PY).unwrap();
     let mut m = json!({
         "api_version": 1,
         "name": name,
         "version": "0.1.0",
         "label": {"fr": "Factice", "en": "Fake"},
-        "command": ["python3", "-I", "fake_plugin.py", mode],
+        "command": ["python3", "-I", script, mode],
         "files": ["fake_plugin.py"],
         "permissions": [],
         "contributes": {

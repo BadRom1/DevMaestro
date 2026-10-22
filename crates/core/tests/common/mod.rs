@@ -54,6 +54,9 @@ pub struct Env {
     _root: tempfile::TempDir,
     // Le socket doit tenir dans sun_path (108 octets) : dossier court dans /tmp.
     _run: tempfile::TempDir,
+    /// Dossier racine canonique (`home`, `data`, `state`, `projet`…) : il
+    /// figure dans la commande de chaque scope lancé par le démon du test.
+    pub root: PathBuf,
     pub home: PathBuf,
     pub run: PathBuf,
     pub data: PathBuf,
@@ -73,6 +76,9 @@ pub struct Env {
     pub usage_api_url: String,
     /// Variables supplémentaires du démon (tests seulement).
     pub extra_env: Vec<(String, String)>,
+    /// Un démon a été lancé par cet `Env` (`command(&["daemon", …])`) : sans
+    /// lui, aucun scope à chercher dans `Drop`.
+    daemon_started: std::cell::Cell<bool>,
 }
 
 impl Env {
@@ -107,7 +113,9 @@ impl Env {
             systemd_scope: true,
             usage_api_url: "http://127.0.0.1:1/api/oauth/usage".into(),
             extra_env: Vec::new(),
+            daemon_started: std::cell::Cell::new(false),
             proj,
+            root: r,
             _root: root,
             _run: run,
         }
@@ -122,6 +130,11 @@ impl Env {
     }
 
     pub fn command(&self, args: &[&str]) -> Command {
+        // Posé ici plutôt que dans `start_daemon` : certains tests lancent
+        // le démon directement (`daemon.rs`, seconde instance).
+        if args.first() == Some(&"daemon") {
+            self.daemon_started.set(true);
+        }
         let mut c = Command::new(ORCHD);
         c.args(args)
             .env_clear()
@@ -209,6 +222,125 @@ impl Env {
             .filter(|l| l.get(key).is_some())
             .collect()
     }
+}
+
+/// Filet de sécurité : retire les scopes systemd laissés par le démon du
+/// test. systemd 259 garde « active (running) », sans aucune tâche, l'unité
+/// d'un `systemd-run` tué pendant son enregistrement (démon tué, PTY fermé,
+/// SIGHUP) ; `--collect` ne la ramasse jamais, seul `systemctl stop` la
+/// retire. Ce défaut est inhérent à systemd, pas une faute du test : le
+/// filet retire donc ces scopes sans échouer, et le `panic!` final ne
+/// signale que ceux qu'il n'a pas pu retirer. Le `DaemonProc`, déclaré
+/// après l'`Env`, est déjà détruit.
+impl Drop for Env {
+    fn drop(&mut self) {
+        if !self.systemd_scope || !self.daemon_started.get() {
+            return;
+        }
+        // Une unité n'est retenue que si sa commande contient la racine de
+        // cet `Env` ou son dossier `run` (socket, seul chemin de certains
+        // scopes) ; barre finale : `/tmp/.tmpAB` n'attrape pas `/tmp/.tmpABC`.
+        let markers = [
+            format!("{}/", self.root.display()),
+            format!("{}/", self.run.display()),
+        ];
+        // Un `systemd-run` orphelin peut encore créer son unité : on recommence
+        // jusqu'à deux listages vides de suite (3 s au plus).
+        let start = Instant::now();
+        let mut empty = 0;
+        while empty < 2 && start.elapsed() < Duration::from_secs(3) {
+            let Some(units) = env_scopes(&markers) else {
+                return; // pas de systemctl ni de bus utilisateur
+            };
+            if units.is_empty() {
+                empty += 1;
+            } else {
+                empty = 0;
+                // Kill d'abord : un scope peuplé ferait attendre `stop`
+                // jusqu'à `TimeoutStopSec`.
+                systemctl(&["kill", "--signal=SIGKILL"], &units);
+                systemctl(&["stop"], &units);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let left = env_scopes(&markers).unwrap_or_default();
+        if !left.is_empty() && !std::thread::panicking() {
+            panic!("scopes systemd restés après le test : {left:?}");
+        }
+    }
+}
+
+/// Scopes `devmaestro-{session,runner,plugin}-*` dont la commande (la
+/// Description posée par `systemd-run`) contient l'un des `markers` ;
+/// `None` si `systemctl` ne répond pas.
+fn env_scopes(markers: &[String]) -> Option<Vec<String>> {
+    let is_scope = |id: &str| id.starts_with("devmaestro-") && id.ends_with(".scope");
+    let marked = |text: &str| markers.iter().any(|m| text.contains(m.as_str()));
+    let globs = [
+        "devmaestro-session-*",
+        "devmaestro-runner-*",
+        "devmaestro-plugin-*",
+    ];
+    let list = ["list-units", "--all", "--plain", "--no-legend", "--full"];
+    let listed = systemctl(&list, &globs)?;
+    // Tri grossier sur la ligne (Description complète avec `--full`) : un
+    // `show` sur les ~200 unités de la machine prendrait près d'une seconde.
+    let units: Vec<&str> = listed
+        .lines()
+        .filter(|l| marked(l))
+        .filter_map(|l| l.split_whitespace().find(|w| is_scope(w)))
+        .collect();
+    if units.is_empty() {
+        return Some(Vec::new());
+    }
+    // Confirmation par la Description seule ; une unité disparue entre les
+    // deux appels revient sans Description.
+    let shown = systemctl(&["show", "-p", "Id", "-p", "Description"], &units)?;
+    Some(
+        shown
+            .split("\n\n")
+            .filter(|b| {
+                b.lines()
+                    .any(|l| l.starts_with("Description=") && marked(l))
+            })
+            .filter_map(|b| b.lines().find_map(|l| l.strip_prefix("Id=")))
+            .filter(|id| is_scope(id))
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// `systemctl --user <args> <units>` borné à 5 s : sa sortie standard
+/// (passée par un fichier anonyme, un tube plein bloquerait l'appel), ou
+/// `None` en cas d'échec ou de délai dépassé.
+fn systemctl(args: &[&str], units: &[impl AsRef<std::ffi::OsStr>]) -> Option<String> {
+    use std::io::{Read as _, Seek as _};
+    let mut out = tempfile::tempfile().ok()?;
+    let mut child = Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .args(units)
+        .stdin(Stdio::null())
+        .stdout(out.try_clone().ok()?)
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let mut text = String::new();
+    out.rewind().ok()?;
+    out.read_to_string(&mut text).ok()?;
+    status.success().then_some(text)
 }
 
 /// Démon lancé par le test, tué s'il reste à la fin (même sur panique).

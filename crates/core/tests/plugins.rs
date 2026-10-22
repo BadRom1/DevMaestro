@@ -17,17 +17,17 @@ use uuid::Uuid;
 struct Setup {
     env: Env,
     plugins: PathBuf,
-    _dir: tempfile::TempDir,
 }
 
 fn setup(extra: &[(&str, &str)]) -> Option<Setup> {
     if no_python() {
         return None;
     }
-    let dir = tempfile::tempdir().unwrap();
-    let plugins = dir.path().canonicalize().unwrap().join("plugins");
-    std::fs::create_dir_all(&plugins).unwrap();
     let mut env = Env::new();
+    // Sous la racine de l'`Env` : la commande des scopes `devmaestro-plugin-*`
+    // la contient, et le filet de `Drop for Env` les retrouve.
+    let plugins = env.root.join("plugins");
+    std::fs::create_dir_all(&plugins).unwrap();
     env.extra_env.push((
         "DEVMAESTRO_PLUGINS_DIR".into(),
         plugins.display().to_string(),
@@ -35,11 +35,7 @@ fn setup(extra: &[(&str, &str)]) -> Option<Setup> {
     for (k, v) in extra {
         env.extra_env.push(((*k).into(), (*v).into()));
     }
-    Some(Setup {
-        env,
-        plugins,
-        _dir: dir,
-    })
+    Some(Setup { env, plugins })
 }
 
 fn list(c: &mut Client) -> Value {
@@ -169,7 +165,7 @@ fn list_accept_panel_action_revoke() {
     assert_eq!(f["tab"]["label"]["en"], "Fake");
     assert_eq!(
         f["command"],
-        json!(["python3", "-I", "fake_plugin.py", "normal"])
+        json!(["python3", "-I", dir.join("fake_plugin.py"), "normal"])
     );
     assert_eq!(f["files"], json!(["fake_plugin.py"]));
     assert!(f.get("config").is_none(), "{f}");
@@ -680,7 +676,7 @@ fn slow_plugin(plugins: &Path, name: &str, pidfile: &Path) {
         plugins,
         name,
         "slowinit",
-        json!({"command": ["python3", "-I", "fake_plugin.py", "slowinit", pidfile]}),
+        json!({"command": ["python3", "-I", plugins.join(name).join("fake_plugin.py"), "slowinit", pidfile]}),
     );
 }
 
