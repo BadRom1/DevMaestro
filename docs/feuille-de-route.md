@@ -44,7 +44,9 @@ Livré aujourd'hui, à essayer :
 
 Actifs seulement après redémarrage du démon (arrête les sessions) : forge et CI du 14b, empreinte des runners du 15, reprise depuis le bon dossier, commandes `/` du disque (17), consigne de revue personnalisée (18).
 
-Restent : 13c (presque entièrement couvert par 13a, 13b et 14b : à revoir), 21 dictée, 22 plugins, paquet `.deb`.
+Ajouté ensuite : **paquet `.deb`** (`scripts/paquet-deb.sh`, profil AppArmor, voir `README.Debian`) ; **ADR 0007** et **lot 22a** : hôte de plugins et plugin d'impact CodeGraph (`plugins/codegraph-impact/`, à lier dans `~/.config/devmaestro/plugins/` puis accepter dans Réglages → Plugins) ; scopes systemd vides libérés après la sortie d'une session ou d'un runner ; tests qui ne laissent plus de scopes.
+
+Pause d'essai décidée le 2026-10-22 : Romain utilise l'app quelques jours puis fait ses retours. Restent ensuite : 13c (presque entièrement couvert par 13a, 13b et 14b : à revoir), 21 dictée, suite des plugins (Graphify, API d'équipe).
 
 ## Point de reprise précédent (2026-10-20, soir)
 
